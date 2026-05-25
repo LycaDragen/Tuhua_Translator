@@ -1,0 +1,1619 @@
+/**
+ * IPC Handlers
+ * Registers all secure IPC communication between main and renderer.
+ * All payloads are validated before processing.
+ */
+const { ipcMain, dialog, app, desktopCapturer } = require('electron');
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
+
+const XuatInstaller = require('../services/xuat-installer');
+
+class IpcHandlers {
+  constructor(store, pipeline, glossary, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer) {
+    this.store = store;
+    this.pipeline = pipeline;
+    this.glossary = glossary;
+    this.windowManager = windowManager;
+    this.textractor = textractor;
+    this.clipboardWatcher = clipboardWatcher;
+    this.textractorLauncher = textractorLauncher;
+    this.ocrService = ocrService;
+    this.xuatServer = xuatServer;
+    this.registered = false;
+    // In-memory translation active flag for fast, reliable access
+    this._translationActive = true;
+    // Deduplication state for _handleText
+    this._lastHandledHash = '';
+    this._lastHandledTime = 0;
+    // OCR dedup: persistent hash that doesn't expire — same text from OCR
+    // should NEVER be re-translated until the game screen changes
+    this._lastOcrTextHash = '';
+    // OCR state
+    this._ocrActive = false;
+    this._ocrAutoCapture = false;
+    this._ocrScanPaused = false; // v3.9.6: scan paused from capture area overlay
+  }
+
+  register() {
+    if (this.registered) return;
+    this.registered = true;
+
+    // ===== Settings =====
+    ipcMain.handle('get-settings', () => {
+      const settings = this.store.get() || {};
+      // Migration: convert old dot-notation keys to flat keys
+      // electron-store's set() with dot-notation keys creates nested objects,
+      // but get() with dot-notation reads nested paths — causing mismatch.
+      // We migrate to flat keys (perProfileGlossary, autoApplyGlossary, showSourceTextInOverlay).
+      let migrated = false;
+      if (settings.glossary && typeof settings.glossary === 'object' && !Array.isArray(settings.glossary)) {
+        if (settings.glossary.perProfile !== undefined && settings.perProfileGlossary === undefined) {
+          settings.perProfileGlossary = settings.glossary.perProfile;
+          delete settings.glossary.perProfile;
+          migrated = true;
+        }
+        if (settings.glossary.autoApply !== undefined && settings.autoApplyGlossary === undefined) {
+          settings.autoApplyGlossary = settings.glossary.autoApply;
+          delete settings.glossary.autoApply;
+          migrated = true;
+        }
+        // If glossary object is now empty (no more nested keys), remove it
+        if (Object.keys(settings.glossary).length === 0) {
+          delete settings.glossary;
+          migrated = true;
+        }
+      }
+      // Also check for flat dot-key stored by old code
+      if (settings['glossary.perProfile'] !== undefined && settings.perProfileGlossary === undefined) {
+        settings.perProfileGlossary = settings['glossary.perProfile'];
+        delete settings['glossary.perProfile'];
+        migrated = true;
+      }
+      if (settings['glossary.autoApply'] !== undefined && settings.autoApplyGlossary === undefined) {
+        settings.autoApplyGlossary = settings['glossary.autoApply'];
+        delete settings['glossary.autoApply'];
+        migrated = true;
+      }
+      if (settings.overlay && typeof settings.overlay === 'object') {
+        if (settings.overlay.showSourceText !== undefined && settings.showSourceTextInOverlay === undefined) {
+          settings.showSourceTextInOverlay = settings.overlay.showSourceText;
+          delete settings.overlay.showSourceText;
+          migrated = true;
+        }
+        if (Object.keys(settings.overlay).length === 0) {
+          delete settings.overlay;
+          migrated = true;
+        }
+      }
+      if (settings['overlay.showSourceText'] !== undefined && settings.showSourceTextInOverlay === undefined) {
+        settings.showSourceTextInOverlay = settings['overlay.showSourceText'];
+        delete settings['overlay.showSourceText'];
+        migrated = true;
+      }
+      if (migrated) {
+        this.store.set(settings);
+        console.log('[Tuhua] Settings migrated: dot-notation keys converted to flat keys');
+      }
+      return settings;
+    });
+
+    ipcMain.handle('save-settings', async (event, data) => {
+      if (typeof data !== 'object' || data === null) {
+        return { success: false, error: 'Invalid settings data' };
+      }
+
+      // Merge with existing settings instead of replacing
+      const currentSettings = this.store.get();
+      const mergedSettings = { ...currentSettings, ...data };
+      this.store.set(mergedSettings);
+
+      // Update translation pipeline with new settings
+      this.pipeline.updateSettings(mergedSettings);
+
+      // Reconfigure Textractor if port changed
+      if (data.textractorPort) {
+        this.textractor.reconfigure(data.textractorPort);
+        console.log(`[Tuhua] Textractor port changed to ${data.textractorPort} — reconnecting`);
+      }
+
+      // Update TextractorCLI path if changed
+      if (data.textractorCliPath !== undefined) {
+        this.textractorLauncher.configure(data.textractorCliPath);
+      }
+
+      // Switch input method
+      // v3.11.3: ALL xuatServer.stop() calls are now AWAITED to prevent
+      // the "Port already in use" race condition.
+      if (data.inputMethod) {
+        if (data.inputMethod === 'clipboard') {
+          this.textractor.disconnect();
+          this.textractorLauncher.kill();
+          if (this.xuatServer) await this.xuatServer.stop();  // v3.11.3: AWAITED
+          this.clipboardWatcher.start();
+          // Notify renderer of new status
+          setTimeout(() => {
+            this.windowManager.sendToMainWindow('textractor-status', 'watching');
+          }, 300);
+        } else if (data.inputMethod === 'ocr') {
+          // OCR mode — stop other input methods
+          this.textractor.disconnect();
+          this.textractorLauncher.kill();
+          this.clipboardWatcher.stop();
+          if (this.xuatServer) await this.xuatServer.stop();  // v3.11.3: AWAITED
+          console.log('[Tuhua] OCR input method selected');
+          // Don't auto-start OCR here — let the user click "Start OCR" in the settings
+          // Just notify renderer of the mode
+          setTimeout(() => {
+            this.windowManager.sendToMainWindow('textractor-status', 'ocr');
+          }, 300);
+        } else if (data.inputMethod === 'xuat') {
+          // XUAT mode — stop other input methods, but DON'T auto-start server
+          // v3.11.11: Previous versions auto-started the server here, which
+          // caused the bug where "Aplicar y Guardar" would restart the server
+          // even after the user manually stopped it. Now we just switch the
+          // input method and let the user control the server with the toggle.
+          this.textractor.disconnect();
+          this.textractorLauncher.kill();
+          this.clipboardWatcher.stop();
+          console.log('[Tuhua] XUAT input method selected');
+          // Update port if changed, but don't start the server
+          if (this.xuatServer && data.xuatPort) {
+            this.xuatServer.port = data.xuatPort;
+          }
+          this.windowManager.sendToMainWindow('textractor-status', 'xuat');
+        } else {
+          this.clipboardWatcher.stop();
+          if (this.xuatServer) await this.xuatServer.stop();  // v3.11.3: AWAITED
+          // Textractor mode: always try to connect TCP as a secondary channel
+          // (CLI stdout is primary, but TCP works if "Start Server" extension is present)
+          const port = this.store.get('textractorPort') || 9251;
+          console.log(`[Tuhua] Textractor mode — connecting TCP to port ${port}`);
+          this.textractor.reconfigure(port);
+          // Notify renderer
+          setTimeout(() => {
+            this.windowManager.sendToMainWindow('textractor-status', 'reconnecting');
+          }, 300);
+        }
+      }
+
+      // Update overlay styles
+      if (data.outputFontSize || data.outputTheme || data.overlayOpacity || data.overlayFontFamily) {
+        this.windowManager.updateOverlayStyles({
+          fontSize: data.outputFontSize,
+          theme: data.outputTheme,
+          opacity: data.overlayOpacity,
+          fontFamily: data.overlayFontFamily
+        });
+      }
+
+      // Handle click-through mode
+      if (data.clickThrough !== undefined) {
+        this.windowManager.toggleClickThrough(data.clickThrough);
+      }
+
+      // Handle xuatPort — only if inputMethod was NOT just switched to xuat
+      // (avoid double start: inputMethod switch already handles port)
+      if (data.xuatPort !== undefined && data.inputMethod !== 'xuat' && this.xuatServer) {
+        if (this.xuatServer._running) {
+          this.xuatServer.reconfigure(data.xuatPort).catch(err => {
+            console.error('[Tuhua] XUAT reconfigure error:', err.message);
+          });
+        } else {
+          this.xuatServer.port = data.xuatPort;
+        }
+      }
+
+      // v3.11.17: XUAT language config is now updated ONLY when the user changes
+      // XUAT-specific language selectors (autoSaveXuatLanguage in renderer).
+      // Global sourceLang/targetLang changes should NOT affect XUAT config.
+      // The xuat-update-language IPC handler uses xuatSourceLang/xuatTargetLang
+      // from the store, which are set independently by the XUAT language selectors.
+
+      // Handle translation active toggle
+      // NOTE: OCR start/stop is handled by the renderer through ocr-start/ocr-stop IPC.
+      // We do NOT start OCR here to avoid double initialization.
+      // XUAT mode does NOT need the output overlay — translations appear in-game.
+      if (data.translationActive !== undefined) {
+        this._translationActive = data.translationActive;
+
+        const currentInputMethod = data.inputMethod || this.store.get('inputMethod');
+
+        if (data.translationActive) {
+          // Only show overlay for non-XUAT input methods
+          // XUAT replaces text directly in the game, no overlay needed
+          if (currentInputMethod !== 'xuat') {
+            this.windowManager.showOutputOverlay();
+          }
+          // v3.11.22: Resume clipboard watcher when unpausing in clipboard mode
+          if (currentInputMethod === 'clipboard') {
+            this.clipboardWatcher.start();
+          }
+        } else {
+          // Pausing: hide output overlay and clear content
+          this.windowManager.hideOutputOverlay();
+          this.windowManager.clearOverlayContent();
+          // v3.11.22: Stop clipboard watcher when pausing to prevent reading
+          // sensitive clipboard content while the tool is paused
+          if (currentInputMethod === 'clipboard') {
+            this.clipboardWatcher.stop();
+          }
+        }
+      }
+
+      return { success: true };
+    });
+
+    // ===== TextractorCLI =====
+    ipcMain.handle('textractor-validate-cli', async (event, cliPath) => {
+      if (typeof cliPath !== 'string') return { valid: false, message: 'Invalid path' };
+      return this.textractorLauncher.validatePath(cliPath);
+    });
+
+    ipcMain.handle('textractor-browse-cli', async () => {
+      const result = await dialog.showOpenDialog({
+        title: 'Seleccionar carpeta de Textractor o TextractorCLI.exe',
+        filters: [
+          { name: 'Executable', extensions: ['exe'] },
+          { name: 'All Files', extensions: ['*'] }
+        ],
+        properties: ['openFile', 'openDirectory']
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return { canceled: true, path: '' };
+      }
+      const selectedPath = result.filePaths[0];
+      // Validate the selected path (auto-resolves folders)
+      const validation = this.textractorLauncher.validatePath(selectedPath);
+      // If auto-resolved, return the resolved .exe path so the UI can update
+      const returnPath = validation.resolved || selectedPath;
+      return { canceled: false, path: returnPath, originalPath: selectedPath, valid: validation.valid, message: validation.message, autoResolved: validation.autoResolved };
+    });
+
+    ipcMain.handle('textractor-launch', async (event, { cliPath, gamePid, port: requestedPort }) => {
+      if (!cliPath || !gamePid) {
+        return { success: false, error: 'CLI path and Game PID are required' };
+      }
+      const pid = parseInt(gamePid);
+      if (isNaN(pid) || pid <= 0) {
+        return { success: false, error: 'Invalid Game PID' };
+      }
+
+      // Save the port from UI if provided (fix: port wasn't being saved on launch)
+      const port = requestedPort || this.store.get('textractorPort') || 9251;
+      if (requestedPort) {
+        this.store.set({ ...this.store.get(), textractorPort: port });
+        console.log(`[Tuhua] Textractor port saved: ${port}`);
+      }
+
+      // Configure launcher
+      this.textractorLauncher.configure(cliPath);
+
+      // Kill existing CLI process if any
+      this.textractorLauncher.kill();
+
+      // Launch TextractorCLI
+      const launched = this.textractorLauncher.launch(pid, { cliPath });
+      if (!launched) {
+        return { success: false, error: 'Failed to launch TextractorCLI' };
+      }
+
+      // NOTE (v3.8.10): Spawn with NO args, send attach via stdin immediately + delayed
+      // Hex diagnostics enabled for first 10 lines to debug encoding issues
+      // 10s diagnostic warning if no game text found
+      console.log(`[Tuhua] TextractorCLI launched (v3.8.10) — stdin attach (immediate + 1.5s), hex diagnostics ON, TCP (port ${port}) secondary`);
+      setTimeout(() => {
+        if (!this.textractor.isConnected) {
+          this.textractor.reconfigure(port);
+          console.log(`[Tuhua] TCP connection attempt to port ${port} (secondary channel)`);
+        }
+      }, 8000);
+
+      return { success: true, message: 'TextractorCLI launched' };
+    });
+
+    ipcMain.handle('textractor-kill', async () => {
+      this.textractorLauncher.kill();
+      this.textractor.disconnect();
+      return { success: true };
+    });
+
+    ipcMain.handle('textractor-cli-status', async () => {
+      return {
+        isRunning: this.textractorLauncher.isRunning,
+        cliPath: this.textractorLauncher.cliPath,
+        processPid: this.textractorLauncher.getProcessPid(),
+        isConfigured: this.textractorLauncher.isConfigured(),
+        stats: this.textractorLauncher.getStats()
+      };
+    });
+
+    ipcMain.handle('textractor-cli-output', async () => {
+      return this.textractorLauncher.getOutput();
+    });
+
+    ipcMain.handle('textractor-select-hook', async (event, hookKey) => {
+      this.textractorLauncher.selectHook(hookKey || null);
+      return { success: true, activeHookKey: this.textractorLauncher.getActiveHookKey() };
+    });
+
+    // ===== TextractorCLI Test (v3.8.23) =====
+    ipcMain.handle('textractor-test-cli', async (event, cliPath) => {
+      if (typeof cliPath !== 'string') return { canStart: false, hint: 'Ruta inválida' };
+      console.log(`[Tuhua] Testing TextractorCLI: ${cliPath}`);
+      const result = await this.textractorLauncher.testLaunch(cliPath);
+      console.log(`[Tuhua] Test result: canStart=${result.canStart}, hint="${result.hint}"`);
+      return result;
+    });
+
+    // ===== Glossary =====
+    ipcMain.handle('get-glossary', () => {
+      return this.glossary.getAll();
+    });
+
+    ipcMain.handle('save-glossary', (event, entry) => {
+      if (!entry || typeof entry.source !== 'string' || typeof entry.target !== 'string') {
+        return { success: false, error: 'Invalid glossary entry' };
+      }
+      if (entry.id) {
+        this.glossary.update(entry.id, entry);
+      } else {
+        this.glossary.add(entry);
+      }
+      return { success: true };
+    });
+
+    ipcMain.handle('delete-glossary-entry', (event, id) => {
+      if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
+      this.glossary.delete(id);
+      return { success: true };
+    });
+
+    ipcMain.handle('import-glossary', async (event, filePath) => {
+      try {
+        const count = this.glossary.importFromFile(filePath);
+        return { success: true, imported: count };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
+
+    ipcMain.handle('export-glossary', async (event, filePath) => {
+      try {
+        const count = this.glossary.exportToFile(filePath);
+        return { success: true, exported: count };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
+
+    // ===== History =====
+    ipcMain.handle('get-history', () => {
+      return this.pipeline.getHistory();
+    });
+
+    ipcMain.handle('clear-history', () => {
+      this.pipeline.clearHistory();
+      return { success: true };
+    });
+
+    ipcMain.handle('export-history', async (event, filePath) => {
+      try {
+        const history = this.pipeline.getHistory();
+        fs.writeFileSync(filePath, JSON.stringify(history, null, 2), 'utf8');
+        return { success: true, count: history.length };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
+
+    // ===== Profiles =====
+    // v3.10.7: Complete profile system rewrite.
+    // - Default profile "Por Defecto" is always present and cannot be deleted
+    // - Profiles store ONLY profile-scoped data (not global settings)
+    // - Active profile is tracked in store.activeProfile
+    // - Loading a profile saves current profile data first, then loads new profile
+    // - Glossary per-profile toggle is GLOBAL and never changes with profile
+
+    ipcMain.handle('get-profiles', () => {
+      const profiles = this.store.get('profiles', []);
+      const activeProfile = this.store.get('activeProfile', 'Por Defecto');
+      // Ensure default profile always exists
+      const hasDefault = profiles.some(p => p.name === 'Por Defecto');
+      if (!hasDefault) {
+        const currentSettings = this.store.get();
+        profiles.unshift({
+          name: 'Por Defecto',
+          isDefault: true,
+          sourceLang: currentSettings.sourceLang || 'auto',
+          targetLang: currentSettings.targetLang || 'es',
+          inputMethod: currentSettings.inputMethod || 'textractor',
+          engine: currentSettings.engine || 'google-free',
+          deeplKey: currentSettings.deeplKey || '',
+          openaiKey: currentSettings.openaiKey || '',
+          customEndpoint: currentSettings.customEndpoint || '',
+          customModel: currentSettings.customModel || '',
+          libretranslateEndpoint: currentSettings.libretranslateEndpoint || '',
+          customMTEndpoint: currentSettings.customMTEndpoint || '',
+          customMTMethod: currentSettings.customMTMethod || '',
+          customMTBody: currentSettings.customMTBody || '',
+          customMTResponsePath: currentSettings.customMTResponsePath || '',
+          customMTAuthHeader: currentSettings.customMTAuthHeader || '',
+          textractorCliPath: currentSettings.textractorCliPath || '',
+          textractorPort: currentSettings.textractorPort || 9251,
+          manualTextractorMode: currentSettings.manualTextractorMode || false,
+          glossary: this.glossary.getAll(),
+          history: this.pipeline.getHistory(),
+          savedAt: Date.now()
+        });
+        this.store.set('profiles', profiles);
+      }
+      return { profiles, activeProfile };
+    });
+
+    ipcMain.handle('save-profile', (event, profile) => {
+      if (!profile || typeof profile.name !== 'string') {
+        return { success: false, error: 'Invalid profile' };
+      }
+      const profiles = this.store.get('profiles', []);
+      const idx = profiles.findIndex(p => p.name === profile.name);
+
+      // Profiles ONLY store profile-scoped data (not global settings)
+      const currentSettings = this.store.get();
+      const profileData = {
+        name: profile.name,
+        isDefault: profile.name === 'Por Defecto',
+        // Language preferences
+        sourceLang: currentSettings.sourceLang,
+        targetLang: currentSettings.targetLang,
+        // Input method
+        inputMethod: currentSettings.inputMethod,
+        // Translation engine + config
+        engine: currentSettings.engine,
+        deeplKey: currentSettings.deeplKey || '',
+        openaiKey: currentSettings.openaiKey || '',
+        apiKey: currentSettings.apiKey || '',
+        customEndpoint: currentSettings.customEndpoint || '',
+        customModel: currentSettings.customModel || '',
+        libretranslateEndpoint: currentSettings.libretranslateEndpoint || '',
+        customMTEndpoint: currentSettings.customMTEndpoint || '',
+        customMTMethod: currentSettings.customMTMethod || '',
+        customMTBody: currentSettings.customMTBody || '',
+        customMTResponsePath: currentSettings.customMTResponsePath || '',
+        customMTAuthHeader: currentSettings.customMTAuthHeader || '',
+        // Glossary (only saved to profile if glossary.perProfile is enabled)
+        glossary: this.glossary.getAll(),
+        // Translation history
+        history: this.pipeline.getHistory(),
+        // Textractor config
+        textractorCliPath: currentSettings.textractorCliPath || '',
+        textractorPort: currentSettings.textractorPort || 9251,
+        manualTextractorMode: currentSettings.manualTextractorMode || false,
+        savedAt: Date.now()
+      };
+
+      if (idx >= 0) {
+        profileData.isDefault = profiles[idx].isDefault || profile.name === 'Por Defecto';
+        profiles[idx] = profileData;
+      } else {
+        profiles.push(profileData);
+      }
+      this.store.set('profiles', profiles);
+
+      // Update active profile if this is the current one
+      const activeProfile = this.store.get('activeProfile', 'Por Defecto');
+      if (activeProfile === profile.name) {
+        // Already active, just saved
+      }
+
+      return { success: true };
+    });
+
+    ipcMain.handle('create-profile', (event, { name, cloneFrom }) => {
+      if (!name || typeof name !== 'string') {
+        return { success: false, error: 'Invalid profile name' };
+      }
+      const profiles = this.store.get('profiles', []);
+      if (profiles.some(p => p.name === name)) {
+        return { success: false, error: 'Profile name already exists' };
+      }
+
+      // Clone from current active profile or specified profile
+      const sourceName = cloneFrom || this.store.get('activeProfile', 'Por Defecto');
+      const sourceProfile = profiles.find(p => p.name === sourceName);
+
+      const newProfile = sourceProfile
+        ? { ...sourceProfile, name, isDefault: false, savedAt: Date.now() }
+        : {
+            name,
+            isDefault: false,
+            sourceLang: this.store.get('sourceLang', 'auto'),
+            targetLang: this.store.get('targetLang', 'es'),
+            inputMethod: this.store.get('inputMethod', 'textractor'),
+            engine: this.store.get('engine', 'google-free'),
+            deeplKey: '', openaiKey: '', apiKey: '',
+            customEndpoint: '', customModel: '',
+            libretranslateEndpoint: '',
+            customMTEndpoint: '', customMTMethod: '',
+            customMTBody: '', customMTResponsePath: '', customMTAuthHeader: '',
+            textractorCliPath: this.store.get('textractorCliPath', ''),
+            textractorPort: this.store.get('textractorPort', 9251),
+            manualTextractorMode: this.store.get('manualTextractorMode', false),
+            glossary: this.glossary.getAll(),
+            history: [],
+            savedAt: Date.now()
+          };
+
+      profiles.push(newProfile);
+      this.store.set('profiles', profiles);
+      return { success: true };
+    });
+
+    ipcMain.handle('delete-profile', (event, name) => {
+      if (name === 'Por Defecto') {
+        return { success: false, error: 'Cannot delete the default profile' };
+      }
+      let profiles = this.store.get('profiles', []);
+      profiles = profiles.filter(p => p.name !== name);
+      this.store.set('profiles', profiles);
+      // If deleting the active profile, switch to default
+      const activeProfile = this.store.get('activeProfile', 'Por Defecto');
+      if (activeProfile === name) {
+        this.store.set('activeProfile', 'Por Defecto');
+      }
+      return { success: true };
+    });
+
+    ipcMain.handle('load-profile', (event, name) => {
+      const profiles = this.store.get('profiles', []);
+      const profile = profiles.find(p => p.name === name);
+      if (!profile) return { success: false, error: 'Profile not found' };
+
+      // v3.10.7: Save current profile data BEFORE loading new one
+      const currentActiveProfile = this.store.get('activeProfile', 'Por Defecto');
+      if (currentActiveProfile !== name) {
+        const currentProfileIdx = profiles.findIndex(p => p.name === currentActiveProfile);
+        if (currentProfileIdx >= 0) {
+          const currentSettings = this.store.get();
+          profiles[currentProfileIdx] = {
+            ...profiles[currentProfileIdx],
+            sourceLang: currentSettings.sourceLang,
+            targetLang: currentSettings.targetLang,
+            inputMethod: currentSettings.inputMethod,
+            engine: currentSettings.engine,
+            deeplKey: currentSettings.deeplKey || '',
+            openaiKey: currentSettings.openaiKey || '',
+            customEndpoint: currentSettings.customEndpoint || '',
+            customModel: currentSettings.customModel || '',
+            libretranslateEndpoint: currentSettings.libretranslateEndpoint || '',
+            customMTEndpoint: currentSettings.customMTEndpoint || '',
+            customMTMethod: currentSettings.customMTMethod || '',
+            customMTBody: currentSettings.customMTBody || '',
+            customMTResponsePath: currentSettings.customMTResponsePath || '',
+            customMTAuthHeader: currentSettings.customMTAuthHeader || '',
+            textractorCliPath: currentSettings.textractorCliPath || '',
+            textractorPort: currentSettings.textractorPort || 9251,
+            manualTextractorMode: currentSettings.manualTextractorMode || false,
+            glossary: this.glossary.getAll(),
+            history: this.pipeline.getHistory(),
+            savedAt: Date.now()
+          };
+        }
+      }
+
+      // ONLY restore profile-scoped data. Global settings are NOT touched.
+      const profileSettings = {};
+      if (profile.sourceLang !== undefined) profileSettings.sourceLang = profile.sourceLang;
+      if (profile.targetLang !== undefined) profileSettings.targetLang = profile.targetLang;
+      if (profile.inputMethod !== undefined) profileSettings.inputMethod = profile.inputMethod;
+      if (profile.engine !== undefined) profileSettings.engine = profile.engine;
+      if (profile.deeplKey !== undefined) profileSettings.deeplKey = profile.deeplKey;
+      if (profile.openaiKey !== undefined) profileSettings.openaiKey = profile.openaiKey;
+      if (profile.customEndpoint !== undefined) profileSettings.customEndpoint = profile.customEndpoint;
+      if (profile.customModel !== undefined) profileSettings.customModel = profile.customModel;
+      if (profile.libretranslateEndpoint !== undefined) profileSettings.libretranslateEndpoint = profile.libretranslateEndpoint;
+      if (profile.customMTEndpoint !== undefined) profileSettings.customMTEndpoint = profile.customMTEndpoint;
+      if (profile.customMTMethod !== undefined) profileSettings.customMTMethod = profile.customMTMethod;
+      if (profile.customMTBody !== undefined) profileSettings.customMTBody = profile.customMTBody;
+      if (profile.customMTResponsePath !== undefined) profileSettings.customMTResponsePath = profile.customMTResponsePath;
+      if (profile.customMTAuthHeader !== undefined) profileSettings.customMTAuthHeader = profile.customMTAuthHeader;
+      if (profile.textractorCliPath !== undefined) profileSettings.textractorCliPath = profile.textractorCliPath;
+      if (profile.textractorPort !== undefined) profileSettings.textractorPort = profile.textractorPort;
+      if (profile.manualTextractorMode !== undefined) profileSettings.manualTextractorMode = profile.manualTextractorMode;
+
+      // Apply profile-scoped settings (preserving ALL global settings)
+      const mergedSettings = { ...this.store.get(), ...profileSettings };
+      this.store.set(mergedSettings);
+      this.pipeline.updateSettings(profileSettings);
+
+      // Restore glossary: only if glossary.perProfile is enabled
+      const perProfileGlossary = this.store.get('perProfileGlossary', false);
+      if (perProfileGlossary && profile.glossary && Array.isArray(profile.glossary)) {
+        this.glossary.replaceAll(profile.glossary);
+      }
+      // If per-profile glossary is OFF, don't touch the glossary (it's global)
+
+      // Restore history (always per-profile)
+      const historyLimit = this.store.get('historyLimit', 5);
+      if (profile.history && Array.isArray(profile.history)) {
+        const limitedHistory = historyLimit > 0 ? profile.history.slice(0, historyLimit) : [];
+        this.pipeline.replaceHistory(limitedHistory);
+      } else {
+        this.pipeline.replaceHistory([]);
+      }
+
+      // Update active profile
+      this.store.set('activeProfile', name);
+
+      // Save updated profiles (with previous profile data saved)
+      this.store.set('profiles', profiles);
+
+      return { success: true, settings: profileSettings, activeProfile: name, hasGlossary: !!(profile.glossary && profile.glossary.length), hasHistory: !!(profile.history && profile.history.length) };
+    });
+
+    ipcMain.handle('get-active-profile', () => {
+      return this.store.get('activeProfile', 'Por Defecto');
+    });
+
+    // ===== API Key Validation =====
+    ipcMain.handle('validate-api-key', async (event, { engine, apiKey, endpoint }) => {
+      try {
+        switch (engine) {
+          case 'deepl': {
+            const endpoints = [
+              { url: 'https://api-free.deepl.com/v2', label: 'Free' },
+              { url: 'https://api.deepl.com/v2', label: 'Pro' }
+            ];
+
+            if (apiKey.endsWith(':fx')) {
+              endpoints.reverse();
+            }
+
+            let lastError = null;
+            for (const ep of endpoints) {
+              try {
+                const resp = await axios.get(`${ep.url}/usage`, {
+                  timeout: 8000,
+                  headers: { 'Authorization': `DeepL-Auth-Key ${apiKey}` }
+                });
+                if (resp.data && resp.data.character_count !== undefined) {
+                  const used = resp.data.character_count;
+                  const limit = resp.data.character_limit;
+                  return { valid: true, message: `Key valida (${ep.label}) — ${used.toLocaleString()}/${limit.toLocaleString()} caracteres usados` };
+                }
+                return { valid: true, message: `Key valida (${ep.label})` };
+              } catch (err) {
+                lastError = err;
+                if (err.response && (err.response.status === 401 || err.response.status === 403)) {
+                  continue;
+                }
+                break;
+              }
+            }
+
+            if (lastError && lastError.response) {
+              const status = lastError.response.status;
+              if (status === 401 || status === 403) {
+                return { valid: false, message: 'API Key invalida o sin permisos. Verifica que sea de DeepL (Free o Pro)' };
+              }
+              return { valid: false, message: `Error ${status}: ${lastError.response.data?.error?.message || lastError.message}` };
+            }
+            throw lastError;
+          }
+
+          case 'openai': {
+            const resp = await axios.get('https://api.openai.com/v1/models', {
+              timeout: 8000,
+              headers: { 'Authorization': `Bearer ${apiKey}` }
+            });
+            if (resp.data && resp.data.data) {
+              return { valid: true, message: `Key valida — ${resp.data.data.length} modelos disponibles` };
+            }
+            return { valid: true, message: 'Key valida' };
+          }
+
+          case 'local-llm': {
+            const base = endpoint || 'http://localhost:1234/v1';
+            const resp = await axios.get(`${base}/models`, { timeout: 5000 });
+            if (resp.data) {
+              const models = resp.data.data || resp.data;
+              const count = Array.isArray(models) ? models.length : 0;
+              return { valid: true, message: `Conectado — ${count} modelo(s) disponible(s)` };
+            }
+            return { valid: true, message: 'Conectado al servidor local' };
+          }
+
+          case 'libretranslate': {
+            const base = endpoint || 'http://localhost:5000';
+            const resp = await axios.get(`${base}/languages`, { timeout: 5000 });
+            if (resp.data && Array.isArray(resp.data)) {
+              return { valid: true, message: `Conectado — ${resp.data.length} idiomas disponibles` };
+            }
+            return { valid: true, message: 'Conectado a LibreTranslate' };
+          }
+
+          case 'custom-mt': {
+            if (!endpoint) {
+              return { valid: false, message: 'Endpoint no configurado' };
+            }
+            try {
+              await axios.head(endpoint, { timeout: 5000 });
+              return { valid: true, message: 'Endpoint alcanzable' };
+            } catch (headErr) {
+              try {
+                await axios.get(endpoint, { timeout: 5000 });
+                return { valid: true, message: 'Endpoint alcanzable' };
+              } catch (getErr) {
+                if (getErr.response) {
+                  return { valid: true, message: 'Endpoint alcanzable (respuesta del servidor)' };
+                }
+                throw getErr;
+              }
+            }
+          }
+
+          default:
+            return { valid: false, message: `Motor "${engine}" no soporta validacion` };
+        }
+      } catch (err) {
+        if (err.response) {
+          const status = err.response.status;
+          if (status === 401 || status === 403) {
+            return { valid: false, message: 'API Key invalida o sin permisos' };
+          }
+          if (status === 404) {
+            return { valid: false, message: 'Endpoint no encontrado — verifica la URL' };
+          }
+          return { valid: false, message: `Error ${status}: ${err.response.data?.error?.message || err.message}` };
+        }
+        if (err.code === 'ECONNREFUSED') {
+          return { valid: false, message: 'Conexion rechazada — esta el servidor corriendo?' };
+        }
+        if (err.code === 'ETIMEDOUT' || err.code === 'ECONNABORTED') {
+          return { valid: false, message: 'Tiempo de espera agotado — servidor no responde' };
+        }
+        if (err.code === 'ENOTFOUND') {
+          return { valid: false, message: 'Host no encontrado — verifica la URL' };
+        }
+        return { valid: false, message: `Error: ${err.message}` };
+      }
+    });
+
+    // ===== Connection Test =====
+    ipcMain.handle('test-connection', async (event, { host, port }) => {
+      return new Promise((resolve) => {
+        const net = require('net');
+        const socket = new net.Socket();
+        socket.setTimeout(3000);
+        socket.on('connect', () => {
+          socket.destroy();
+          resolve({ success: true, message: 'Connection successful' });
+        });
+        socket.on('timeout', () => {
+          socket.destroy();
+          resolve({ success: false, message: 'Connection timed out' });
+        });
+        socket.on('error', (err) => {
+          socket.destroy();
+          resolve({ success: false, message: err.message });
+        });
+        socket.connect(port, host);
+      });
+    });
+
+    // ===== Font Family Auto-Detection =====
+    ipcMain.handle('detect-font-family', (event, { sourceLang }) => {
+      const FONT_MAP = {
+        'ja': "'Meiryo', 'MS Gothic', 'Noto Sans JP', sans-serif",
+        'zh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', sans-serif",
+        'ko': "'Noto Sans KR', 'Malgun Gothic', sans-serif",
+        'th': "'Tahoma', 'Noto Sans Thai', sans-serif",
+        'vi': "'Tahoma', 'Noto Sans', sans-serif",
+        'ar': "'Tahoma', 'Noto Sans Arabic', sans-serif",
+        'hi': "'Tahoma', 'Noto Sans Devanagari', sans-serif",
+        'ru': "'Segoe UI', 'Noto Sans', sans-serif",
+        'auto': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif"
+      };
+      const defaultFont = "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif";
+      const font = FONT_MAP[sourceLang] || defaultFont;
+      return { fontFamily: font, language: sourceLang };
+    });
+
+    // ===== Manual Translation =====
+    ipcMain.on('manual-translate', (event, text) => {
+      if (typeof text !== 'string' || text.length === 0) return;
+      this._handleText(text);
+    });
+
+    // ===== OCR =====
+    ipcMain.handle('ocr-start', async () => {
+      try {
+        const settings = this.store.get();
+        const sourceLang = settings.sourceLang || 'ja';
+
+        // Create and show capture area window
+        this.windowManager.createCaptureArea();
+        this.windowManager.showCaptureArea();
+
+        // Initialize OCR service with the source language
+        await this.ocrService.initialize(sourceLang);
+
+        // Forward OCR text events to the translation pipeline
+        this.ocrService.removeAllListeners('text'); // Remove previous listeners
+        this.ocrService.on('text', (text) => {
+          console.log(`[OCR] Text recognized: "${text.substring(0, 50)}..."`);
+          this._handleText(text);
+        });
+
+        // Forward OCR status to renderer
+        this.ocrService.removeAllListeners('status');
+        this.ocrService.on('status', (status) => {
+          this.windowManager.sendToMainWindow('ocr-status', status);
+          this.windowManager.sendToCaptureArea('shortcut-pressed', { action: 'ocr-status', state: status });
+        });
+
+        // Forward OCR errors
+        this.ocrService.removeAllListeners('error');
+        this.ocrService.on('error', (err) => {
+          console.error('[OCR] Error:', err.message);
+          this.windowManager.sendToMainWindow('ocr-status', 'error');
+        });
+
+        this._ocrActive = true;
+
+        // Apply best preprocessing defaults automatically (grayscale ON, smart threshold)
+        this.ocrService.setPreprocessing({
+          grayscale: true,
+          threshold: false,
+          thresholdValue: 128,
+          contrast: false,
+          contrastValue: 1.5
+        });
+
+        // Always start auto-capture with smart change detection
+        this._startOcrAutoCapture();
+
+        return { success: true, status: this.ocrService.getStatus() };
+      } catch (err) {
+        console.error('[OCR] Start error:', err.message);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('ocr-stop', async () => {
+      try {
+        this._ocrAutoCapture = false;
+        this.ocrService.stopAutoCapture();
+        await this.ocrService.terminate();
+        this.windowManager.closeCaptureArea();
+        this._ocrActive = false;
+        return { success: true };
+      } catch (err) {
+        console.error('[OCR] Stop error:', err.message);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('ocr-capture', async () => {
+      if (!this._ocrActive || !this.ocrService._isReady) {
+        return { success: false, error: 'OCR not initialized' };
+      }
+      try {
+        const imageBuffer = await this._captureScreenRegion();
+        if (!imageBuffer) {
+          return { success: false, error: 'Failed to capture screen' };
+        }
+        const result = await this.ocrService.recognize(imageBuffer);
+        return { success: true, text: result.text, confidence: result.confidence };
+      } catch (err) {
+        console.error('[OCR] Capture error:', err.message);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('ocr-set-language', async (event, lang) => {
+      if (typeof lang !== 'string') return { success: false, error: 'Invalid language' };
+      try {
+        await this.ocrService.setLanguage(lang);
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('ocr-set-interval', async (event, ms) => {
+      if (typeof ms !== 'number' || ms < 300) return { success: false, error: 'Invalid interval' };
+      this.store.set('ocrAutoCaptureMs', ms);
+      // If auto-capture is running, restart with new interval
+      if (this._ocrAutoCapture && this.ocrService.isAutoCapturing) {
+        this._startOcrAutoCapture();
+      }
+      return { success: true };
+    });
+
+    ipcMain.handle('ocr-set-preprocessing', async (event, options) => {
+      if (typeof options !== 'object' || options === null) return { success: false, error: 'Invalid options' };
+      this.ocrService.setPreprocessing(options);
+      this.store.set('ocrPreprocessing', options);
+      return { success: true };
+    });
+
+    ipcMain.handle('ocr-status', async () => {
+      return this.ocrService.getStatus();
+    });
+
+    ipcMain.handle('ocr-set-auto-capture', async (event, enabled) => {
+      if (typeof enabled !== 'boolean') return { success: false, error: 'Must be boolean' };
+      this._ocrAutoCapture = enabled;
+      this.store.set('ocrAutoCapture', enabled);
+
+      if (enabled && this._ocrActive) {
+        this._startOcrAutoCapture();
+      } else {
+        this.ocrService.stopAutoCapture();
+      }
+      return { success: true };
+    });
+
+    ipcMain.handle('ocr-close-capture-area', async () => {
+      this.windowManager.closeCaptureArea();
+      return { success: true };
+    });
+
+    // v3.9.6: Pause/resume OCR scanning from capture area overlay.
+    // This ONLY controls the auto-capture scanning loop — it does NOT
+    // affect the main Tuhua ▶ Activo toggle (which controls translation).
+    ipcMain.handle('ocr-toggle-scan', async () => {
+      if (!this._ocrActive) {
+        return { success: false, error: 'OCR not initialized', scanning: false };
+      }
+
+      if (this.ocrService.isAutoCapturing) {
+        // Pause scanning — stop auto-capture but keep worker alive
+        this.ocrService.stopAutoCapture();
+        this._ocrScanPaused = true;
+        console.log('[OCR] Scan paused from capture area overlay');
+        return { success: true, scanning: false };
+      } else {
+        // Resume scanning — restart auto-capture
+        this._ocrScanPaused = false;
+        this._startOcrAutoCapture();
+        console.log('[OCR] Scan resumed from capture area overlay');
+        return { success: true, scanning: true };
+      }
+    });
+
+    ipcMain.handle('get-displays', async () => {
+      const { screen } = require('electron');
+      return screen.getAllDisplays();
+    });
+
+    // v3.9.7: Output overlay auto-resize.
+    // The output overlay requests a height change based on its text content.
+    // Main process resizes the BrowserWindow accordingly.
+    ipcMain.handle('resize-overlay', async (event, desiredHeight) => {
+      if (typeof desiredHeight !== 'number' || desiredHeight < 40 || desiredHeight > 800) {
+        return { success: false };
+      }
+      try {
+        const overlayWin = this.windowManager.outputOverlay;
+        if (overlayWin && !overlayWin.isDestroyed()) {
+          const bounds = overlayWin.getBounds();
+          // Only resize if height difference is significant (>10px) to avoid flicker
+          if (Math.abs(bounds.height - desiredHeight) > 10) {
+            // Resize from bottom — keep the top position fixed so the overlay
+            // grows downward and doesn't cover the capture area
+            overlayWin.setBounds({
+              x: bounds.x,
+              y: bounds.y,
+              width: bounds.width,
+              height: Math.round(desiredHeight)
+            });
+          }
+        }
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    });
+
+    // ===== XUAT (XUnity AutoTranslator) =====
+    ipcMain.handle('xuat-start-server', async (event, port) => {
+      try {
+        if (!this.xuatServer) {
+          return { success: false, error: 'XUAT server not initialized' };
+        }
+        const actualPort = port || this.store.get('xuatPort') || 8419;
+        this.store.set({ ...this.store.get(), xuatPort: actualPort });
+
+        // v3.11.3: Use start() directly — the serial queue in xuat-server
+        // ensures operations run one at a time (no more race conditions)
+        this.xuatServer.port = actualPort;
+        await this.xuatServer.start();
+        console.log(`[XUAT] Server started on port ${actualPort}`);
+        return { success: true, port: actualPort };
+      } catch (err) {
+        console.error('[XUAT] Start error:', err.message);
+        this.windowManager.sendToMainWindow('xuat-status', { running: false, error: err.message });
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('xuat-stop-server', async () => {
+      try {
+        if (!this.xuatServer) {
+          return { success: false, error: 'XUAT server not initialized' };
+        }
+        await this.xuatServer.stop();
+        console.log('[XUAT] Server stopped');
+        return { success: true };
+      } catch (err) {
+        console.error('[XUAT] Stop error:', err.message);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('xuat-get-status', async () => {
+      if (!this.xuatServer) {
+        return { running: false, port: this.store.get('xuatPort') || 8419, url: null };
+      }
+      return this.xuatServer.getStatus();
+    });
+
+    ipcMain.handle('xuat-select-game', async () => {
+      try {
+        const result = await dialog.showOpenDialog({
+          title: 'Select Unity Game Executable',
+          properties: ['openFile'],
+          filters: [
+            { name: 'Game Executable', extensions: ['exe'] },
+            { name: 'All Files', extensions: ['*'] }
+          ]
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+          return { canceled: true };
+        }
+        return { canceled: false, filePath: result.filePaths[0] };
+      } catch (err) {
+        return { canceled: true, error: err.message };
+      }
+    });
+
+    ipcMain.handle('xuat-detect-game', async (event, exePath) => {
+      try {
+        if (typeof exePath !== 'string') {
+          return { isUnity: false, error: 'Invalid path' };
+        }
+        const installer = new XuatInstaller();
+        const result = installer.detectUnityGame(exePath);
+        return result;
+      } catch (err) {
+        return { isUnity: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('xuat-install-in-game', async (event, { exePath, port }) => {
+      try {
+        if (typeof exePath !== 'string') {
+          return { success: false, error: 'Invalid exe path' };
+        }
+
+        const settings = this.store.get();
+        // v3.11.17: Use XUAT-specific language settings, not global
+        const sourceLang = settings.xuatSourceLang || 'en';
+        const targetLang = settings.xuatTargetLang || 'es';
+        const xuatPort = port || settings.xuatPort || 8419;
+
+        const installer = new XuatInstaller();
+
+        // Forward progress events to renderer
+        installer.on('progress', (data) => {
+          this.windowManager.sendToMainWindow('xuat-install-progress', data);
+        });
+
+        installer.on('status', (status) => {
+          this.windowManager.sendToMainWindow('xuat-install-progress', { status, percent: -1 });
+        });
+
+        installer.on('error', (err) => {
+          this.windowManager.sendToMainWindow('xuat-install-progress', { error: err.message, percent: -1 });
+        });
+
+        const result = await installer.runFullInstall(exePath, xuatPort, sourceLang, targetLang);
+
+        // Save connected game info for persistent display
+        if (result.success) {
+          const gameName = result.gameName || path.basename(path.dirname(exePath));
+          this.store.set({ ...this.store.get(), xuatConnectedGame: gameName, xuatConnectedPath: exePath });
+          this.windowManager.sendToMainWindow('xuat-game-connected', { name: gameName, path: exePath });
+        }
+
+        return result;
+      } catch (err) {
+        console.error('[XUAT] Install error:', err.message);
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('xuat-set-port', async (event, port) => {
+      if (typeof port !== 'number' || port < 1024 || port > 65535) {
+        return { success: false, error: 'Port must be between 1024 and 65535' };
+      }
+      this.store.set({ ...this.store.get(), xuatPort: port });
+      if (this.xuatServer && this.xuatServer._running) {
+        await this.xuatServer.reconfigure(port);
+      } else if (this.xuatServer) {
+        this.xuatServer.port = port;
+      }
+      console.log(`[XUAT] Port set to ${port}`);
+      return { success: true, port };
+    });
+
+    // Test XUAT endpoint by making a self-request
+    ipcMain.handle('xuat-test-endpoint', async () => {
+      try {
+        if (!this.xuatServer || !this.xuatServer._running) {
+          return { success: false, error: 'XUAT server is not running' };
+        }
+        const port = this.xuatServer.port;
+        const axios = require('axios');
+        // v3.11.4: Use 127.0.0.1 instead of localhost — Node resolves localhost
+        // to ::1 (IPv6) but our server only listens on 127.0.0.1 (IPv4)
+        const response = await axios.get(`http://127.0.0.1:${port}/status`, { timeout: 3000 });
+        return { success: true, status: response.data };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    });
+
+    // v3.11.17: Update XUAT language config for connected game
+    ipcMain.handle('xuat-update-language', async (event, { sourceLang, targetLang }) => {
+      try {
+        const xuatConnectedPath = this.store.get('xuatConnectedPath');
+        if (!xuatConnectedPath) {
+          return { success: false, error: 'No XUAT game connected' };
+        }
+        const gameDir = path.dirname(xuatConnectedPath);
+        // Use XUAT-specific language settings (passed from renderer)
+        // These are independent from the global sourceLang/targetLang
+        const xuatSource = sourceLang || this.store.get('xuatSourceLang') || 'en';
+        const xuatTarget = targetLang || this.store.get('xuatTargetLang') || 'es';
+        const xuatPort = this.store.get('xuatPort') || 8419;
+        const installer = new XuatInstaller();
+        installer.updateLanguageConfig(gameDir, xuatPort, xuatSource, xuatTarget);
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    });
+
+    // v3.11.17: Clear XUAT translation cache for connected game
+    ipcMain.handle('xuat-clear-cache', async () => {
+      try {
+        const xuatConnectedPath = this.store.get('xuatConnectedPath');
+        if (!xuatConnectedPath) {
+          return { success: false, error: 'No XUAT game connected' };
+        }
+        const gameDir = path.dirname(xuatConnectedPath);
+        const installer = new XuatInstaller();
+        const deleted = installer.clearTranslationCache(gameDir);
+        return { success: true, deleted };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    });
+
+    // v3.10.0: Get log file path and contents for debugging/sharing.
+    // Users can click a button in settings to copy their logs.
+    ipcMain.handle('get-debug-logs', async () => {
+      try {
+        const log = require('electron-log');
+        const logPath = log.transports.file.getFile()?.path || log.transports.file.findLogPath?.() || '';
+        let logContent = '';
+        if (logPath) {
+          try {
+            logContent = fs.readFileSync(logPath, 'utf8');
+            // Keep only last 100 lines
+            const lines = logContent.split('\n');
+            logContent = lines.slice(-100).join('\n');
+          } catch (e) {
+            logContent = `[Error reading log file: ${e.message}]`;
+          }
+        }
+        return { success: true, logPath, logContent };
+      } catch (err) {
+        return { success: false, error: err.message, logPath: '', logContent: '' };
+      }
+    });
+  }
+
+  /**
+   * Ensure the XUAT HTTP server is running on the specified port.
+   * v3.11.3: Simplified — the serial queue in xuat-server handles
+   * all race conditions and retry logic internally.
+   *
+   * If already running on the same port, do nothing.
+   * If running on a different port, reconfigure.
+   * If not running, start it.
+   *
+   * @param {number} port
+   * @returns {Promise<void>}
+   */
+  async _ensureXuatServerRunning(port) {
+    if (!this.xuatServer) {
+      throw new Error('XUAT server not initialized');
+    }
+    if (this.xuatServer._running) {
+      // Already running — only reconfigure if port changed
+      if (this.xuatServer.port !== port) {
+        await this.xuatServer.reconfigure(port);
+      }
+    } else {
+      // Not running — set port and start
+      this.xuatServer.port = port;
+      await this.xuatServer.start();
+    }
+  }
+
+  /**
+   * Handle incoming text from any source (Textractor stdout, Textractor TCP, Clipboard, OCR)
+   * Includes deduplication to prevent double-translation when the same text
+   * arrives from both stdout and TCP channels.
+   */
+  async _handleText(text) {
+    // v3.8.25: Safety net — strip any remaining null bytes, control chars,
+    // and apply deduplication for text that arrives from TCP (bypassing _cleanGameText)
+    if (text) {
+      text = text.replace(/[\u0000\u0001-\u0008\u000B\u000C\u000E-\u001F\uFEFF]/g, '');
+
+      // v3.9.5: Only apply _deduplicateText for Textractor input.
+      // For OCR text, _deduplicateText STRIPS numbers by splitting on digits
+      // (e.g., "Interval of 1500ms" → "Interval of ms" — losing the "1500").
+      // OCR text doesn't have Textractor's digit-delimiter pattern, so skip it.
+      const currentInputMethod = this.store.get('inputMethod');
+      if (currentInputMethod !== 'ocr') {
+        text = this._deduplicateText(text);
+      }
+    }
+
+    const settings = this.store.get();
+    const srcLang = settings.sourceLang || 'ja';
+    const tgtLang = settings.targetLang || 'es';
+    const engineName = settings.engine || 'google-free';
+
+    // Deduplication: skip if we just processed the exact same text
+    // (prevents double-translation when stdout and TCP both deliver the same text)
+    const crypto = require('crypto');
+    const textHash = crypto.createHash('md5').update(text).digest('hex');
+    const now = Date.now();
+
+    // v3.9.8: For OCR, similarity-based dedup is now handled in ocr.js
+    // (_isSimilarText). The OCR service only emits 'text' events when the
+    // new text is genuinely different from the last emitted text (>80%
+    // word overlap means same dialogue, skip it). So we only need a
+    // simple exact-match safety net here for the rare case where the
+    // same text somehow arrives twice.
+    // For Textractor/Clipboard: time-based dedup (2s window) to handle
+    // stdout+TCP double delivery.
+    const isOcr = settings.inputMethod === 'ocr';
+    if (isOcr) {
+      // Light dedup: only skip if EXACT same text was just processed.
+      // The heavy similarity dedup is done in ocr.js before emitting.
+      if (this._lastOcrTextHash === textHash) {
+        console.log(`[Tuhua] OCR exact duplicate skipped: "${text.substring(0, 30)}..."`);
+        return;
+      }
+      this._lastOcrTextHash = textHash;
+    } else {
+      if (this._lastHandledHash === textHash && (now - this._lastHandledTime) < 2000) {
+        console.log(`[Tuhua] Duplicate text skipped (dedup): "${text.substring(0, 30)}..."`);
+        return;
+      }
+      this._lastHandledHash = textHash;
+      this._lastHandledTime = now;
+    }
+
+    console.log(`[Tuhua] _handleText: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}, active=${this._translationActive}, inputMethod=${settings.inputMethod}, text="${text.substring(0, 60)}..."`);
+
+    // If translation is paused, skip everything — no text to overlays, no translation
+    if (!this._translationActive) {
+      console.log(`[Tuhua] Translation paused — skipping text`);
+      return;
+    }
+
+    // Translate
+    try {
+      console.log(`[Tuhua] Calling pipeline.translate() with engine=${engineName}...`);
+      const translation = await this.pipeline.translate(text, {
+        source: srcLang,
+        target: tgtLang,
+        engine: engineName
+      });
+
+      console.log(`[Tuhua] Translation result: "${translation?.substring(0, 60)}..."`);
+      // Send translation to output overlay
+      this.windowManager.sendToOutputOverlay('update-output', { text: translation, targetLang: tgtLang });
+    } catch (err) {
+      console.error(`[Tuhua] Translation error:`, err.message);
+      this.windowManager.sendToOutputOverlay('update-output', {
+        text: `[Error] ${err.message}`
+      });
+    }
+  }
+
+  /**
+   * Deduplicate text segments split by garbage digit delimiters.
+   * Safety net for text arriving from TCP or other sources that bypass _cleanGameText.
+   * Handles patterns like: "0I softly murmured.0I softly murmured.0" → "I softly murmured."
+   */
+  _deduplicateText(text) {
+    if (!text || text.length < 4) return text;
+
+    // v3.11.23: Improved Textractor text deduplication with multiple strategies.
+    // Textractor hooks often produce text with these patterns:
+    // 1. Character repeat: 恵恵恵麻麻麻 → 恵麻 (same char repeated N times)
+    // 2. Line repeat: ABCDABCDABCD → ABCD (full sentence repeated)
+    // 3. Incremental text: ABCDBCDCDD → ABCD (char-by-char display hook)
+    // 4. Digit-delimited segments: "1text12more2" → "text more" (old method)
+
+    // Strategy 1: Character-level deduplication
+    // If a character appears 3+ times consecutively, collapse to single occurrence
+    // This handles: 恵恵恵麻麻麻 → 恵麻
+    let result = text.replace(/(.)\1{2,}/g, '$1');
+
+    // Strategy 2: Check for full-line repetition
+    // ABCDABCDABCD → ABCD
+    // Try different repeat lengths
+    for (let unitLen = 1; unitLen <= Math.floor(result.length / 2); unitLen++) {
+      const unit = result.substring(0, unitLen);
+      const repeated = unit.repeat(Math.floor(result.length / unitLen));
+      // If the text is mostly the unit repeated (allowing some trailing chars)
+      if (repeated.length >= result.length * 0.8 && result.startsWith(repeated.substring(0, repeated.length))) {
+        // Verify it's actually a clean repetition
+        const fullRepeats = Math.floor(result.length / unitLen);
+        if (fullRepeats >= 2) {
+          const candidate = result.substring(0, unitLen);
+          // Only accept if the repeated unit is meaningful (not just 1-2 chars)
+          if (candidate.trim().length >= 2) {
+            // Verify the pattern
+            let isRepetition = true;
+            for (let i = 1; i < fullRepeats; i++) {
+              if (result.substring(i * unitLen, (i + 1) * unitLen) !== candidate) {
+                isRepetition = false;
+                break;
+              }
+            }
+            if (isRepetition) {
+              result = candidate;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy 3: Incremental text pattern
+    // ABCDBCDCDD → ABCD (each line adds one more character)
+    // This happens with character-by-character display hooks
+    // The pattern is: S1, S1+S2, S1+S2+S3, ... where each adds one char
+    // The final text contains all previous text as prefixes
+    if (result.length > 10) {
+      // Check if removing each char from the end gives us a prefix of the remaining text
+      const lines = [];
+      let current = '';
+      // Try to find the incremental pattern by looking at the end
+      // If the last N chars appear N times as suffixes, it's incremental
+      let incrementalCleaned = this._removeIncrementalPattern(result);
+      if (incrementalCleaned && incrementalCleaned.length < result.length) {
+        result = incrementalCleaned;
+      }
+    }
+
+    // Strategy 4: Original digit-delimiter deduplication (from v3.8.25)
+    // Split by digit delimiters that separate repeated text segments
+    const segments = result.split(/\d+/)
+      .map(s => s.trim())
+      .filter(s => s.length >= 2);
+
+    if (segments.length > 1) {
+      // Deduplicate: keep only unique segments
+      const unique = [];
+      for (const seg of segments) {
+        let isDupe = false;
+        for (let i = 0; i < unique.length; i++) {
+          const existing = unique[i];
+          // Exact duplicate (case-insensitive)
+          if (existing.toLowerCase() === seg.toLowerCase()) {
+            isDupe = true;
+            break;
+          }
+          // One is a prefix/suffix of the other — keep the longer one
+          if (existing.toLowerCase().startsWith(seg.toLowerCase()) ||
+              seg.toLowerCase().startsWith(existing.toLowerCase())) {
+            if (seg.length > existing.length) unique[i] = seg;
+            isDupe = true;
+            break;
+          }
+          if (existing.toLowerCase().endsWith(seg.toLowerCase()) ||
+              seg.toLowerCase().endsWith(existing.toLowerCase())) {
+            if (seg.length > existing.length) unique[i] = seg;
+            isDupe = true;
+            break;
+          }
+        }
+        if (!isDupe) unique.push(seg);
+      }
+
+      if (unique.length === 1) return unique[0];
+
+      result = unique.join(' ');
+    }
+
+    // Strip any remaining leading/trailing garbage
+    result = result.replace(/^[\d.]+\s*/, ''); // Leading garbage digits+dots
+    result = result.replace(/\d+\s*$/, '');     // Trailing garbage digits only (preserve sentence-ending dots)
+    return result.trim();
+  }
+
+  /**
+   * v3.11.23: Remove incremental display pattern from Textractor hooks.
+   * Character-by-character display hooks produce: "A" "AB" "ABC" "ABCD"
+   * which arrives as concatenated text "ABCDBCDCDD" or similar.
+   * We want to extract just "ABCD".
+   */
+  _removeIncrementalPattern(text) {
+    if (!text || text.length < 4) return text;
+
+    // Try to find the longest string that, when incremented char by char,
+    // produces the observed text pattern.
+    // Simple approach: find the longest prefix that is repeated with incremental additions
+    for (let baseLen = Math.min(50, Math.floor(text.length / 2)); baseLen >= 2; baseLen--) {
+      const base = text.substring(0, baseLen);
+      let pos = 0;
+      let expected = base;
+      let found = true;
+
+      while (pos < text.length) {
+        if (text.substring(pos, pos + expected.length) === expected) {
+          pos += expected.length;
+          // Next expected is one char longer (or same if we're at a boundary)
+          if (pos < text.length) {
+            expected = text.substring(0, Math.min(baseLen + (expected.length - baseLen) + 1, text.length - pos + expected.length));
+          }
+        } else {
+          found = false;
+          break;
+        }
+        // Safety: don't loop forever
+        if (expected.length > text.length) break;
+      }
+
+      if (found && pos >= text.length * 0.8) {
+        return base;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Capture the screen region defined by the capture area window bounds.
+   * Uses Electron's desktopCapturer API to get a screenshot of the specific area.
+   *
+   * v3.9.6: NO hiding/showing of overlays at all. The capture area has
+   * transparent: true and only a thin dashed border + title bar, which are
+   * negligible for OCR quality. Hiding/showing overlays causes visible flashing
+   * and focus changes that ruin the UX. The OCR scan region is offset to
+   * exclude the title bar area (28px at top).
+   *
+   * @returns {Promise<Buffer|null>} PNG image buffer of the captured region
+   */
+  async _captureScreenRegion() {
+    try {
+      const bounds = this.windowManager.getCaptureAreaBounds();
+      if (!bounds) {
+        console.error('[OCR] No capture area bounds available');
+        return null;
+      }
+
+      // Get the primary display
+      const { screen } = require('electron');
+      const primaryDisplay = screen.getPrimaryDisplay();
+      const { width: screenWidth, height: screenHeight } = primaryDisplay.size;
+      const scaleFactor = primaryDisplay.scaleFactor;
+
+      // Use desktopCapturer to get the screen source — NO overlay hiding
+      const sources = await desktopCapturer.getSources({
+        types: ['screen'],
+        thumbnailSize: {
+          width: Math.round(screenWidth * scaleFactor),
+          height: Math.round(screenHeight * scaleFactor)
+        }
+      });
+
+      if (!sources || sources.length === 0) {
+        console.error('[OCR] No screen sources available');
+        return null;
+      }
+
+      const source = sources[0];
+      const thumbnail = source.thumbnail;
+
+      if (thumbnail.isEmpty()) {
+        console.error('[OCR] Screen capture thumbnail is empty');
+        return null;
+      }
+
+      // Crop to the capture area bounds, but SKIP the title bar area (28px at top).
+      // The title bar has "OCR" label and is not part of the text being scanned.
+      const titleBarHeight = 28;
+      const cropX = Math.round(bounds.x * scaleFactor);
+      const cropY = Math.round((bounds.y + titleBarHeight) * scaleFactor);
+      const cropWidth = Math.round(bounds.width * scaleFactor);
+      const cropHeight = Math.round((bounds.height - titleBarHeight) * scaleFactor);
+
+      // Resize the full screenshot and crop it
+      const resized = thumbnail.resize({
+        width: Math.round(screenWidth * scaleFactor),
+        height: Math.round(screenHeight * scaleFactor)
+      });
+
+      const cropped = resized.crop({
+        x: cropX,
+        y: cropY,
+        width: Math.min(cropWidth, resized.getSize().width - cropX),
+        height: Math.min(cropHeight, resized.getSize().height - cropY)
+      });
+
+      // Convert to PNG buffer
+      const pngBuffer = cropped.toPNG();
+      return Buffer.from(pngBuffer);
+    } catch (err) {
+      console.error('[OCR] Screen capture error:', err.message);
+      return null;
+    }
+  }
+
+  /**
+   * Start OCR auto-capture with the best default interval
+   */
+  _startOcrAutoCapture() {
+    // v3.9.9: 3500ms interval (was 7000ms). Faster scanning means
+    // game dialogue is picked up sooner. The similarity-based dedup
+    // prevents re-translating the same text, so faster scans are safe.
+    // Sequential processing + change detection prevent overload.
+    this.ocrService.startAutoCapture(async () => {
+      return await this._captureScreenRegion();
+    }, 3500);
+  }
+
+  unregister() {
+    const channels = [
+      'get-settings', 'save-settings',
+      'get-glossary', 'save-glossary', 'delete-glossary-entry',
+      'import-glossary', 'export-glossary',
+      'get-history', 'clear-history', 'export-history',
+      'get-profiles', 'save-profile', 'delete-profile', 'load-profile',
+      'validate-api-key', 'test-connection', 'detect-font-family',
+      'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-set-language',
+      'ocr-set-interval', 'ocr-set-preprocessing', 'ocr-status',
+      'ocr-set-auto-capture', 'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
+      'textractor-validate-cli', 'textractor-browse-cli', 'textractor-launch',
+      'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
+      'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
+      'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
+      'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game', 'xuat-set-port',
+      'xuat-test-endpoint'
+    ];
+    channels.forEach(ch => ipcMain.removeHandler(ch));
+    ipcMain.removeAllListeners('manual-translate');
+    // Cleanup OCR
+    if (this.ocrService) {
+      this.ocrService.stopAutoCapture();
+    }
+    this.registered = false;
+  }
+}
+
+module.exports = IpcHandlers;

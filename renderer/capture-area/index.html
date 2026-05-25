@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tuhua OCR Capture Area</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: transparent;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        /* Title bar — OUTSIDE the scan region, sits at the top */
+        #title-bar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 28px;
+            background: rgba(15, 23, 42, 0.85);
+            border-bottom: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 6px 6px 0 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 8px;
+            cursor: grab;
+            -webkit-app-region: drag;
+            z-index: 20;
+        }
+
+        #title-bar:active {
+            cursor: grabbing;
+        }
+
+        #title-bar .left {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #title-bar .label {
+            color: rgba(16, 185, 129, 0.9);
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        #title-bar .grip {
+            color: rgba(148, 163, 184, 0.5);
+            font-size: 10px;
+        }
+
+        #title-bar .right {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            -webkit-app-region: no-drag;
+        }
+
+        /* Status indicator — NOW IN THE TITLE BAR to avoid overlapping game text */
+        #status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: 6px;
+            -webkit-app-region: no-drag;
+        }
+
+        #status-indicator .dot {
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+
+        #status-indicator .dot.idle { background: #64748b; }
+        #status-indicator .dot.capturing { background: #10b981; animation: pulse 1.5s ease-in-out infinite; }
+        #status-indicator .dot.paused { background: #eab308; }
+        #status-indicator .dot.error { background: #ef4444; }
+
+        #status-indicator #status-text {
+            font-size: 9px;
+            color: #94a3b8;
+            white-space: nowrap;
+            letter-spacing: 0.3px;
+        }
+
+        /* Scan region — the area BELOW the title bar with dashed border.
+           This is what indicates the section being scanned for OCR text. */
+        #scan-region {
+            position: absolute;
+            top: 28px;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            border: 2px dashed rgba(16, 185, 129, 0.7);
+            border-radius: 0 0 4px 4px;
+            background: rgba(16, 185, 129, 0.03);
+        }
+
+        #scan-region.capturing {
+            border-color: rgba(16, 185, 129, 0.9);
+            background: rgba(16, 185, 129, 0.05);
+        }
+
+        #scan-region.paused {
+            border-color: rgba(234, 179, 8, 0.6);
+            background: rgba(234, 179, 8, 0.03);
+        }
+
+        /* Toolbar buttons in title bar */
+        .tb-btn {
+            width: 22px;
+            height: 22px;
+            border: 1px solid rgba(100, 116, 139, 0.3);
+            border-radius: 4px;
+            background: rgba(15, 23, 42, 0.6);
+            color: #94a3b8;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.15s;
+            font-size: 11px;
+            line-height: 1;
+        }
+
+        .tb-btn:hover {
+            background: rgba(30, 41, 59, 0.95);
+            color: #e2e8f0;
+            border-color: rgba(16, 185, 129, 0.5);
+        }
+
+        .tb-btn.close-btn:hover {
+            background: rgba(239, 68, 68, 0.2);
+            color: #ef4444;
+            border-color: rgba(239, 68, 68, 0.5);
+        }
+
+        .tb-btn.pause-btn.paused {
+            border-color: rgba(234, 179, 8, 0.5);
+            color: #eab308;
+        }
+
+        .tb-btn.pause-btn.paused:hover {
+            background: rgba(234, 179, 8, 0.15);
+            color: #facc15;
+        }
+
+        /* Resize handles */
+        .resize-handle {
+            position: absolute;
+            z-index: 5;
+        }
+
+        .resize-handle.top-left { top: 24px; left: -4px; width: 12px; height: 12px; cursor: nw-resize; }
+        .resize-handle.top-right { top: 24px; right: -4px; width: 12px; height: 12px; cursor: ne-resize; }
+        .resize-handle.bottom-left { bottom: -4px; left: -4px; width: 12px; height: 12px; cursor: sw-resize; }
+        .resize-handle.bottom-right { bottom: -4px; right: -4px; width: 12px; height: 12px; cursor: se-resize; }
+        .resize-handle.top { top: 24px; left: 20px; right: 20px; height: 8px; cursor: n-resize; }
+        .resize-handle.bottom { bottom: -4px; left: 20px; right: 20px; height: 8px; cursor: s-resize; }
+        .resize-handle.left { top: 48px; left: -4px; bottom: 20px; width: 8px; cursor: w-resize; }
+        .resize-handle.right { top: 48px; right: -4px; bottom: 20px; width: 8px; cursor: e-resize; }
+
+        /* Corner indicators on scan region */
+        .corner-indicator {
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            border: 2px solid rgba(16, 185, 129, 0.6);
+            z-index: 6;
+        }
+
+        .corner-indicator.tl { top: 27px; left: -1px; border-right: none; border-bottom: none; }
+        .corner-indicator.tr { top: 27px; right: -1px; border-left: none; border-bottom: none; }
+        .corner-indicator.bl { bottom: -1px; left: -1px; border-right: none; border-top: none; }
+        .corner-indicator.br { bottom: -1px; right: -1px; border-left: none; border-top: none; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Title bar — above the scan region, NOT part of what OCR captures.
+         Status indicator is now here to avoid overlapping game text. -->
+    <div id="title-bar">
+        <div class="left">
+            <span class="grip">⠿</span>
+            <span class="label">OCR</span>
+            <!-- Status indicator moved into title bar -->
+            <div id="status-indicator">
+                <span class="dot idle"></span>
+                <span id="status-text">Escaneando</span>
+            </div>
+        </div>
+        <div class="right">
+            <button class="tb-btn pause-btn" id="btn-pause" title="Pausar/Reanudar escaneo" onclick="toggleScan()">⏸</button>
+            <button class="tb-btn" id="btn-capture" title="Capturar ahora" onclick="manualCapture()">📸</button>
+            <button class="tb-btn close-btn" id="btn-close" title="Cerrar" onclick="closeCaptureArea()">✕</button>
+        </div>
+    </div>
+
+    <!-- Scan region — dashed border indicates the section being scanned for OCR text.
+         No status indicator here anymore — it's in the title bar. -->
+    <div id="scan-region">
+        <!-- Corner Indicators -->
+        <div class="corner-indicator tl"></div>
+        <div class="corner-indicator tr"></div>
+        <div class="corner-indicator bl"></div>
+        <div class="corner-indicator br"></div>
+
+        <!-- Resize Handles -->
+        <div class="resize-handle top-left" data-dir="nw"></div>
+        <div class="resize-handle top-right" data-dir="ne"></div>
+        <div class="resize-handle bottom-left" data-dir="sw"></div>
+        <div class="resize-handle bottom-right" data-dir="se"></div>
+        <div class="resize-handle top" data-dir="n"></div>
+        <div class="resize-handle bottom" data-dir="s"></div>
+        <div class="resize-handle left" data-dir="w"></div>
+        <div class="resize-handle right" data-dir="e"></div>
+    </div>
+
+    <script>
+        const api = window.tuhuaOverlay;
+        let isScanPaused = false;
+
+        // ===== TOGGLE SCAN PAUSE/RESUME =====
+        function toggleScan() {
+            if (api && api.ocrToggleScan) {
+                api.ocrToggleScan().then(result => {
+                    if (result && result.success) {
+                        isScanPaused = !result.scanning;
+                        const btn = document.getElementById('btn-pause');
+                        const region = document.getElementById('scan-region');
+
+                        if (isScanPaused) {
+                            btn.textContent = '▶';
+                            btn.classList.add('paused');
+                            region.classList.add('paused');
+                            region.classList.remove('capturing');
+                            updateStatus('paused', 'Escaneo pausado');
+                        } else {
+                            btn.textContent = '⏸';
+                            btn.classList.remove('paused');
+                            region.classList.remove('paused');
+                            updateStatus('idle', 'Escaneando');
+                        }
+                    }
+                });
+            }
+        }
+
+        // ===== MANUAL CAPTURE =====
+        function manualCapture() {
+            updateStatus('capturing', 'Capturando...');
+            if (api && api.ocrCapture) {
+                api.ocrCapture().then(result => {
+                    if (result && result.success) {
+                        updateStatus(isScanPaused ? 'paused' : 'idle', isScanPaused ? 'Escaneo pausado' : 'Escaneando');
+                    } else {
+                        updateStatus('error', 'Error al capturar');
+                        setTimeout(() => updateStatus(isScanPaused ? 'paused' : 'idle', isScanPaused ? 'Escaneo pausado' : 'Escaneando'), 2000);
+                    }
+                }).catch(() => {
+                    updateStatus('error', 'Error');
+                    setTimeout(() => updateStatus(isScanPaused ? 'paused' : 'idle', isScanPaused ? 'Escaneo pausado' : 'Escaneando'), 2000);
+                });
+            }
+        }
+
+        // ===== CLOSE =====
+        function closeCaptureArea() {
+            if (api && api.ocrCloseCaptureArea) {
+                api.ocrCloseCaptureArea();
+            }
+        }
+
+        // ===== STATUS UPDATE =====
+        function updateStatus(state, text) {
+            const indicator = document.getElementById('status-indicator');
+            const dot = indicator.querySelector('.dot');
+            const statusText = document.getElementById('status-text');
+
+            dot.className = 'dot ' + state;
+            statusText.textContent = text;
+        }
+
+        // ===== LISTEN FOR EVENTS FROM MAIN PROCESS =====
+        if (api) {
+            api.onShortcut((data) => {
+                if (data.action === 'ocr-status') {
+                    if (data.state === 'recognizing') {
+                        if (!isScanPaused) {
+                            updateStatus('capturing', 'Reconociendo...');
+                        }
+                    } else if (data.state === 'ready' || data.state === 'auto-capturing') {
+                        if (!isScanPaused) {
+                            updateStatus('idle', 'Escaneando');
+                        }
+                    } else if (data.state === 'error') {
+                        updateStatus('error', 'Error');
+                    }
+                }
+            });
+        }
+
+        // Initialize status
+        updateStatus('idle', 'Escaneando');
+    </script>
+</body>
+</html>

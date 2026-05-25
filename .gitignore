@@ -1,0 +1,74 @@
+# ============================================
+# Tuhua Translator — .gitignore
+# ============================================
+
+# === Dependencies ===
+node_modules/
+
+# === Build output ===
+dist/
+out/
+build/
+
+# === Electron Builder ===
+*.blockmap
+*.exe
+*.dmg
+*.AppImage
+*.snap
+*.deb
+*.rpm
+*.pacman
+
+# === Runtime data (user-specific) ===
+translation-cache.json
+glossary.json
+translation-memory.json
+tuhua-translator-config.json
+
+# === Environment & Secrets ===
+.env
+.env.local
+.env.production
+.env.*.local
+
+# === Logs ===
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# === OS generated files ===
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# === IDE / Editor ===
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# === Cache ===
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# === Coverage ===
+coverage/
+
+# === Temporary files ===
+tmp/
+temp/

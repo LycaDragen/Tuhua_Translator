@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tuhua Translator</title>
+    <link rel="icon" type="image/x-icon" href="assets/Tuhua.ico">
+    <script src="i18n.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { 950: '#080e1a', 900: '#0f172a', 800: '#1e293b', 700: '#334155', 600: '#475569' },
+                        emerald: { 650: '#059669' }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Scrollbar */
+        .scrollbar-thin::-webkit-scrollbar { width: 4px; }
+        .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+        .scrollbar-thin::-webkit-scrollbar-thumb { background: rgba(100,116,139,0.3); border-radius: 4px; }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: rgba(100,116,139,0.5); }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+
+        /* Tab active indicator */
+        .tab-btn { position: relative; transition: all 0.2s; }
+        .tab-btn.active { color: #10b981; }
+        .tab-btn.active::after {
+            content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
+            background: #10b981; border-radius: 2px 2px 0 0;
+        }
+
+        /* Smooth transitions */
+        .fade-in { animation: fadeIn 0.2s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* Input focus ring */
+        input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 2px rgba(16,185,129,0.3); }
+
+        /* Range slider */
+        input[type="range"] { -webkit-appearance: none; background: transparent; }
+        input[type="range"]::-webkit-slider-runnable-track { height: 6px; background: linear-gradient(to right, #10b981, #059669); border-radius: 3px; border: 1px solid rgba(16,185,129,0.3); }
+        input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; background: #10b981; border: 2px solid #fff; border-radius: 50%; margin-top: -7px; cursor: pointer; box-shadow: 0 1px 4px rgba(0,0,0,0.3); }
+        input[type="range"]::-webkit-slider-thumb:hover { background: #059669; }
+        /* Light theme track */
+        .light input[type="range"]::-webkit-slider-runnable-track { background: linear-gradient(to right, #10b981, #059669); border-color: rgba(16,185,129,0.2); }
+
+        /* Pulse dot */
+        .pulse-dot { animation: pulseDot 2s ease-in-out infinite; }
+        @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        /* Play/Pause toggle button */
+        .toggle-btn-active {
+            background: linear-gradient(135deg, #10b981, #059669);
+            box-shadow: 0 0 20px rgba(16, 185, 129, 0.4), 0 0 40px rgba(16, 185, 129, 0.1);
+        }
+        .toggle-btn-paused {
+            background: linear-gradient(135deg, #6b7280, #4b5563);
+            box-shadow: 0 0 12px rgba(107, 114, 128, 0.3);
+        }
+        .toggle-pulse-ring {
+            animation: togglePulseRing 2s ease-in-out infinite;
+        }
+        @keyframes togglePulseRing {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+            70% { box-shadow: 0 0 0 12px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        /* Dark mode dropdown menus — use dark background for option popups */
+        .dark select { color-scheme: dark; }
+        .dark select option { background-color: #1e293b; color: #e2e8f0; }
+        .dark select optgroup { background-color: #1e293b; color: #94a3b8; }
+    </style>
+</head>
+<body class="bg-gray-100 dark:bg-dark-950 text-gray-800 dark:text-gray-100 h-screen flex flex-col overflow-hidden font-sans transition-colors duration-300">
+
+    <!-- NAVBAR -->
+    <nav class="bg-white dark:bg-dark-800 border-b border-gray-200 dark:border-dark-700 px-4 py-3 flex justify-between items-center shadow-sm z-20">
+        <div class="flex items-center gap-2.5">
+            <img src="assets/icon-256.png" alt="Tuhua" class="w-8 h-8 rounded-lg shadow-lg shadow-emerald-500/20 object-contain">
+            <div>
+                <span class="font-bold text-base tracking-tight">Tuhua <span class="text-emerald-600 dark:text-emerald-400">Translator</span></span>
+                <span class="text-[10px] text-gray-400 ml-1.5" data-i18n="app_subtitle">Open Source VN Translator</span><span class="text-[9px] font-mono text-emerald-500/70 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-1.5">v3.11.24</span>
+            </div>
+        </div>
+        <div class="flex items-center gap-3">
+            <!-- Connection Status -->
+            <div id="connection-badge" class="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800/50">
+                <span class="w-1.5 h-1.5 rounded-full bg-current"></span>
+                <span data-i18n="status_disconnected">Desconectado</span>
+            </div>
+            <!-- Language -->
+            <select id="lang-select" onchange="changeLanguage(this.value)" class="bg-white dark:bg-slate-700 border border-gray-300 dark:border-slate-600 text-gray-700 dark:text-white text-xs rounded-md px-2 py-1 cursor-pointer outline-none shadow-sm">
+                <option value="en">English</option>
+                <option value="es" selected>Español</option>
+                <option value="ru">Русский</option>
+                <option value="pt">Português</option>
+                <option value="it">Italiano</option>
+                <option value="fr">Français</option>
+                <option value="ja">日本語</option>
+                <option value="zh">中文</option>
+            </select>
+            <!-- Settings -->
+            <button onclick="toggleSettingsModal()" class="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-700 transition text-gray-500 dark:text-gray-400" aria-label="Settings">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+            </button>
+            <!-- Theme Toggle -->
+            <button onclick="toggleTheme()" class="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-700 transition text-yellow-500 dark:text-yellow-300" aria-label="Toggle Theme">
+                <svg id="theme-icon-sun" class="w-4 h-4 hidden" fill="currentColor" viewBox="0 0 20 20"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z"/></svg>
+                <svg id="theme-icon-moon" class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/></svg>
+            </button>
+            <!-- Guide -->
+            <button onclick="toggleGuide(true)" class="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-700 transition text-blue-500" title="Setup Guide">
+                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+            </button>
+        </div>
+    </nav>
+
+    <div class="flex flex-1 overflow-hidden">
+
+        <!-- SIDEBAR -->
+        <aside class="w-[380px] min-w-[380px] bg-white dark:bg-dark-800 border-r border-gray-200 dark:border-dark-700 flex flex-col overflow-hidden z-10">
+            <!-- Tabs -->
+            <div class="flex border-b border-gray-200 dark:border-dark-700 px-2">
+                <button onclick="switchTab('settings')" id="tab-btn-settings" class="tab-btn active flex-1 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white transition" data-i18n="tab_settings">Configuración</button>
+                <button onclick="switchTab('glossary')" id="tab-btn-glossary" class="tab-btn flex-1 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white transition" data-i18n="tab_glossary">Glosario</button>
+                <button onclick="switchTab('history')" id="tab-btn-history" class="tab-btn flex-1 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white transition" data-i18n="tab_history">Historial</button>
+                <button onclick="switchTab('profiles')" id="tab-btn-profiles" class="tab-btn flex-1 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white transition" data-i18n="tab_profiles">Perfiles</button>
+            </div>
+
+            <!-- ===== SETTINGS TAB ===== -->
+            <div id="tab-settings" class="flex-1 overflow-y-auto scrollbar-thin p-5 space-y-6 fade-in">
+
+                <!-- Input Method -->
+                <div>
+                    <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider" data-i18n="input_method">Método de Entrada</label>
+                    <div class="grid grid-cols-4 gap-2">
+                        <button onclick="setInputMethod('textractor')" id="btn-textractor" class="min-w-0 p-2.5 rounded-lg border-2 border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 text-emerald-700 dark:text-emerald-300 text-xs font-medium transition hover:bg-emerald-100 dark:hover:bg-emerald-900/30 overflow-hidden text-center">
+                            <span class="block text-base mb-1">🪝</span>
+                            <span data-i18n="method_textractor" class="block text-[10px] leading-tight break-words">Textractor</span>
+                        </button>
+                        <button onclick="setInputMethod('clipboard')" id="btn-clipboard" class="min-w-0 p-2.5 rounded-lg border-2 border-gray-200 dark:border-dark-600 bg-gray-50 dark:bg-dark-900 text-gray-600 dark:text-gray-300 text-xs font-medium transition hover:bg-gray-100 dark:hover:bg-dark-700 overflow-hidden text-center">
+                            <span class="block text-base mb-1">📋</span>
+                            <span data-i18n="method_clipboard" class="block text-[10px] leading-tight break-words">Portapapeles</span>
+                        </button>
+                        <button onclick="setInputMethod('ocr')" id="btn-ocr" class="min-w-0 p-2.5 rounded-lg border-2 border-gray-200 dark:border-dark-600 bg-gray-50 dark:bg-dark-900 text-gray-600 dark:text-gray-300 text-xs font-medium transition hover:bg-gray-100 dark:hover:bg-dark-700 overflow-hidden text-center">
+                            <span class="block text-base mb-1">📸</span>
+                            <span data-i18n="method_ocr" class="block text-[10px] leading-tight break-words">OCR</span>
+                        </button>
+                        <button onclick="setInputMethod('xuat')" id="btn-xuat" class="min-w-0 p-2.5 rounded-lg border-2 border-gray-200 dark:border-dark-600 bg-gray-50 dark:bg-dark-900 text-gray-600 dark:text-gray-300 text-xs font-medium transition hover:bg-gray-100 dark:hover:bg-dark-700 overflow-hidden text-center">
+                            <span class="block text-base mb-1">🎮</span>
+                            <span data-i18n="method_xuat" class="block text-[10px] leading-tight break-words">XUAT</span>
+                        </button>
+                    </div>
+                    <p id="ocr-desc" class="hidden text-[9px] text-purple-500 dark:text-purple-400 mt-1.5 italic" data-i18n="method_ocr_desc">Captura región de pantalla y detecta texto por OCR.</p>
+                    <p id="xuat-desc" class="hidden text-[9px] text-purple-500 dark:text-purple-400 mt-1.5 italic" data-i18n="method_xuat_desc">XUAT traduce juegos Unity reemplazando el texto directamente dentro del juego. No necesita overlay — el texto traducido aparece en la ventana del juego.</p>
+                </div>
+
+                <!-- Engine -->
+                <div>
+                    <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider" data-i18n="engine_label">Motor de Traducción</label>
+                    <select id="engine-select" onchange="autoSaveEngine()" class="w-full p-2.5 rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-sm font-medium cursor-pointer appearance-none">
+                        <!-- GRATUITOS -->
+                        <option value="google-free" data-i18n-engine="engine_google_free">🌐 Google Translate (Gratuito)</option>
+                        <option value="bing" data-i18n-engine="engine_bing">🔍 Bing Translator (Gratuito)</option>
+                        <!-- LOCALES / OFFLINE -->
+                        <option value="local-llm" data-i18n-engine="engine_local_llm">🤖 Local LLM (Ollama/LM Studio)</option>
+                        <option value="libretranslate" data-i18n-engine="engine_libretranslate">🏠 LibreTranslate (Offline)</option>
+                        <!-- OFICIALES -->
+                        <option value="deepl" data-i18n-engine="engine_deepl">💎 DeepL API (Requiere Key)</option>
+                        <option value="openai" data-i18n-engine="engine_openai">🧠 OpenAI / GPT (Requiere Key)</option>
+                        <!-- PERSONALIZADO -->
+                        <option value="custom-mt" data-i18n-engine="engine_custom_mt">⚙️ Custom MT Endpoint</option>
+                    </select>
+                    <p id="engine-desc" class="text-[11px] text-gray-500 dark:text-gray-400 mt-1.5" data-i18n="desc_google_free">Traducción gratuita usando Google Web.</p>
+                </div>
+
+                <!-- API Key Section -->
+                <div id="api-key-section" class="hidden space-y-2 p-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-900/30">
+                    <div class="flex items-center justify-between">
+                        <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase" data-i18n="api_key_label">API Key</label>
+                        <button id="validate-api-btn" onclick="validateApiKey()" class="text-[10px] font-medium px-2.5 py-1 rounded-md bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50 transition flex items-center gap-1">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <span data-i18n="validate_btn">Validar</span>
+                        </button>
+                    </div>
+                    <input type="password" id="api-key" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono transition-colors duration-200" placeholder="Pega tu Key aquí..." oninput="markUnsaved()">
+                    <div id="api-key-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
+                    <!-- v3.11.23: DeepL Formality -->
+                    <div id="deepl-formality-section" class="hidden mt-2">
+                        <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="deepl_formality">Formalidad</label>
+                        <select id="deepl-formality" onchange="autoSaveDeepLFormality()" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs cursor-pointer">
+                            <option value="default" data-i18n="formality_default">Por defecto</option>
+                            <option value="prefer_more" data-i18n="formality_prefer_more">Preferir formal</option>
+                            <option value="prefer_less" data-i18n="formality_prefer_less">Preferir informal</option>
+                            <option value="more" data-i18n="formality_more">Siempre formal</option>
+                            <option value="less" data-i18n="formality_less">Siempre informal</option>
+                        </select>
+                        <p class="text-[9px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="deepl_formality_desc">Controla el nivel de formalidad de la traducción. Útil para japonés (keigo/casual).</p>
+                    </div>
+                </div>
+
+                <!-- Local Config Section -->
+                <div id="local-config-section" class="hidden space-y-2 border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4">
+                    <div class="flex items-center justify-between">
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="local_config_label">Configuración Local</label>
+                        <button onclick="validateLocalEndpoint()" class="text-[10px] font-medium px-2.5 py-1 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <span data-i18n="validate_btn">Validar</span>
+                        </button>
+                    </div>
+                    <input type="text" id="local-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:1234/v1" oninput="markUnsaved()">
+                    <input type="text" id="local-model" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Model name (e.g. llama3)" oninput="markUnsaved()">
+                    <div id="local-endpoint-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
+                </div>
+
+                <!-- LibreTranslate Section -->
+                <div id="libretranslate-section" class="hidden space-y-2 border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4">
+                    <div class="flex items-center justify-between">
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="libretranslate_endpoint">Endpoint LibreTranslate</label>
+                        <button onclick="validateLibreTranslate()" class="text-[10px] font-medium px-2.5 py-1 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <span data-i18n="validate_btn">Validar</span>
+                        </button>
+                    </div>
+                    <input type="text" id="libretranslate-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:5000" oninput="markUnsaved()">
+                    <div id="libretranslate-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
+                </div>
+
+                <!-- Custom MT Section -->
+                <div id="custom-mt-section" class="hidden space-y-2 border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4">
+                    <div class="flex items-center justify-between">
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="custom_mt_endpoint">Custom MT Endpoint</label>
+                        <button onclick="validateCustomMT()" class="text-[10px] font-medium px-2.5 py-1 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                            <span data-i18n="validate_btn">Validar</span>
+                        </button>
+                    </div>
+                    <input type="text" id="custom-mt-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="https://api.example.com/translate" oninput="markUnsaved()">
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_method">HTTP Method</label>
+                            <select id="custom-mt-method" onchange="markUnsaved()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <option value="POST">POST</option>
+                                <option value="GET">GET</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_response">Response Path</label>
+                            <input type="text" id="custom-mt-response" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="data.translations.0.text" oninput="markUnsaved()">
+                        </div>
+                    </div>
+                    <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_body">Request Body Template</label>
+                    <textarea id="custom-mt-body" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[10px] font-mono resize-none" placeholder='{"text":"{{text}}","source":"{{source}}","target":"{{target}}"}'  oninput="markUnsaved()"></textarea>
+                    <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_auth">Auth Header</label>
+                    <input type="text" id="custom-mt-auth" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Authorization: Bearer {{apiKey}}" oninput="markUnsaved()">
+                    <div id="custom-mt-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
+                </div>
+
+                <!-- Languages -->
+                <div class="border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1.5" data-i18n="source_lang">Idioma Origen</label>
+                            <select id="source-lang" onchange="autoSaveLanguage()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <option id="source-lang-auto" value="auto" selected data-i18n-lang="auto">🌐 Auto-detectar</option>
+                                <option value="ja" data-i18n-lang="ja">🇯🇵 日本語</option>
+                                <option value="en" data-i18n-lang="en">🇺🇸 English</option>
+                                <option value="es" data-i18n-lang="es">🇪🇸 Español</option>
+                                <option value="zh" data-i18n-lang="zh">🇨🇳 中文</option>
+                                <option value="ko" data-i18n-lang="ko">🇰🇷 한국어</option>
+                                <option value="ru" data-i18n-lang="ru">🇷🇺 Русский</option>
+                                <option value="pt" data-i18n-lang="pt">🇧🇷 Português</option>
+                                <option value="fr" data-i18n-lang="fr">🇫🇷 Français</option>
+                                <option value="de" data-i18n-lang="de">🇩🇪 Deutsch</option>
+                                <option value="it" data-i18n-lang="it">🇮🇹 Italiano</option>
+                                <option value="ar" data-i18n-lang="ar">🇸🇦 العربية</option>
+                                <option value="th" data-i18n-lang="th">🇹🇭 ไทย</option>
+                                <option value="vi" data-i18n-lang="vi">🇻🇳 Tiếng Việt</option>
+                                <option value="id" data-i18n-lang="id">🇮🇩 Bahasa Indonesia</option>
+                                <option value="tr" data-i18n-lang="tr">🇹🇷 Türkçe</option>
+                                <option value="nl" data-i18n-lang="nl">🇳🇱 Nederlands</option>
+                                <option value="pl" data-i18n-lang="pl">🇵🇱 Polski</option>
+                                <option value="uk" data-i18n-lang="uk">🇺🇦 Українська</option>
+                                <option value="hi" data-i18n-lang="hi">🇮🇳 हिन्दी</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1.5" data-i18n="target_lang">Idioma Destino</label>
+                            <select id="target-lang" onchange="autoSaveLanguage()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <option value="es" selected data-i18n-lang="es">🇪🇸 Español</option>
+                                <option value="en" data-i18n-lang="en">🇺🇸 English</option>
+                                <option value="ja" data-i18n-lang="ja">🇯🇵 日本語</option>
+                                <option value="zh" data-i18n-lang="zh">🇨🇳 中文</option>
+                                <option value="ko" data-i18n-lang="ko">🇰🇷 한국어</option>
+                                <option value="ru" data-i18n-lang="ru">🇷🇺 Русский</option>
+                                <option value="pt" data-i18n-lang="pt">🇧🇷 Português</option>
+                                <option value="fr" data-i18n-lang="fr">🇫🇷 Français</option>
+                                <option value="de" data-i18n-lang="de">🇩🇪 Deutsch</option>
+                                <option value="it" data-i18n-lang="it">🇮🇹 Italiano</option>
+                                <option value="ar" data-i18n-lang="ar">🇸🇦 العربية</option>
+                                <option value="th" data-i18n-lang="th">🇹🇭 ไทย</option>
+                                <option value="vi" data-i18n-lang="vi">🇻🇳 Tiếng Việt</option>
+                                <option value="id" data-i18n-lang="id">🇮🇩 Bahasa Indonesia</option>
+                                <option value="tr" data-i18n-lang="tr">🇹🇷 Türkçe</option>
+                                <option value="nl" data-i18n-lang="nl">🇳🇱 Nederlands</option>
+                                <option value="pl" data-i18n-lang="pl">🇵🇱 Polski</option>
+                                <option value="uk" data-i18n-lang="uk">🇺🇦 Українська</option>
+                                <option value="hi" data-i18n-lang="hi">🇮🇳 हिन्दी</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- OCR Status (shown only when OCR input method is selected) -->
+                <div id="ocr-settings-section" class="hidden border-t border-purple-800/30 dark:border-purple-500/30 pt-4 space-y-3">
+                    <p id="ocr-status-text" class="text-[9px] text-gray-400 text-center"></p>
+                </div>
+
+                <!-- XUAT Settings Section -->
+                <div id="xuat-settings-section" class="hidden border-t border-purple-800/30 dark:border-purple-500/30 pt-4 space-y-3">
+                    <!-- Server Status -->
+                    <div class="flex items-center justify-between p-2.5 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                        <div>
+                            <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400" data-i18n="xuat_server">Servidor XUAT</span>
+                            <span id="xuat-server-status" class="text-[10px] text-gray-400 ml-2">Desactivado</span>
+                        </div>
+                        <div class="flex gap-1.5">
+                            <button onclick="testXuatEndpoint()" class="px-2 py-1.5 text-[10px] bg-blue-100 dark:bg-blue-900/30 hover:bg-blue-200 dark:hover:bg-blue-800/30 text-blue-600 dark:text-blue-400 rounded-md transition" title="Test connection">🔍</button>
+                            <button id="xuat-toggle-btn" onclick="toggleXuatServer()" class="px-3 py-1.5 text-[10px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded-md transition">Iniciar</button>
+                        </div>
+                    </div>
+                    <!-- Port Config + URL Display -->
+                    <div class="flex items-center gap-2">
+                        <span class="text-[10px] text-gray-500 dark:text-gray-400" data-i18n="xuat_port">Puerto</span>
+                        <input type="number" id="xuat-port" value="8419" min="1024" max="65535" class="w-20 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs text-center" onchange="markUnsaved()">
+                        <button onclick="copyXuatUrl()" class="px-2 py-1.5 text-[10px] bg-gray-200 dark:bg-dark-700 hover:bg-gray-300 dark:hover:bg-dark-600 rounded-md transition" data-i18n="xuat_copy_url">Copiar URL</button>
+                    </div>
+                    <div class="p-2 rounded-md bg-gray-100 dark:bg-dark-800 border border-gray-200 dark:border-dark-600">
+                        <code id="xuat-endpoint-url" class="text-[9px] text-emerald-600 dark:text-emerald-400 break-all">Endpoint: CustomTranslate | URL: http://127.0.0.1:8419/translate</code>
+                    </div>
+                    <!-- Install in Game -->
+                    <div class="space-y-2">
+                        <button onclick="installXuat()" class="w-full px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition flex items-center justify-center gap-2">
+                            🎮 <span data-i18n="xuat_install_btn">Instalar XUAT en un Juego</span>
+                        </button>
+                        <p class="text-[9px] text-gray-400 text-center" data-i18n="xuat_install_desc">Selecciona el .exe del juego Unity y Tuhua instalará automáticamente todo lo necesario.</p>
+                    </div>
+                    <!-- Install Progress -->
+                    <div id="xuat-install-progress" class="hidden p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 space-y-1">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-3 h-3 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                            <span id="xuat-install-status" class="text-[10px] text-blue-600 dark:text-blue-400">Instalando...</span>
+                        </div>
+                        <div class="w-full bg-blue-200 dark:bg-blue-900/30 rounded-full h-1.5">
+                            <div id="xuat-install-bar" class="bg-blue-600 h-1.5 rounded-full transition-all" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <!-- Installed Games -->
+                    <div id="xuat-installed-games" class="space-y-1">
+                    </div>
+                    <!-- Clear Translation Cache -->
+                    <div class="space-y-1">
+                        <button onclick="clearXuatCache()" class="w-full px-3 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-md transition flex items-center justify-center gap-2">
+                            🗑️ <span data-i18n="xuat_clear_cache">Limpiar Caché de Traducción</span>
+                        </button>
+                        <p class="text-[9px] text-gray-400 text-center" data-i18n="xuat_clear_cache_desc">Borra las traducciones en caché del juego. Útil si cambiaste el idioma de destino.</p>
+                    </div>
+                    <!-- Connected Game Status (persistent) -->
+                    <div id="xuat-connected-game" class="hidden p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-800/30 space-y-1">
+                        <div class="flex items-center gap-1.5">
+                            <span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot"></span>
+                            <span class="text-[10px] font-bold text-emerald-700 dark:text-emerald-400">Juego Conectado</span>
+                        </div>
+                        <p id="xuat-connected-game-name" class="text-[9px] text-emerald-600 dark:text-emerald-400">—</p>
+                        <p id="xuat-game-backend" class="hidden text-[9px] text-blue-500 dark:text-blue-400 font-mono">IL2CPP</p>
+                        <p id="xuat-connected-game-hint" class="text-[9px] text-emerald-500 dark:text-emerald-400/70">Inicia el juego para empezar a traducir.</p>
+                        <div id="xuat-translation-counter" class="hidden flex items-center gap-1 mt-1">
+                            <span class="text-[9px] text-gray-400">Traducciones:</span>
+                            <span id="xuat-translation-count" class="text-[9px] font-bold text-emerald-600 dark:text-emerald-400">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Textractor Configuration -->
+                <div id="textractor-port-section" class="border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4 space-y-3">
+
+                    <!-- TextractorCLI Path -->
+                    <div>
+                        <div class="flex justify-between items-center mb-1.5">
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="cli_path_label">TextractorCLI</label>
+                            <div class="flex gap-2 items-center">
+                                <button onclick="testTextractorCli()" id="btn-test-cli" class="text-[10px] text-blue-500 hover:text-blue-400 font-medium flex items-center gap-0.5">
+                                    <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                                    <span>Test</span>
+                                </button>
+                                <button onclick="browseTextractorCli()" class="text-[10px] text-emerald-500 hover:text-emerald-400 font-medium" data-i18n="browse_btn">Examinar</button>
+                            </div>
+                        </div>
+                        <div class="flex gap-2">
+                            <input type="text" id="textractor-cli-path" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[11px] font-mono" placeholder="C:\Textractor (carpeta) o C:\Textractor\x64\Textractor.exe" readonly>
+                            <span id="cli-path-status" class="text-xs self-center"></span>
+                        </div>
+                        <p class="text-[9px] text-gray-400 mt-1" data-i18n="cli_path_help">Ruta a la carpeta de Textractor o al .exe. Se auto-detecta x64/x86.</p>
+                    </div>
+
+                    <!-- Game PID + Launch -->
+                    <div>
+                        <div class="flex justify-between items-center mb-1.5">
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="game_pid_label">PID del Juego</label>
+                            <div class="flex gap-2 items-center">
+                                <button onclick="launchTextractorCli()" id="btn-launch-cli" class="text-[10px] font-medium px-2.5 py-1 rounded-md bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-900/50 transition flex items-center gap-1">
+                                    <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/></svg>
+                                    <span data-i18n="launch_btn">Lanzar</span>
+                                </button>
+                                <button onclick="killTextractorCli()" id="btn-kill-cli" class="hidden text-[10px] font-medium px-2.5 py-1 rounded-md bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition flex items-center gap-1">
+                                    <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clip-rule="evenodd"/></svg>
+                                    <span data-i18n="kill_btn">Detener</span>
+                                </button>
+                            </div>
+                        </div>
+                        <input type="number" id="game-pid" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 font-mono font-bold text-center text-emerald-600 dark:text-emerald-400 text-sm" placeholder="1234" min="1">
+                        <p class="text-[9px] text-gray-400 mt-1" data-i18n="game_pid_help">Encuéntralo en el Administrador de Tareas → Detalles → PID del proceso del juego.</p>
+                    </div>
+
+                    <!-- CLI Status -->
+                    <div id="cli-status-bar" class="hidden p-2 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                        <div class="flex items-center justify-between text-[10px]">
+                            <span id="cli-status-text" class="text-gray-500 dark:text-gray-400">TextractorCLI: Inactivo</span>
+                            <span id="cli-pid-text" class="text-gray-400 font-mono"></span>
+                        </div>
+                        <!-- v3.8.23: Detailed error panel -->
+                        <div id="cli-error-detail" class="hidden mt-2 p-2 rounded bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50">
+                            <p id="cli-error-message" class="text-[10px] text-red-700 dark:text-red-300 font-medium"></p>
+                            <p id="cli-error-hint" class="text-[9px] text-red-600 dark:text-red-400 mt-1"></p>
+                            <details class="mt-1.5">
+                                <summary class="text-[8px] text-red-500 dark:text-red-400 cursor-pointer hover:underline">Detalles técnicos</summary>
+                                <div id="cli-error-technical" class="mt-1 text-[8px] font-mono text-red-600/80 dark:text-red-400/70 whitespace-pre-wrap break-all max-h-24 overflow-y-auto"></div>
+                            </details>
+                        </div>
+                    </div>
+
+                    <!-- Hook Selector (v3.8.22) -->
+                    <div id="hook-selector-section" class="hidden space-y-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-900/30">
+                        <div class="flex items-center justify-between">
+                            <label class="block text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">🪝 Hook Activo</label>
+                            <span id="hook-count-badge" class="text-[9px] font-mono text-emerald-500">0 hooks</span>
+                        </div>
+                        <select id="hook-selector" onchange="onHookSelected(this.value)" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-emerald-200 dark:border-emerald-800 text-xs font-mono">
+                            <option value="">🔄 Auto (seleccionar mejor hook)</option>
+                        </select>
+                        <div id="hook-preview" class="hidden p-2 rounded bg-white/50 dark:bg-dark-800/50 border border-emerald-200/50 dark:border-emerald-800/50">
+                            <p class="text-[9px] text-gray-400 mb-1">Último texto:</p>
+                            <p id="hook-preview-text" class="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed"></p>
+                        </div>
+                        <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
+                    </div>
+
+                    <!-- TCP Port (Advanced) -->
+                    <details class="group">
+                        <summary class="text-[10px] text-gray-400 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300 flex items-center gap-1">
+                            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/></svg>
+                            <span data-i18n="advanced_settings">Configuración Avanzada</span>
+                        </summary>
+                        <div class="mt-2 space-y-2 pl-1">
+                            <div>
+                                <div class="flex justify-between items-center mb-1">
+                                    <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="port_label">Puerto TCP</label>
+                                    <button onclick="testConnection()" class="text-[10px] text-emerald-500 hover:text-emerald-400 font-medium" data-i18n="test_connection">Probar</button>
+                                </div>
+                                <div class="flex gap-2">
+                                    <input type="number" id="textractor-port" value="9251" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 font-mono font-bold text-center text-emerald-600 dark:text-emerald-400 text-sm">
+                                    <span id="connection-test-result" class="text-xs self-center"></span>
+                                </div>
+                                <p class="text-[9px] text-gray-400 mt-1" data-i18n="port_help">Default: 9251. Solo cambia si usas Textractor GUI con otro puerto.</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <label class="text-[10px] text-gray-400" data-i18n="manual_mode_label">Modo Manual (sin CLI)</label>
+                                <input type="checkbox" id="manual-textractor-mode" onchange="toggleManualMode(this.checked)" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                            </div>
+                            <p class="text-[9px] text-gray-400" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
+                        </div>
+                    </details>
+                </div>
+            </div>
+
+            <!-- ===== GLOSSARY TAB ===== -->
+            <div id="tab-glossary" class="hidden flex-1 overflow-y-auto scrollbar-thin p-5 space-y-4 fade-in">
+                <div>
+                    <h3 class="text-sm font-bold" data-i18n="glossary_title">Glosario de Traducción</h3>
+                    <p class="text-[10px] text-gray-400 mt-1" data-i18n="glossary_desc">Define traducciones personalizadas para términos.</p>
+                </div>
+                <!-- Add Entry Form -->
+                <div class="p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 space-y-2">
+                    <input type="text" id="glossary-source" class="w-full p-2 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Source term (e.g. こんにちは)">
+                    <input type="text" id="glossary-target" class="w-full p-2 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Target translation (e.g. Hola)">
+                    <div class="flex gap-2">
+                        <select id="glossary-mode" class="flex-1 p-1.5 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs">
+                            <option value="exact">Exact Match</option>
+                            <option value="case-insensitive">Case Insensitive</option>
+                            <option value="regex">Regex</option>
+                        </select>
+                        <button onclick="addGlossaryEntry()" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-md transition" data-i18n="glossary_add">Agregar</button>
+                    </div>
+                </div>
+                <!-- Import/Export -->
+                <div class="flex gap-2">
+                    <button onclick="importGlossary()" class="flex-1 py-1.5 text-[10px] font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white border border-gray-200 dark:border-dark-600 rounded-md transition" data-i18n="glossary_import">Importar JSON</button>
+                    <button onclick="exportGlossary()" class="flex-1 py-1.5 text-[10px] font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white border border-gray-200 dark:border-dark-600 rounded-md transition" data-i18n="glossary_export">Exportar JSON</button>
+                </div>
+                <!-- Entries List -->
+                <div id="glossary-list" class="space-y-2">
+                    <p class="text-xs text-gray-400 text-center py-4" data-i18n="glossary_empty">Sin entradas en el glosario.</p>
+                </div>
+            </div>
+
+            <!-- ===== HISTORY TAB ===== -->
+            <div id="tab-history" class="hidden flex-1 overflow-hidden flex flex-col fade-in">
+                <div class="p-4 pb-2 space-y-2">
+                    <h3 class="text-sm font-bold" data-i18n="history_title">Historial de Traducciones</h3>
+                    <div class="flex gap-2">
+                        <input type="text" id="history-search" class="flex-1 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Buscar..." oninput="filterHistory(this.value)">
+                        <button onclick="clearHistory()" class="px-3 py-1.5 text-[10px] font-medium text-red-500 hover:text-red-400 border border-red-200 dark:border-red-800 rounded-md transition" data-i18n="history_clear">Limpiar</button>
+                        <button onclick="exportHistory()" class="px-3 py-1.5 text-[10px] font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white border border-gray-200 dark:border-dark-600 rounded-md transition" data-i18n="history_export">Exportar</button>
+                    </div>
+                </div>
+                <div id="history-list" class="flex-1 overflow-y-auto scrollbar-thin p-4 pt-2 space-y-2">
+                    <p class="text-xs text-gray-400 text-center py-8" data-i18n="history_empty">Sin traducciones aún.</p>
+                </div>
+            </div>
+
+            <!-- ===== PROFILES TAB ===== -->
+            <div id="tab-profiles" class="hidden flex-1 overflow-y-auto scrollbar-thin p-5 space-y-4 fade-in">
+                <div>
+                    <h3 class="text-sm font-bold" data-i18n="profiles_title">Perfiles</h3>
+                    <p class="text-[10px] text-gray-400 mt-1" data-i18n="profiles_desc">Guarda configuraciones, glosario e historial para diferentes juegos.</p>
+                </div>
+                <!-- Active Profile Indicator -->
+                <div class="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-800/30">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot"></span>
+                    <span class="text-[10px] text-gray-500 dark:text-gray-400" data-i18n="profile_active">Perfil activo:</span>
+                    <span id="active-profile-indicator" class="text-xs font-bold text-emerald-700 dark:text-emerald-300">Por Defecto</span>
+                </div>
+                <!-- Action Buttons -->
+                <div class="flex gap-2">
+                    <input type="text" id="profile-name" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Nombre del perfil...">
+                    <button onclick="createNewProfile()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition" data-i18n="profile_create">Crear Nuevo</button>
+                </div>
+                <div class="p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-900/30 space-y-1">
+                    <p class="text-[10px] font-bold text-blue-700 dark:text-blue-400" data-i18n="profile_stores_title">Cada perfil almacena:</p>
+                    <ul class="text-[9px] text-blue-600 dark:text-blue-400 space-y-0.5 ml-3 list-disc">
+                        <li data-i18n="profile_stores_glossary">Contenido del glosario</li>
+                        <li data-i18n="profile_stores_history">Historial de traducciones</li>
+                        <li data-i18n="profile_stores_languages">Preferencias de idioma (origen/destino)</li>
+                        <li data-i18n="profile_stores_input">Método de entrada (Textractor/Clipboard/OCR)</li>
+                        <li data-i18n="profile_stores_engine">Motor de traducción y su configuración</li>
+                    </ul>
+                </div>
+                <div id="profile-list" class="space-y-2">
+                    <p class="text-xs text-gray-400 text-center py-4" data-i18n="profile_empty">Sin perfiles guardados.</p>
+                </div>
+            </div>
+
+            <!-- Save Button -->
+            <div class="p-4 border-t border-gray-200 dark:border-dark-700">
+                <button id="save-btn" onclick="saveConfig()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-lg shadow-lg shadow-emerald-500/20 transition transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                    <span id="save-btn-text" data-i18n="save_btn">Aplicar y Guardar</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <main class="flex-1 bg-gray-50 dark:bg-dark-950 flex items-center justify-center relative overflow-hidden">
+            <!-- Subtle background pattern -->
+            <div class="absolute inset-0 opacity-[0.02] pointer-events-none" style="background-image: radial-gradient(#10b981 1px, transparent 1px); background-size: 24px 24px;"></div>
+
+            <div class="text-center max-w-lg p-8 z-10 w-full">
+                <!-- Play/Stop Toggle Button -->
+                <div class="mb-8">
+                    <button id="translation-toggle-btn" onclick="toggleTranslationActive()" class="toggle-btn-active toggle-pulse-ring relative w-28 h-28 rounded-full flex flex-col items-center justify-center mx-auto text-white transition-all duration-300 transform hover:scale-105 active:scale-95">
+                        <!-- Active state icon (pause) -->
+                        <svg id="toggle-icon-pause" class="w-10 h-10 mb-1" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                        <!-- Paused state icon (play) -->
+                        <svg id="toggle-icon-play" class="w-10 h-10 mb-1 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                        <span id="toggle-status-text" class="text-xs font-bold uppercase tracking-wider" data-i18n="status_active">Activo</span>
+                    </button>
+                    <p class="text-[10px] text-gray-400 mt-2 font-medium" data-i18n="toggle_translation">Traducción</p>
+                </div>
+
+                <!-- Status Bar -->
+                <div class="w-full bg-white dark:bg-dark-800 rounded-xl border border-gray-200 dark:border-dark-700 p-3 space-y-2">
+                    <div class="flex items-center justify-between text-[10px]">
+                        <div class="flex items-center gap-2">
+                            <span class="text-gray-400" data-i18n="engine_display">Motor</span>
+                            <span id="display-engine" class="font-bold">Google Free</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-gray-400" data-i18n="target_lang_display">→</span>
+                            <span id="display-target-lang" class="font-bold text-emerald-600 dark:text-emerald-400">Español</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div id="connection-badge-bottom" class="flex items-center gap-1.5 text-[10px] text-gray-400">
+                            <span class="w-1.5 h-1.5 rounded-full bg-gray-400"></span>
+                            <span data-i18n="status_disconnected">Desconectado</span>
+                        </div>
+                        <button onclick="copyDebugLogs()" class="text-[10px] text-gray-400 hover:text-emerald-500 transition flex items-center gap-1" title="Copiar logs de debug">
+                            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                            <span>Logs</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Keyboard Shortcuts Reference -->
+                <div class="mt-6 bg-white dark:bg-dark-800 p-4 rounded-xl border border-gray-200 dark:border-dark-700 text-left">
+                    <span class="text-[10px] font-bold text-gray-400 uppercase">Shortcuts</span>
+                    <div class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[10px]">
+                        <div class="flex justify-between"><span class="text-gray-500">Main Window</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+L</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500">Overlays</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+E</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500">Click-Through</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+M</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500">Retranslate</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+R</kbd></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- MODAL: Setup Guide -->
+    <div id="guide-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm hidden transition-opacity duration-200">
+        <div class="bg-white dark:bg-dark-800 w-full max-w-lg rounded-2xl shadow-2xl border border-gray-200 dark:border-dark-700 overflow-hidden">
+            <div class="bg-emerald-600 p-4 flex justify-between items-center text-white">
+                <h3 class="text-lg font-bold" data-i18n="setup_guide">Guía de Inicio</h3>
+                <button onclick="toggleGuide(false)" class="hover:bg-emerald-700 p-1 rounded transition text-lg">&times;</button>
+            </div>
+            <div class="p-6 space-y-5 max-h-[65vh] overflow-y-auto scrollbar-thin">
+                <div class="flex gap-3"><div class="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold text-sm">1</div><div><h4 class="font-bold text-sm" data-i18n="step1">Descargar Textractor</h4><p class="text-xs text-gray-500 dark:text-gray-400 mt-1" data-i18n="step1_desc">Descárgalo desde github.com/Artikash/Textractor y descomprímelo.</p></div></div>
+                <div class="flex gap-3"><div class="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold text-sm">2</div><div><h4 class="font-bold text-sm" data-i18n="step2">Configurar TextractorCLI</h4><p class="text-xs text-gray-500 dark:text-gray-400 mt-1" data-i18n="step2_desc">Haz clic en 'Examinar' y selecciona la carpeta de Textractor (se auto-detecta x64/x86) o el .exe directamente.</p></div></div>
+                <div class="flex gap-3"><div class="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold text-sm">3</div><div><h4 class="font-bold text-sm" data-i18n="step3">Obtener PID del Juego</h4><p class="text-xs text-gray-500 dark:text-gray-400 mt-1" data-i18n="step3_desc">Abre el Administrador de Tareas → Detalles → busca el PID del proceso de tu Visual Novel.</p></div></div>
+                <div class="flex gap-3"><div class="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold text-sm">4</div><div><h4 class="font-bold text-sm" data-i18n="step4">Lanzar y Traducir</h4><p class="text-xs text-gray-500 dark:text-gray-400 mt-1" data-i18n="step4_desc">Ingresa el PID y haz clic en 'Lanzar'. Tuhua conectará automáticamente y traducirá en el overlay.</p></div></div>
+                <div class="p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-900/30"><p class="text-xs text-blue-800 dark:text-blue-300" data-i18n="step_alt">Alternativa: Si ya usas Textractor GUI, activa 'Modo Manual' en Configuración Avanzada.</p></div>
+            </div>
+            <div class="p-4 bg-gray-50 dark:bg-dark-900 border-t border-gray-200 dark:border-dark-700 text-right">
+                <button onclick="toggleGuide(false)" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg font-bold text-sm transition" data-i18n="close">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal (gear icon popup) -->
+    <div id="settings-modal" class="fixed inset-0 z-50 flex items-center justify-center hidden">
+        <!-- Backdrop -->
+        <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="toggleSettingsModal()"></div>
+        <!-- Modal Card -->
+        <div class="relative w-[560px] max-h-[85vh] bg-white dark:bg-dark-800 rounded-xl shadow-2xl border border-gray-200 dark:border-dark-600 overflow-hidden flex flex-col">
+            <!-- Header -->
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-dark-600">
+                <div class="flex items-center gap-2">
+                    <svg class="w-5 h-5 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                    <h2 class="text-lg font-bold" data-i18n="settings_title">Configuración</h2>
+                </div>
+                <button onclick="toggleSettingsModal()" class="p-1.5 rounded-lg hover:bg-gray-200 dark:hover:bg-dark-700 transition text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                    <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                </button>
+            </div>
+            <!-- v3.10.6: Global settings note -->
+            <div class="px-6 py-2 bg-emerald-50 dark:bg-emerald-900/20 border-b border-emerald-200 dark:border-emerald-800/30 flex items-center gap-2">
+                <svg class="w-4 h-4 text-emerald-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"/></svg>
+                <span class="text-[10px] font-medium text-emerald-700 dark:text-emerald-400" data-i18n="settings_global_note">Estos ajustes son globales y no se ven afectados por los perfiles</span>
+            </div>
+            <!-- Content -->
+            <div class="overflow-y-auto scrollbar-thin p-6 space-y-2">
+                <!-- ===== Overlay Category (collapsible) ===== -->
+                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
+                    <button onclick="toggleSettingsCategory('overlay')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
+                        <div class="flex items-center gap-2">
+                            <div class="w-1 h-5 bg-blue-500 rounded-full"></div>
+                            <h3 class="text-xs font-bold text-blue-500 uppercase tracking-wider" data-i18n="settings_cat_overlay">Overlay</h3>
+                        </div>
+                        <svg id="cat-overlay-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                    </button>
+                    <div id="cat-overlay-content" class="px-4 pb-4 pt-3 space-y-3">
+                        <!-- Font Family -->
+                        <div id="font-family-section">
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="overlay_font">Tipo de Letra</label>
+                            <select id="overlay-font" onchange="onFontFamilyChange(); markUnsaved()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <optgroup label="Japonés">
+                                    <option value="'Meiryo', 'MS Gothic', sans-serif">Meiryo (Recomendado JP)</option>
+                                    <option value="'MS PGothic', 'MS Gothic', sans-serif">MS PGothic (VN Classic)</option>
+                                    <option value="'Yu Gothic', 'Meiryo', sans-serif">Yu Gothic</option>
+                                    <option value="'Noto Sans JP', 'Meiryo', sans-serif">Noto Sans JP</option>
+                                </optgroup>
+                                <optgroup label="Chino">
+                                    <option value="'Noto Sans SC', 'Microsoft YaHei', sans-serif">Noto Sans SC (Simplificado)</option>
+                                    <option value="'Microsoft YaHei', 'Noto Sans SC', sans-serif">Microsoft YaHei</option>
+                                    <option value="'MingLiu', 'PMingLiu', serif">MingLiu (Tradicional)</option>
+                                </optgroup>
+                                <optgroup label="Coreano">
+                                    <option value="'Noto Sans KR', 'Malgun Gothic', sans-serif">Noto Sans KR</option>
+                                    <option value="'Malgun Gothic', 'Noto Sans KR', sans-serif">Malgun Gothic</option>
+                                </optgroup>
+                                <optgroup label="Latino / General">
+                                    <option value="'Segoe UI', 'Noto Sans JP', sans-serif" selected>Segoe UI + Noto Sans JP</option>
+                                    <option value="Arial, 'Helvetica Neue', sans-serif">Arial</option>
+                                    <option value="Verdana, Geneva, sans-serif">Verdana</option>
+                                    <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                                    <option value="Tahoma, Geneva, sans-serif">Tahoma</option>
+                                    <option value="Georgia, serif">Georgia (Serif)</option>
+                                    <option value="'Courier New', monospace">Courier New (Mono)</option>
+                                </optgroup>
+                                <option value="custom" data-i18n-font="custom_font">✏️ Personalizado...</option>
+                            </select>
+                            <input type="text" id="custom-font-input" class="hidden w-full p-1.5 mt-1 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Ej: 'MS Gothic', 'Noto Sans JP', sans-serif" oninput="onFontFamilyChange(); markUnsaved()">
+                        </div>
+                        <!-- Font Size -->
+                        <div>
+                            <div class="flex justify-between mb-1">
+                                <span class="text-[10px] text-gray-400" data-i18n="font_size">Tamaño de Letra</span>
+                                <span id="font-size-val" class="text-[10px] font-mono text-emerald-500">24px</span>
+                            </div>
+                            <input type="range" id="font-size-range" min="14" max="48" value="24" class="w-full" oninput="document.getElementById('font-size-val').innerText=this.value+'px'; markUnsaved()">
+                        </div>
+                        <!-- Theme + Opacity -->
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-[10px] text-gray-400 mb-1" data-i18n="output_theme">Tema</label>
+                                <select id="output-theme" onchange="markUnsaved()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                    <option value="dark" data-i18n="theme_dark_box">Negro (Letra Blanca)</option>
+                                    <option value="light" data-i18n="theme_light_box">Blanco (Letra Negra)</option>
+                                </select>
+                            </div>
+                            <div>
+                                <div class="flex justify-between mb-1">
+                                    <span class="text-[10px] text-gray-400" data-i18n="opacity_label">Opacidad</span>
+                                    <span id="opacity-val" class="text-[10px] font-mono text-emerald-500">85%</span>
+                                </div>
+                                <input type="range" id="opacity-range" min="20" max="100" value="85" class="w-full" oninput="document.getElementById('opacity-val').innerText=this.value+'%'; markUnsaved()">
+                            </div>
+                        </div>
+                        <!-- Click-Through Mode -->
+                        <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                            <div>
+                                <span class="text-xs font-medium" data-i18n="click_through">Modo Atravesar Clics</span>
+                                <p class="text-[9px] text-gray-400" data-i18n="click_through_desc">El ratón atraviesa el overlay. Ctrl+Shift+M</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="click-through-toggle" class="sr-only peer" onchange="toggleClickThrough(this.checked)">
+                                <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-emerald-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ===== Traducción Category (collapsible) ===== -->
+                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
+                    <button onclick="toggleSettingsCategory('translation')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
+                        <div class="flex items-center gap-2">
+                            <div class="w-1 h-5 bg-emerald-500 rounded-full"></div>
+                            <h3 class="text-xs font-bold text-emerald-500 uppercase tracking-wider" data-i18n="settings_cat_translation">Traducción</h3>
+                        </div>
+                        <svg id="cat-translation-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                    </button>
+                    <div id="cat-translation-content" class="px-4 pb-4 pt-3 space-y-3">
+                        <!-- Debounce -->
+                        <div>
+                            <div class="flex justify-between mb-1">
+                                <span class="text-[10px] text-gray-400" data-i18n="debounce_label">Retardo de Traducción</span>
+                                <span id="debounce-val" class="text-[10px] font-mono text-emerald-500">300ms</span>
+                            </div>
+                            <input type="range" id="debounce-range" min="100" max="2000" step="50" value="300" class="w-full" oninput="document.getElementById('debounce-val').innerText=this.value+'ms'; markUnsaved()">
+                            <p class="text-[9px] text-gray-400" data-i18n="debounce_desc">Wait time before translating new text.</p>
+                        </div>
+                        <!-- System Prompt with Reset Button -->
+                        <div class="space-y-2">
+                            <div class="flex items-center justify-between">
+                                <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="system_prompt">System Prompt (LLM)</label>
+                                <button onclick="resetSystemPrompt()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1" data-i18n="reset_prompt_btn">Restablecer</button>
+                            </div>
+                            <textarea id="system-prompt" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono resize-none" data-i18n-ph="system_prompt_ph" placeholder="Custom instructions for LLM engines..." oninput="markUnsaved()"></textarea>
+                        </div>
+                        <!-- Context History -->
+                        <div>
+                            <div class="flex justify-between mb-1">
+                                <span class="text-[10px] text-gray-400" data-i18n="context_history">Context History</span>
+                                <span id="context-val" class="text-[10px] font-mono text-emerald-500">5</span>
+                            </div>
+                            <input type="range" id="context-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('context-val').innerText=this.value; markUnsaved()">
+                            <p class="text-[9px] text-gray-500" data-i18n="context_history_desc">Previous lines sent as context for LLM engines.</p>
+                        </div>
+                        <!-- History Limit -->
+                        <div>
+                            <div class="flex justify-between mb-1">
+                                <span class="text-[10px] text-gray-400" data-i18n="history_limit">Límite de Historial por Perfil</span>
+                                <span id="history-limit-val" class="text-[10px] font-mono text-emerald-500">5</span>
+                            </div>
+                            <input type="range" id="history-limit-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('history-limit-val').innerText=this.value; markUnsaved()">
+                            <p class="text-[9px] text-gray-500" data-i18n="history_limit_desc">Máx. traducciones guardadas por perfil. 0 = desactivado.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ===== Glosario Category (collapsible) ===== -->
+                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
+                    <button onclick="toggleSettingsCategory('glossary')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
+                        <div class="flex items-center gap-2">
+                            <div class="w-1 h-5 bg-purple-500 rounded-full"></div>
+                            <h3 class="text-xs font-bold text-purple-500 uppercase tracking-wider" data-i18n="settings_cat_glossary">Glosario</h3>
+                        </div>
+                        <svg id="cat-glossary-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                    </button>
+                    <div id="cat-glossary-content" class="px-4 pb-4 pt-3 space-y-3">
+                        <!-- Per-Profile Glossary -->
+                        <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                            <div>
+                                <span class="text-xs font-medium" data-i18n="per_profile_glossary">Glosario por Perfil</span>
+                                <p class="text-[9px] text-gray-400" data-i18n="per_profile_glossary_desc">Cada perfil tiene su propio glosario en vez de uno compartido.</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="per-profile-glossary-toggle" class="sr-only peer" onchange="togglePerProfileGlossary(this.checked)">
+                                <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-purple-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Footer: Apply + Reset buttons (always visible) -->
+            <div class="flex gap-2 px-6 py-3 border-t border-gray-200 dark:border-dark-600 bg-white dark:bg-dark-800">
+                <button onclick="applySettingsModal()" id="settings-apply-btn" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded-lg shadow-lg shadow-emerald-500/20 transition transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                    <span id="settings-apply-text" data-i18n="save_btn">Aplicar</span>
+                </button>
+                <button onclick="resetSettingsToDefaults()" class="px-4 py-2 bg-gray-200 dark:bg-dark-600 hover:bg-gray-300 dark:hover:bg-dark-500 text-gray-600 dark:text-gray-300 font-medium rounded-lg transition text-sm flex items-center gap-1.5" data-i18n="reset_defaults_btn">Restablecer</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Output Overlay</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden;
+            background: transparent;
+            user-select: none;
+            -webkit-user-select: none;
+            font-family: 'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif;
+        }
+        #box {
+            background-color: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px 0 10px 10px;
+            color: white;
+            padding: 28px 18px 16px 18px;
+            /* v3.9.8: Use min-height instead of fixed height.
+               With fixed height + justify-content:center, long text gets
+               cut off at top and bottom. With min-height, the box grows
+               to fit content, and the auto-resize adjusts the window. */
+            min-height: 100vh;
+            font-size: 24px;
+            line-height: 1.5;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            transition: background-color 0.3s ease;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+            overflow-wrap: break-word;
+            word-break: break-word;
+        }
+        .drag-area {
+            -webkit-app-region: drag;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 24px;
+            cursor: move;
+            z-index: 10;
+        }
+        .label {
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: rgba(255, 255, 255, 0.3);
+            position: absolute;
+            top: 6px;
+            right: 10px;
+        }
+        .target-lang-badge {
+            font-size: 9px;
+            letter-spacing: 0.05em;
+            color: rgba(16, 185, 129, 0.7);
+            position: absolute;
+            top: 6px;
+            left: 10px;
+        }
+        #text-content {
+            text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+            word-break: break-word;
+            overflow-wrap: break-word;
+            width: 100%;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Light theme */
+        .theme-light {
+            color: #111 !important;
+            border-color: rgba(0, 0, 0, 0.08) !important;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.15) !important;
+            backdrop-filter: blur(8px) !important;
+            -webkit-backdrop-filter: blur(8px) !important;
+        }
+        .theme-light .label {
+            color: rgba(0, 0, 0, 0.3);
+        }
+        .theme-light #text-content {
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+        }
+    </style>
+</head>
+<body>
+    <div id="box" class="theme-dark">
+        <div class="drag-area"></div>
+        <div class="target-lang-badge" id="target-lang-badge"></div>
+        <div class="label">OUTPUT</div>
+        <div id="text-content" style="font-size: 24px; font-family: 'Segoe UI', 'Noto Sans JP', sans-serif;">Waiting for translation...</div>
+    </div>
+    <script>
+        const overlay = window.tuhuaOverlay;
+        if (overlay) {
+            const box = document.getElementById('box');
+            const content = document.getElementById('text-content');
+            const langBadge = document.getElementById('target-lang-badge');
+
+            const LANG_NAMES = {
+                'es': '🇪🇸 ES', 'en': '🇺🇸 EN', 'ja': '🇯🇵 JA', 'zh': '🇨🇳 ZH',
+                'ko': '🇰🇷 KO', 'ru': '🇷🇺 RU', 'pt': '🇧🇷 PT', 'fr': '🇫🇷 FR',
+                'de': '🇩🇪 DE', 'it': '🇮🇹 IT', 'ar': '🇸🇦 AR', 'th': '🇹🇭 TH',
+                'vi': '🇻🇳 VI', 'id': '🇮🇩 ID', 'tr': '🇹🇷 TR', 'nl': '🇳🇱 NL',
+                'pl': '🇵🇱 PL', 'uk': '🇺🇦 UK', 'hi': '🇮🇳 HI'
+            };
+
+            /**
+             * v3.9.8: Auto-resize the overlay window to fit the translation text.
+             * Measures the actual rendered height of the text content plus padding,
+             * then asks the main process to resize the BrowserWindow.
+             *
+             * Key fix: The old approach used `content.scrollHeight` which doesn't
+             * account for the flex centering. Now we measure `content.offsetHeight`
+             * directly and add the box padding.
+             */
+            function autoResize() {
+                // Wait for layout to settle
+                const textHeight = content.offsetHeight;
+                const boxPaddingV = 28 + 16; // top + bottom padding
+                const minHeight = 80;
+                const maxHeight = 800;  // v3.9.8: raised from 600 to 800 for longer text
+                const desiredHeight = Math.max(minHeight, Math.min(maxHeight, textHeight + boxPaddingV));
+
+                if (overlay && overlay.resizeOverlay) {
+                    overlay.resizeOverlay(desiredHeight);
+                }
+            }
+
+            overlay.onOutputText((data) => {
+                content.innerText = data.text || '';
+                if (data.targetLang && langBadge) {
+                    langBadge.innerText = LANG_NAMES[data.targetLang] || data.targetLang.toUpperCase();
+                }
+                // Re-trigger animation
+                content.style.animation = 'none';
+                void content.offsetWidth;
+                content.style.animation = 'fadeIn 0.3s ease';
+
+                // Auto-resize after content update — double rAF for layout settle
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        autoResize();
+                    });
+                });
+            });
+
+            overlay.onStyleUpdate((data) => {
+                if (data.fontSize) {
+                    content.style.fontSize = data.fontSize + 'px';
+                }
+                if (data.fontFamily) {
+                    const font = data.fontFamily === 'automatic'
+                        ? "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif"
+                        : data.fontFamily;
+                    content.style.fontFamily = font;
+                }
+                if (data.theme) {
+                    box.classList.remove('theme-dark', 'theme-light');
+                    box.classList.add('theme-' + data.theme);
+                }
+                if (data.opacity !== undefined) {
+                    const isLight = box.classList.contains('theme-light');
+                    if (isLight) {
+                        // Light theme: white bg + black text is readable even at low opacity
+                        // with backdrop-filter blur. Minimum 0.30 to keep some visibility.
+                        const minOpacity = 0.30;
+                        const effectiveOpacity = Math.max(minOpacity, data.opacity / 100);
+                        box.style.backgroundColor = `rgba(255, 255, 255, ${effectiveOpacity})`;
+                    } else {
+                        // Dark theme: black bg + white text + blur = very readable
+                        // Minimum 0.20 to allow near-transparent overlay
+                        const minOpacity = 0.20;
+                        const effectiveOpacity = Math.max(minOpacity, data.opacity / 100);
+                        box.style.backgroundColor = `rgba(0, 0, 0, ${effectiveOpacity})`;
+                    }
+                }
+
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        autoResize();
+                    });
+                });
+            });
+        }
+    </script>
+</body>
+</html>
