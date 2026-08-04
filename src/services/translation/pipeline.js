@@ -28,11 +28,51 @@ const CustomMTEngine = require('./engines/custom-mt');
 const LANGUAGE_NAMES = {
   'auto': 'Auto-detect',
   'ja': 'Japanese', 'en': 'English', 'es': 'Spanish', 'zh': 'Chinese',
-  'ko': 'Korean', 'ru': 'Russian', 'pt': 'Portuguese', 'fr': 'French',
+  'lzh': 'Classical Chinese', 'ko': 'Korean', 'ru': 'Russian', 'pt': 'Portuguese', 'fr': 'French',
   'de': 'German', 'it': 'Italian', 'ar': 'Arabic', 'th': 'Thai',
   'vi': 'Vietnamese', 'id': 'Indonesian', 'tr': 'Turkish', 'nl': 'Dutch',
   'pl': 'Polish', 'uk': 'Ukrainian', 'hi': 'Hindi'
 };
+
+// v3.13.10: Normalize language codes from translation APIs.
+// Some engines return non-standard codes (e.g., Google returns 'izh' for Izhorian
+// when it misidentifies Korean, or 'zh-CN' instead of 'zh'). Map these to our
+// standard codes to prevent unknown languages from appearing in the UI.
+const LANG_CODE_NORMALIZE = {
+  'zh-cn': 'zh', 'zh-tw': 'zh', 'zh-hans': 'zh', 'zh-hant': 'zh',
+  'zh-CHS': 'zh', 'zh-CHT': 'zh',
+  'jpn': 'ja', 'jp': 'ja',
+  'kor': 'ko', 'kr': 'ko', 'ko-kr': 'ko',
+  'eng': 'en', 'en-us': 'en', 'en-gb': 'en',
+  'esp': 'es', 'es-419': 'es',
+  'por': 'pt', 'pt-br': 'pt', 'pt-pt': 'pt',
+  'fra': 'fr', 'fr-ca': 'fr',
+  'deu': 'de', 'de-de': 'de', 'de-at': 'de', 'de-ch': 'de',
+  'ita': 'it',
+  'rus': 'ru',
+  'ara': 'ar',
+  'tha': 'th',
+  'vie': 'vi',
+  'ind': 'id',
+  'tur': 'tr',
+  'nld': 'nl',
+  'pol': 'pl',
+  'ukr': 'uk',
+  'hin': 'hi',
+  // v3.13.10: Google Translate sometimes returns 'izh' (Izhorian) when
+  // it misidentifies Korean text. Map it to 'ko' since this is the most
+  // likely intended language in a VN/translation context.
+  'izh': 'ko',
+  // Other rare codes that might appear
+  'chr': 'en',  // Cherokee → English fallback
+  'haw': 'en',  // Hawaiian → English fallback
+};
+
+function normalizeLangCode(code) {
+  if (!code) return code;
+  const lower = code.toLowerCase();
+  return LANG_CODE_NORMALIZE[lower] || (LANGUAGE_NAMES[lower] ? lower : null);
+}
 
 function getLanguageName(code) {
   return LANGUAGE_NAMES[code] || code;
@@ -42,11 +82,65 @@ function getLanguageName(code) {
 const LLM_ENGINES = ['openai', 'local-llm'];
 
 // Simple character-based language detection for CJK and common scripts
+// v3.13.04: Improved Japanese detection for kanji-only text.
+//   When PaddleOCR produces text that is purely kanji (no kana), it's often
+//   Japanese text read through the Chinese model (which strips kana readings).
+//   We now use several heuristics to distinguish:
+//   - Japan-specific kanji (shintaiji / 設定 図書館 駅 etc.)
+//   - Japanese punctuation (。、「」・etc.)
+//   - If sourceLang was set to 'ja' by the user, trust it
+// v3.13.07: Changed default for kanji-only text from 'zh' to 'ja'.
+//   In a VN/game translation context, Japanese is far more common than
+//   Chinese. The 'zh' default caused Japanese kanji-only text to be
+//   misidentified and produce wrong translations via DeepL. Users who
+//   need Chinese should set sourceLang='zh' explicitly. Also expanded
+//   the Japan-specific kanji/compound set with game/VN vocabulary.
 function detectLanguageSimple(text) {
   if (!text || text.length === 0) return null;
 
   // Count character types
-  let hiragana = 0, katakana = 0, kanji = 0, cyrillic = 0, hangul = 0, hanziSimplified = 0;
+  let hiragana = 0, katakana = 0, kanji = 0, cyrillic = 0, hangul = 0;
+  let jpPunctuation = 0; // v3.13.04: Japanese-specific punctuation count
+
+  // v3.13.06: Expanded set of kanji/compounds that are much more common in
+  // Japanese than Chinese. These are shinjitai (new character forms),
+  // Japan-specific simplified forms, or compound words that only exist in
+  // Japanese. Multi-character strings work because we check with includes().
+  const jpSpecificKanji = new Set([
+    // Shinjitai / Japan-specific simplified forms
+    '桜', '渋', '円', '駅', '広', '庫', '舎', '脳', '践', '険',
+    '検', '称', '産', '観', '豊', '賛', '区', '団', '協', '単',
+    '学', '強', '営', '場', '報', '圧', '専', '覚', '導', '層',
+    '権', '済', '聴', '認', '証', '職', '辞', '写', '恵', '恵',
+    '変', '恥', '誰', '何', '私', '僕', '俺', '彼', '彼女', '夫',
+    // Common Japanese compound words (game UI / VN dialogue)
+    '設定', '図書', '図書館', '移動', '確認', '選択', '保存', '終了',
+    '会話', '冒険', '魔法', '仲間', '敵', '味方', '戦闘', '探索',
+    '道具', '装備', '技', 'スキル', '宝箱', '村', '城', '森',
+    '神社', '寺院', '宿屋', '商店', '酒場', '門', '庭', '廊下',
+    '階段', '屋上', '地下', '研究室', '教室', '廊下', '部活',
+    '放課後', '夏休み', '文化祭', '体育祭', '修学旅行',
+    // Japanese-specific katakana-heavy terms
+    'ホ', 'メ', 'ル', 'ダ', 'ン', 'ス', 'ト', 'ッ', 'プ',
+    // v3.13.07: Expanded game/VN-specific vocabulary for better JP detection
+    '主人公', '仲間', '冒険', '戦闘', '魔法', '技能', '経験', '回復',
+    '攻撃', '防御', '逃走', '道具', '装備', '武器', '防具', '飾',
+    '金貨', 'HP', 'MP', '能力', '状態', '毒', '麻痺', '睡眠',
+    '石化', '混乱', '沈黙', '暗闇', '即死', '吸収', '反射',
+    '勝利', '敗北', '退却', '全滅', '復活', '召喚', '進化',
+    '恋人', '親友', '幼馴染', '先輩', '後輩', '同級生',
+    '約束', '守護', '絆', '勇者', '魔王', '姫', '騎士',
+    '侍', '忍者', '巫女', '僧侶', '盗賊', '賢者', '商人',
+    '宿', '酒場', '教会', '塔', '洞窟', '遺跡', '砦', '要塞',
+    '祭', '儀式', '試練', '修行', '悟', '魂', '運命', '宿命',
+    '想像', '現実', '真実', '嘘', '秘密', '約束', '信頼', '裏切',
+    '昨日', '今日', '明日', '毎日', '今', '昔', '未来', '永遠',
+    '悲', '喜', '怒', '楽', '寂', '懐', '恋', '愛',
+    // Common single kanji that are distinctly Japanese in game context
+    '覚', '察', '承', '拒', '認', '得', '失', '続',
+    '断', '了', '申', '届', '替', '換', '据', '据',
+    '演', '奏', '詠', '唱', '舞', '闘', '襲', '撃'
+  ]);
 
   for (const ch of text) {
     const code = ch.codePointAt(0);
@@ -60,16 +154,50 @@ function detectLanguageSimple(text) {
     else if ((code >= 0x0400 && code <= 0x04FF) || (code >= 0x0500 && code <= 0x052F)) cyrillic++;
     // Hangul
     else if ((code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF)) hangul++;
+    // v3.13.04: Japanese-specific punctuation
+    // 。(U+3002) 、(U+3001) 「」(U+300C-U+300F) ・(U+30FB) 〜(U+301C)
+    else if (code === 0x3002 || code === 0x3001 ||
+             (code >= 0x300C && code <= 0x300F) ||
+             code === 0x30FB || code === 0x301C) jpPunctuation++;
   }
 
-  // Japanese: has hiragana or katakana
+  // Japanese: has hiragana or katakana (definitive)
   if (hiragana > 0 || katakana > 0) return 'ja';
   // Korean: has hangul
   if (hangul > 0) return 'ko';
   // Russian: has cyrillic
   if (cyrillic > 2) return 'ru';
-  // Chinese: has CJK but no kana/hangul (simplified detection)
-  if (kanji > 0 && hiragana === 0 && katakana === 0 && hangul === 0) return 'zh';
+
+  // v3.13.06: Kanji-only text — try to distinguish Japanese from Chinese
+  if (kanji > 0 && hiragana === 0 && katakana === 0 && hangul === 0) {
+    // Heuristic 1: Japanese punctuation strongly suggests Japanese
+    if (jpPunctuation > 0) return 'ja';
+
+    // Heuristic 2: Check for Japan-specific kanji (including compound words)
+    let jpKanjiHits = 0;
+    for (const item of jpSpecificKanji) {
+      if (text.includes(item)) jpKanjiHits++;
+    }
+    // v3.13.06: If ANY Japan-specific kanji/compound is found, assume Japanese.
+    // In a VN/game translation context, Japanese text without kana is FAR more
+    // common than Chinese text without kana. The old ratio threshold (10%)
+    // was too conservative for short text.
+    if (jpKanjiHits > 0) return 'ja';
+
+    // Heuristic 3: For short kanji-only text (1-4 chars), default to Japanese.
+    // Single/double kanji like 設定, 移動, 終了 are extremely common in Japanese
+    // game UI and unlikely to be Chinese in this tool's context.
+    if (kanji <= 4 && kanji >= 1) return 'ja';
+
+    // v3.13.07: For longer kanji-only text without Japanese markers,
+    // default to Japanese instead of Chinese. In a VN/game translation
+    // context, Japanese text without kana is far more common than Chinese
+    // text without kana. The previous default of 'zh' caused too many
+    // Japanese texts to be sent to DeepL as Chinese, producing wrong
+    // translations. If the user is actually translating Chinese, they
+    // should set sourceLang='zh' explicitly.
+    return 'ja';
+  }
 
   // Default: can't determine
   return null;
@@ -142,8 +270,13 @@ class TranslationPipeline extends EventEmitter {
         break;
       case 'deepl':
         this.engines[engineName] = new DeepLEngine(s.deeplKey, s.deeplUsePro, {
-          formality: s.deeplFormality || 'default',
-          maxContext: s.maxContextHistory || 3
+          formality: s.deeplFormality || 'prefer_more',
+          maxContext: s.maxContextHistory || 3,
+          // v3.11.28: New DeepL features
+          customInstructions: s.deeplCustomInstructions || [],
+          styleId: s.deeplStyleId || '',
+          translationMemoryId: s.deeplTranslationMemoryId || '',
+          translationMemoryThreshold: s.deeplTranslationMemoryThreshold || 75
         });
         break;
       case 'openai':
@@ -233,19 +366,47 @@ class TranslationPipeline extends EventEmitter {
   async _doTranslate(text, srcLang, tgtLang, engineName) {
     console.log(`[Pipeline] _doTranslate: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}`);
 
-    // For LLM engines with auto-detect source, detect the language first
-    // so we can pass it explicitly in the prompt (avoids ambiguity for small models)
+    // v3.13.04: For ALL engines (not just LLM), use detected language when
+    // auto-detect is selected. This is critical because:
+    // - DeepL often misdetects kanji-only text as Chinese instead of Japanese
+    // - PaddleOCR's Chinese model can read Japanese kanji but loses kana context
+    // - Our detectLanguageSimple() with JP-specific heuristics is more accurate
+    //   than DeepL's API-level auto-detect for CJK text
+    // v3.13.05: When the user explicitly selects 'ja' or 'ko' as source language,
+    //   ALWAYS use that — don't let auto-detection override the user's choice.
+    //   This prevents the pipeline from switching to 'zh' for kanji-only Japanese
+    //   text that our heuristics can't reliably distinguish from Chinese.
+    // v3.13.08-fix: When sourceLang is 'lzh' (Classical Chinese), ALWAYS use 'zh'
+    //   as the effective source for translation engines. Most engines don't support
+    //   'lzh' natively, but they handle classical Chinese text correctly when told
+    //   it's Chinese. The detectLanguageSimple() function would misidentify
+    //   classical Chinese as Japanese (all kanji, no kana), producing wrong translations.
     let effectiveSrcLang = srcLang;
     let detectedSourceLang = null;
-    if (srcLang === 'auto') {
+
+    // v3.13.08-fix: Classical Chinese — use 'zh' directly, skip auto-detection
+    if (srcLang === 'lzh') {
+      effectiveSrcLang = 'zh';
+      console.log(`[Pipeline] Classical Chinese (lzh) → using 'zh' as effective source language`);
+    } else if (srcLang === 'auto') {
       detectedSourceLang = detectLanguageSimple(text);
       if (detectedSourceLang) {
         console.log(`[Pipeline] Auto-detected source language: ${detectedSourceLang} (${getLanguageName(detectedSourceLang)})`);
-        // For LLM engines, use detected language explicitly in the prompt
-        // For non-LLM engines, keep 'auto' and let them handle it
-        if (LLM_ENGINES.includes(engineName)) {
-          effectiveSrcLang = detectedSourceLang;
-        }
+        // v3.13.04: Use detected language for ALL engines, not just LLM.
+        effectiveSrcLang = detectedSourceLang;
+      } else {
+        // v3.13.07: When detectLanguageSimple() returns null (can't determine),
+        // don't pass 'auto' to translation engines — most don't support it well.
+        // Default to 'ja' since this tool is primarily used for Japanese VNs/games.
+        console.log(`[Pipeline] Could not auto-detect language, defaulting to Japanese`);
+        effectiveSrcLang = 'ja';
+      }
+    } else {
+      // v3.13.10: Normalize source language code (e.g., 'KR' → 'ko', 'jpn' → 'ja')
+      const normalizedSrc = normalizeLangCode(srcLang);
+      if (normalizedSrc && normalizedSrc !== srcLang) {
+        console.log(`[Pipeline] Normalized source language: ${srcLang} → ${normalizedSrc}`);
+        effectiveSrcLang = normalizedSrc;
       }
     }
 
@@ -274,17 +435,19 @@ class TranslationPipeline extends EventEmitter {
       return postprocessed;
     }
 
-    // 2b. v3.11.23: Translation Memory — check if this text was translated by ANY engine
-    // before making a new API call. This saves money and reduces latency for repeated dialogue.
-    const tmResult = this.translationMemory.get(preprocessed, effectiveSrcLang, tgtLang);
+    // 2b. v3.11.25: Translation Memory — exact match first, then fuzzy.
+    // This saves money and reduces latency for repeated or near-matching dialogue.
+    const tmResult = this.translationMemory.getWithFuzzy(preprocessed, effectiveSrcLang, tgtLang);
     if (tmResult) {
       this.stats.tmHits++;
-      console.log(`[Pipeline] Translation Memory hit: "${preprocessed.substring(0, 30)}..." → "${tmResult.substring(0, 30)}..." (was: ${engineName})`);
+      const matchType = tmResult.fuzzy ? 'fuzzy' : 'exact';
+      const scoreInfo = tmResult.fuzzy ? ` (${(tmResult.score * 100).toFixed(0)}%)` : '';
+      console.log(`[Pipeline] Translation Memory ${matchType} hit${scoreInfo}: "${preprocessed.substring(0, 30)}..." → "${tmResult.translation.substring(0, 30)}..." (was: ${engineName})`);
       // Also store in engine-specific cache for faster future lookups
-      this.cache.set(preprocessed, effectiveSrcLang, tgtLang, engineName, tmResult);
-      this._addToHistory(text, tmResult, engineName, true);
+      this.cache.set(preprocessed, effectiveSrcLang, tgtLang, engineName, tmResult.translation);
+      this._addToHistory(text, tmResult.translation, engineName, true);
 
-      const postprocessed = this.glossary.applyPostTranslation(tmResult);
+      const postprocessed = this.glossary.applyPostTranslation(tmResult.translation);
 
       this.emit('translation', {
         original: text,
@@ -292,6 +455,8 @@ class TranslationPipeline extends EventEmitter {
         engine: engineName,
         cached: true,
         fromMemory: true,
+        fuzzyMatch: tmResult.fuzzy || false,
+        fuzzyScore: tmResult.score || null,
         sourceLang: srcLang,
         targetLang: tgtLang,
         timestamp: Date.now()
@@ -321,7 +486,9 @@ class TranslationPipeline extends EventEmitter {
       this._addToHistory(text, postprocessed, engineName, false);
 
       // Use detected language from engine if available, otherwise our detection
-      const finalDetectedLang = result.detectedLang || detectedSourceLang;
+      // v3.13.10: Normalize API-returned language codes (e.g., 'izh' → 'ko')
+      const rawDetectedLang = result.detectedLang || detectedSourceLang;
+      const finalDetectedLang = normalizeLangCode(rawDetectedLang) || rawDetectedLang;
 
       this.emit('translation', {
         original: text,
@@ -395,6 +562,11 @@ class TranslationPipeline extends EventEmitter {
         return result;
       } catch (err) {
         this._lastError = err; // Track last actual error
+        // v3.11.27: Log the actual error so we can diagnose engine failures
+        const status = err.response?.status;
+        const errMsg = err.response?.data?.error?.message || err.message || 'Unknown error';
+        const statusInfo = status ? ` (HTTP ${status})` : '';
+        console.error(`[Pipeline] ${engineName} failed${statusInfo}: ${errMsg}`);
         if (attempt < retries && this._isRetryable(err)) {
           // Exponential backoff
           const delay = Math.pow(2, attempt) * 500;

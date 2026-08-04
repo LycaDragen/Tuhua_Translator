@@ -1,16 +1,34 @@
 /**
  * Global Keyboard Shortcuts
  * Registers system-wide hotkeys for common actions.
+ *
+ * v3.11.25: Added OCR capture trigger shortcut (Ctrl+Shift+S).
+ *           When OCR mode is active, pressing the hotkey performs
+ *           an immediate capture without going to the UI.
  */
 const { globalShortcut, BrowserWindow } = require('electron');
 
 class ShortcutManager {
-  constructor(windowManager, pipeline, textractor, clipboardWatcher) {
+  constructor(windowManager, pipeline, textractor, clipboardWatcher, ocrService) {
     this.windowManager = windowManager;
     this.pipeline = pipeline;
     this.textractor = textractor;
     this.clipboardWatcher = clipboardWatcher;
+    // v3.11.25: OCR service reference for hotkey-triggered capture
+    this.ocrService = ocrService;
     this.registered = false;
+    // v3.11.25: OCR capture callback — set by ipc-handlers when OCR starts
+    this._ocrCaptureCallback = null;
+  }
+
+  /**
+   * v3.11.25: Set the OCR capture callback function.
+   * Called by ipc-handlers when OCR mode starts to provide a
+   * function that captures the screen region and runs OCR.
+   * @param {Function} callback - async () => void
+   */
+  setOcrCaptureCallback(callback) {
+    this._ocrCaptureCallback = callback;
   }
 
   register() {
@@ -78,6 +96,27 @@ class ShortcutManager {
       });
     } catch (e) {
       console.warn('Failed to register Ctrl+Shift+O:', e.message);
+    }
+
+    // v3.11.25: OCR capture trigger — press to capture and translate now.
+    // Only fires when OCR mode is active and a capture callback is set.
+    // This is the equivalent of LunaTranslator's "click to capture" feature,
+    // but implemented as a global hotkey for reliability.
+    try {
+      globalShortcut.register('CommandOrControl+Shift+S', async () => {
+        if (!this._ocrCaptureCallback) {
+          console.log('[Shortcuts] OCR capture hotkey pressed, but no OCR callback set');
+          return;
+        }
+        try {
+          console.log('[Shortcuts] OCR capture hotkey triggered');
+          await this._ocrCaptureCallback();
+        } catch (err) {
+          console.error('[Shortcuts] OCR capture error:', err.message);
+        }
+      });
+    } catch (e) {
+      console.warn('Failed to register Ctrl+Shift+S (OCR capture):', e.message);
     }
   }
 

@@ -48,6 +48,9 @@
             display: flex;
             align-items: center;
             gap: 6px;
+            flex-shrink: 1;      /* v3.13.03: Allow left section to shrink when narrow */
+            min-width: 0;        /* Allow content to be clipped */
+            overflow: hidden;    /* Clip text when there's no space */
         }
 
         #title-bar .label {
@@ -56,11 +59,13 @@
             font-weight: 600;
             letter-spacing: 0.5px;
             text-transform: uppercase;
+            flex-shrink: 0;      /* Keep label visible as long as possible */
         }
 
         #title-bar .grip {
             color: rgba(148, 163, 184, 0.5);
             font-size: 10px;
+            flex-shrink: 0;      /* Grip icon never shrinks */
         }
 
         #title-bar .right {
@@ -68,6 +73,7 @@
             align-items: center;
             gap: 4px;
             -webkit-app-region: no-drag;
+            flex-shrink: 0;      /* v3.13.03: Buttons NEVER shrink — always visible */
         }
 
         /* Status indicator — NOW IN THE TITLE BAR to avoid overlapping game text */
@@ -77,6 +83,9 @@
             gap: 4px;
             margin-left: 6px;
             -webkit-app-region: no-drag;
+            flex-shrink: 1;      /* v3.13.03: Status indicator shrinks first when narrow */
+            min-width: 0;        /* Allow clipping */
+            overflow: hidden;    /* Clip text when narrow */
         }
 
         #status-indicator .dot {
@@ -97,6 +106,10 @@
             color: #94a3b8;
             white-space: nowrap;
             letter-spacing: 0.3px;
+            flex-shrink: 1;      /* v3.13.03: Status text shrinks/clips when narrow */
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
 
         /* Scan region — the area BELOW the title bar with dashed border.
@@ -126,6 +139,7 @@
         .tb-btn {
             width: 22px;
             height: 22px;
+            min-width: 22px;     /* v3.13.03: Never shrink below 22px */
             border: 1px solid rgba(100, 116, 139, 0.3);
             border-radius: 4px;
             background: rgba(15, 23, 42, 0.6);
@@ -137,6 +151,7 @@
             transition: all 0.15s;
             font-size: 11px;
             line-height: 1;
+            flex-shrink: 0;      /* v3.13.03: Buttons never shrink */
         }
 
         .tb-btn:hover {

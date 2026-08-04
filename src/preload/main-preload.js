@@ -50,7 +50,18 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
   'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game', 'xuat-set-port',
   'xuat-test-endpoint',
-  'xuat-update-language', 'xuat-clear-cache'
+  'xuat-update-language', 'xuat-clear-cache',
+  // v3.11.27: VNDB glossary import
+  'vndb-search', 'vndb-import',
+  // v3.11.28: DeepL feature detection
+  'deepl-fetch-features', 'deepl-fetch-translation-memories',
+  // v3.11.30: Regex text filter
+  'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
+  'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',
+  // v3.13.01: PaddleOCR engine selection
+  'set-ocr-engine', 'get-ocr-engine-status',
+  // v3.13.08: OCR confidence threshold
+  'ocr-set-min-confidence'
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
@@ -68,6 +79,7 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'shortcut-pressed',
   'ocr-status',
   'ocr-text',
+  'ocr-engine-fallback',
   'xuat-status',
   'xuat-install-progress',
   'xuat-game-connected',
@@ -187,6 +199,19 @@ const api = {
     return secureInvoke('ocr-set-auto-capture', enabled);
   },
   ocrCloseCaptureArea: () => secureInvoke('ocr-close-capture-area'),
+  // v3.13.01: OCR engine selection
+  setOcrEngine: (engine) => {
+    if (typeof engine !== 'string' || (engine !== 'tesseract' && engine !== 'paddle')) {
+      throw new Error('Invalid OCR engine');
+    }
+    return secureInvoke('set-ocr-engine', engine);
+  },
+  getOcrEngineStatus: () => secureInvoke('get-ocr-engine-status'),
+  // v3.13.08: OCR confidence threshold
+  ocrSetMinConfidence: (threshold) => {
+    if (typeof threshold !== 'number') throw new Error('Threshold must be a number');
+    return secureInvoke('ocr-set-min-confidence', threshold);
+  },
   getDisplays: () => secureInvoke('get-displays'),
 
   // Translation
@@ -248,6 +273,8 @@ const api = {
   // OCR events
   onOcrStatus: (callback) => secureOn('ocr-status', callback),
   onOcrText: (callback) => secureOn('ocr-text', callback),
+  // v3.13.01-fix: PaddleOCR fallback notification
+  onOcrEngineFallback: (callback) => secureOn('ocr-engine-fallback', callback),
 
   // v3.10.0: Debug logs
   getDebugLogs: () => secureInvoke('get-debug-logs'),
@@ -273,9 +300,54 @@ const api = {
   onXuatGameConnected: (callback) => secureOn('xuat-game-connected', callback),
   onXuatTranslationRequest: (callback) => secureOn('xuat-translation-request', callback),
 
+  // v3.11.27: VNDB glossary import
+  vndbSearch: (query) => {
+    if (typeof query !== 'string' || query.trim().length < 2) throw new Error('Query too short');
+    return secureInvoke('vndb-search', query);
+  },
+  vndbImport: (vnId, options) => {
+    if (typeof vnId !== 'string') throw new Error('Invalid VNDB ID');
+    return secureInvoke('vndb-import', vnId, options || {});
+  },
+
+  // v3.11.28: DeepL feature detection
+  deeplFetchFeatures: (apiKey) => {
+    if (typeof apiKey !== 'string') throw new Error('Invalid API key');
+    return secureInvoke('deepl-fetch-features', { apiKey });
+  },
+  deeplFetchTranslationMemories: (apiKey) => {
+    if (typeof apiKey !== 'string') throw new Error('Invalid API key');
+    return secureInvoke('deepl-fetch-translation-memories', { apiKey });
+  },
+
+  // v3.11.30: Regex text filter
+  getRegexFilters: () => secureInvoke('get-regex-filters'),
+  saveRegexFilter: (entry) => {
+    if (!entry || typeof entry.pattern !== 'string') throw new Error('Invalid filter entry');
+    return secureInvoke('save-regex-filter', entry);
+  },
+  deleteRegexFilter: (id) => {
+    if (typeof id !== 'string') throw new Error('Invalid filter ID');
+    return secureInvoke('delete-regex-filter', id);
+  },
+  toggleRegexFilter: (id, enabled) => {
+    if (typeof id !== 'string') throw new Error('Invalid filter ID');
+    if (typeof enabled !== 'boolean') throw new Error('Enabled must be boolean');
+    return secureInvoke('toggle-regex-filter', id, enabled);
+  },
+  reorderRegexFilters: (orderedIds) => {
+    if (!Array.isArray(orderedIds)) throw new Error('Invalid order array');
+    return secureInvoke('reorder-regex-filters', orderedIds);
+  },
+  testRegexFilter: (text, filterId) => {
+    if (typeof text !== 'string') throw new Error('Invalid text');
+    return secureInvoke('test-regex-filter', text, filterId || null);
+  },
+  resetRegexFilters: () => secureInvoke('reset-regex-filters'),
+
   // Platform info
   platform: process.platform,
-  version: process.env.npm_package_version || '3.11.24'
+  version: process.env.npm_package_version || '3.13.01'
 };
 
 contextBridge.exposeInMainWorld('tuhuaAPI', api);

@@ -1,3 +1,4 @@
 allowBuilds:
   electron: true
   tesseract.js: true
+  onnxruntime-node: true

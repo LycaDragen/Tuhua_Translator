@@ -1,74 +1,87 @@
 # ============================================
-# Tuhua Translator — .gitignore
+# Tuhua Translator - .gitignore
 # ============================================
 
-# === Dependencies ===
+# ── Node.js ──
 node_modules/
-
-# === Build output ===
-dist/
-out/
-build/
-
-# === Electron Builder ===
-*.blockmap
-*.exe
-*.dmg
-*.AppImage
-*.snap
-*.deb
-*.rpm
-*.pacman
-
-# === Runtime data (user-specific) ===
-translation-cache.json
-glossary.json
-translation-memory.json
-tuhua-translator-config.json
-
-# === Environment & Secrets ===
-.env
-.env.local
-.env.production
-.env.*.local
-
-# === Logs ===
-*.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+lerna-debug.log*
 
-# === OS generated files ===
+# ── pnpm ──
+# Note: pnpm-lock.yaml is intentionally NOT ignored.
+# For applications (not libraries), lock files should be committed
+# to ensure reproducible builds across environments.
+
+# ── Electron Builder ──
+dist/
+out/
+
+# ── Environment & Secrets ──
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ── OCR / Paddle Models (downloaded at runtime) ──
+models/
+paddle-models/
+*.onnx
+*.pth
+*.params
+*.pdmodel
+*.pdiparams
+
+# ── Tesseract traineddata (large, downloaded) ──
+tessdata/
+
+# ── OS Generated Files ──
 .DS_Store
 .DS_Store?
-Thumbs.db
+._*
+.Spotlight-V100
+.Trashes
 ehthumbs.db
-Desktop.ini
+Thumbs.db
+desktop.ini
+Icon?
+
+# ── IDE / Editor ──
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
 *.swp
 *.swo
 *~
-
-# === IDE / Editor ===
-.vscode/
-.idea/
+.project
+.classpath
+.settings/
 *.sublime-project
 *.sublime-workspace
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
 
-# === Cache ===
-.cache/
-.parcel-cache/
-.eslintcache
-.stylelintcache
+# ── Logs ──
+logs/
+*.log
 
-# === Coverage ===
+# ── Runtime / Cache ──
+cache/
+.temp/
+.tmp/
+*.tmp
+*.bak
+
+# ── Test artifacts (large images) ──
+test-assets/
+test-images/
+tests/screenshots/
+
+# ── Coverage ──
 coverage/
+.nyc_output/
 
-# === Temporary files ===
-tmp/
-temp/
+# ── Electron specific ──
+electron-builder.env

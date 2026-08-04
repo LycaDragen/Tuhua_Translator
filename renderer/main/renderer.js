@@ -18,6 +18,21 @@
         let stagedProfileCreates = [];  // { name } — profiles to create on save
         let stagedProfileDeletes = [];  // profile names to delete on save
 
+        // v3.13.12: Normalize language codes that may come from translation APIs.
+        // Google Translate sometimes returns 'izh' (Izhorian) when misidentifying
+        // Korean. If this gets saved as sourceLang, the dropdown shows nothing.
+        // This function maps unknown/obsolete codes to valid dropdown values.
+        const SOURCE_LANG_NORMALIZE = {
+            'izh': 'ko', 'chr': 'en', 'haw': 'en',
+            'jpn': 'ja', 'jp': 'ja', 'kor': 'ko', 'kr': 'ko',
+            'eng': 'en', 'zh-cn': 'zh', 'zh-tw': 'zh'
+        };
+        function normalizeSourceLang(code) {
+            if (!code) return 'auto';
+            const lower = code.toLowerCase();
+            return SOURCE_LANG_NORMALIZE[lower] || code;
+        }
+
         // ===== INITIALIZATION =====
         async function init() {
             if (!api) { console.error('API not available - running outside Electron?'); return; }
@@ -39,9 +54,27 @@
             if (savedEngine === 'deepl') {
                 document.getElementById('api-key').value = engineApiKeys.deepl || '';
                 // v3.11.23: Restore DeepL formality setting
+                // v3.11.29: Migrate removed strict options
                 if (settings.deeplFormality) {
-                    document.getElementById('deepl-formality').value = settings.deeplFormality;
+                    let formality = settings.deeplFormality;
+                    if (formality === 'more') formality = 'prefer_more';
+                    if (formality === 'less') formality = 'prefer_less';
+                    document.getElementById('deepl-formality').value = formality;
+                    // Persist migrated value
+                    if (formality !== settings.deeplFormality) {
+                        api.saveSettings({ deeplFormality: formality });
+                    }
                 }
+                // v3.11.29: Restore custom instructions + update default indicator
+                if (settings.deeplCustomInstructions && settings.deeplCustomInstructions.length > 0) {
+                    document.getElementById('deepl-custom-instructions').value = settings.deeplCustomInstructions.join('\n');
+                }
+                updateDeepLInstructionsCount();
+                updateDeepLInstructionsUI();
+                // v3.11.29: Set initial placeholder based on UI language
+                updateDeepLInstructionsPlaceholder();
+                // v3.11.28: Fetch language features for dynamic UI
+                fetchDeepLLanguageFeatures(engineApiKeys.deepl, settings.targetLang);
             } else if (savedEngine === 'openai') {
                 document.getElementById('api-key').value = engineApiKeys.openai || '';
             } else if (settings.apiKey) {
@@ -57,7 +90,14 @@
             if (settings.customMTBody) document.getElementById('custom-mt-body').value = settings.customMTBody;
             if (settings.customMTResponsePath) document.getElementById('custom-mt-response').value = settings.customMTResponsePath;
             if (settings.customMTAuthHeader) document.getElementById('custom-mt-auth').value = settings.customMTAuthHeader;
-            if (settings.sourceLang) document.getElementById('source-lang').value = settings.sourceLang;
+            // v3.13.12: Normalize source language code before setting dropdown value.
+            // Google Translate sometimes returns 'izh' (Izhorian) when misidentifying
+            // Korean text. If this gets saved as sourceLang, the dropdown can't display
+            // it. Normalize unknown codes to valid dropdown values.
+            if (settings.sourceLang) {
+                const normalizedSourceLang = normalizeSourceLang(settings.sourceLang);
+                document.getElementById('source-lang').value = normalizedSourceLang;
+            }
             if (settings.targetLang) document.getElementById('target-lang').value = settings.targetLang;
             // Update target language display
             updateTargetLangDisplay(settings.targetLang || 'es');
@@ -108,7 +148,13 @@
             // Cache settings for modal restore
             window._lastSettings = settings;
 
-            // OCR settings - no UI settings to restore (uses source language, auto-capture by default)
+            // OCR settings - restore OCR engine selector from saved settings
+            // v3.13.01: Load OCR engine status (Tesseract/PaddleOCR availability)
+            if (settings.ocrEngine) {
+                const ocrEngineSelect = document.getElementById('ocr-engine-select');
+                if (ocrEngineSelect) ocrEngineSelect.value = settings.ocrEngine;
+            }
+            loadOcrEngineStatus();
 
             // Translation active toggle - restore from saved settings
             if (settings.translationActive !== undefined) {
@@ -130,6 +176,7 @@
             // Load tabs data
             loadGlossary();
             loadProfiles();
+            loadRegexFilters();
 
             // Listen for events
             api.onTextractorStatus((status) => updateConnectionStatus(status));
@@ -141,6 +188,21 @@
             api.onTextractorCliError((errorData) => showCliError(errorData));
             api.onHooksDiscovered((data) => updateHookSelector(data));
             api.onOcrStatus((status) => updateOcrStatus(status));
+
+            // v3.13.01-fix: Handle PaddleOCR fallback to Tesseract
+            api.onOcrEngineFallback(({ engine, reason }) => {
+                const t = translations[currentLang] || translations['en'];
+                const selectEl = document.getElementById('ocr-engine-select');
+                const descEl = document.getElementById('ocr-engine-desc');
+                const warningEl = document.getElementById('ocr-paddle-warning');
+                // Update selector to reflect actual engine
+                if (selectEl) selectEl.value = engine;
+                // Show fallback message
+                if (descEl) descEl.textContent = t.ocr_paddle_fallback || `PaddleOCR falló, usando Tesseract: ${reason}`;
+                if (warningEl) warningEl.classList.add('hidden');
+                // Show toast notification
+                showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
+            });
 
             // XUAT events
             // v3.11.2: Pass error data to updateXuatStatus for proper error display
@@ -236,6 +298,12 @@
             stagedGlossaryDeletes = [];
             stagedProfileCreates = [];
             stagedProfileDeletes = [];
+            // v3.11.33: Clear staged regex filter changes
+            stagedRegexToggles = {};
+            stagedRegexAdds = [];
+            stagedRegexDeletes = [];
+            stagedRegexEdits = {};
+            stagedEnableRegexFilter = null;
             const btn = document.getElementById('save-btn');
             if (btn) btn.classList.remove('ring-2', 'ring-amber-400', 'ring-offset-1');
             const text = document.getElementById('save-btn-text');
@@ -255,8 +323,8 @@
             });
 
             // Update language selector options (native name + translated name)
-            const FLAGS = { auto: '🌐', ja: '🇯🇵', en: '🇺🇸', es: '🇪🇸', zh: '🇨🇳', ko: '🇰🇷', ru: '🇷🇺', pt: '🇧🇷', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹', ar: '🇸🇦', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩', tr: '🇹🇷', nl: '🇳🇱', pl: '🇵🇱', uk: '🇺🇦', hi: '🇮🇳' };
-            const NATIVE_NAMES = { auto: 'Auto-detect', ja: '日本語', en: 'English', es: 'Español', zh: '中文', ko: '한국어', ru: 'Русский', pt: 'Português', fr: 'Français', de: 'Deutsch', it: 'Italiano', ar: 'العربية', th: 'ไทย', vi: 'Tiếng Việt', id: 'Bahasa Indonesia', tr: 'Türkçe', nl: 'Nederlands', pl: 'Polski', uk: 'Українська', hi: 'हिन्दी' };
+            const FLAGS = { auto: '🌐', ja: '🇯🇵', en: '🇺🇸', es: '🇪🇸', zh: '🇨🇳', lzh: '📜', ko: '🇰🇷', ru: '🇷🇺', pt: '🇧🇷', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹', ar: '🇸🇦', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩', tr: '🇹🇷', nl: '🇳🇱', pl: '🇵🇱', uk: '🇺🇦', hi: '🇮🇳' };
+            const NATIVE_NAMES = { auto: 'Auto-detect', ja: '日本語', en: 'English', es: 'Español', zh: '中文', lzh: '文言文', ko: '한국어', ru: 'Русский', pt: 'Português', fr: 'Français', de: 'Deutsch', it: 'Italiano', ar: 'العربية', th: 'ไทย', vi: 'Tiếng Việt', id: 'Bahasa Indonesia', tr: 'Türkçe', nl: 'Nederlands', pl: 'Polski', uk: 'Українська', hi: 'हिन्दी' };
             document.querySelectorAll('[data-i18n-lang]').forEach(opt => {
                 const code = opt.getAttribute('data-i18n-lang');
                 const flag = FLAGS[code] || '';
@@ -282,6 +350,9 @@
             // Update the custom font option
             const customFontOption = document.querySelector('#overlay-font option[data-i18n-font="custom_font"]');
             if (customFontOption) customFontOption.textContent = '✏️ ' + (t.custom_font || 'Custom...');
+
+            // v3.11.29: Update DeepL custom instructions placeholder for new UI language
+            updateDeepLInstructionsPlaceholder();
 
             // Update engine description for new language (fixes stale description)
             updateEngineDescription();
@@ -345,11 +416,18 @@
             stagedProfileCreates = [];
             stagedProfileDeletes = [];
 
+            // v3.11.33: Clear staged regex filter changes
+            stagedRegexToggles = {};
+            stagedEnableRegexFilter = null;
+
             // Reload glossary from backend (removes locally-added entries)
             await loadGlossary();
 
             // Reload profiles from backend (removes locally-created, restores locally-deleted)
             await loadProfiles();
+
+            // v3.11.33: Reload regex filters from backend (restores toggled states)
+            await loadRegexFilters();
 
             // Restore settings UI from last saved state
             if (window._lastSettings) {
@@ -365,7 +443,7 @@
 
         // ===== SETTINGS MODAL =====
         // Collapsible category state
-        const _settingsCatState = { overlay: true, translation: true, glossary: true };
+        const _settingsCatState = { overlay: true, translation: true, glossary: true, textfilter: true };
 
         function toggleSettingsModal() {
             const modal = document.getElementById('settings-modal');
@@ -375,6 +453,8 @@
                 if (willShow) {
                     // Restore current settings values to the modal controls
                     restoreSettingsModalValues();
+                    // Load regex filters for the Text Filter category
+                    loadRegexFilters();
                 }
             }
         }
@@ -441,6 +521,11 @@
                 perProfileGlossary: document.getElementById('per-profile-glossary-toggle').checked
             };
 
+            // v3.11.33: Include staged regex filter toggle
+            if (stagedEnableRegexFilter !== null) {
+                config.enableRegexFilter = stagedEnableRegexFilter;
+            }
+
             await api.saveSettings(config);
 
             // v3.10.10: Also apply staged glossary and profile changes
@@ -457,10 +542,17 @@
                 await api.deleteProfile(name);
             }
 
+            // v3.11.33: Apply staged regex filter toggle changes
+            for (const [filterId, enabled] of Object.entries(stagedRegexToggles)) {
+                await api.toggleRegexFilter(filterId, enabled);
+            }
+
             // Update active profile with new data
             await api.saveProfile({ name: activeProfile });
             loadProfiles();
             await loadGlossary();
+            // Reload regex filters to reflect staged toggle changes
+            await loadRegexFilters();
 
             markSaved();
 
@@ -491,7 +583,8 @@
                 historyLimit: 5,
                 systemPrompt: '',
                 clickThrough: false,
-                perProfileGlossary: false
+                perProfileGlossary: false,
+                enableRegexFilter: true
             };
 
             await api.saveSettings(defaults);
@@ -539,6 +632,10 @@
             xuatSettingsSection.classList.toggle('hidden', method !== 'xuat');
             ocrDesc.classList.toggle('hidden', method !== 'ocr');
             xuatDesc.classList.toggle('hidden', method !== 'xuat');
+            // v3.13.01: Load OCR engine status when OCR section becomes visible
+            if (method === 'ocr') {
+                loadOcrEngineStatus();
+            }
 
             // v3.11.21: When switching between XUAT and other methods, swap language values.
             // XUAT uses xuatSourceLang/xuatTargetLang (no "auto" allowed),
@@ -661,6 +758,16 @@
             if (deeplFormalitySec) {
                 deeplFormalitySec.classList.toggle('hidden', engine !== 'deepl');
             }
+            // v3.11.28: Show DeepL custom instructions only when DeepL is selected
+            const deeplInstructionsSec = document.getElementById('deepl-custom-instructions-section');
+            if (deeplInstructionsSec) {
+                deeplInstructionsSec.classList.toggle('hidden', engine !== 'deepl');
+            }
+            // v3.11.28: Hide feature notice when not DeepL
+            const deeplNoticeSec = document.getElementById('deepl-feature-notice');
+            if (deeplNoticeSec) {
+                deeplNoticeSec.classList.add('hidden');
+            }
 
             // Load engine-specific API key after showing the right section
             if (engine === 'deepl') {
@@ -771,6 +878,7 @@
         const FONT_AUTO_DETECT_MAP = {
             'ja': "'Meiryo', 'MS Gothic', 'Noto Sans JP', sans-serif",
             'zh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', sans-serif",
+            'lzh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', serif",  // v3.13.08-fix: Classical Chinese uses Chinese fonts with serif
             'ko': "'Noto Sans KR', 'Malgun Gothic', sans-serif",
             'th': "'Tahoma', 'Noto Sans Thai', sans-serif",
             'vi': "'Tahoma', 'Noto Sans', sans-serif",
@@ -842,6 +950,14 @@
 
             updateTargetLangDisplay(targetLang);
             updateEngineDescription();
+
+            // v3.11.28: When target language changes and DeepL is selected,
+            // re-evaluate which features are available for the new language
+            const engine = document.getElementById('engine-select')?.value;
+            if (engine === 'deepl') {
+                fetchDeepLLanguageFeatures(engineApiKeys.deepl, targetLang);
+            }
+
             markUnsaved();
         }
 
@@ -888,7 +1004,63 @@
                 }
             }
 
-            statusEl.innerHTML = `${icon}<span>${escapeHtml(result.message)}</span>`;
+            // v3.11.30: Support both code-based (i18n) and legacy message-based validation results
+            const message = result.code ? translateValidationCode(result.code, result.params) : result.message;
+            statusEl.innerHTML = `${icon}<span>${escapeHtml(message)}</span>`;
+        }
+
+        /**
+         * v3.11.30: Translate validation result codes to localized messages.
+         * Replaces hardcoded Spanish strings with i18n-aware messages.
+         */
+        function translateValidationCode(code, params) {
+            const p = params || {};
+            const t = (key) => {
+                const lang = translations[currentLang] || translations['es'];
+                return lang[key] || key;
+            };
+            switch (code) {
+                case 'deepl_key_valid':
+                    return t('validate_deepl_key_valid').replace('{type}', p.type).replace('{used}', p.used).replace('{limit}', p.limit);
+                case 'deepl_key_valid_short':
+                    return t('validate_deepl_key_valid_short').replace('{type}', p.type);
+                case 'deepl_key_invalid':
+                    return t('validate_deepl_key_invalid');
+                case 'openai_key_valid':
+                    return t('validate_openai_key_valid').replace('{count}', p.count);
+                case 'key_valid':
+                    return t('validate_key_valid');
+                case 'local_connected':
+                    return t('validate_local_connected').replace('{count}', p.count);
+                case 'local_connected_short':
+                    return t('validate_local_connected_short');
+                case 'libre_connected':
+                    return t('validate_libre_connected').replace('{count}', p.count);
+                case 'libre_connected_short':
+                    return t('validate_libre_connected_short');
+                case 'endpoint_not_configured':
+                    return t('validate_endpoint_not_configured');
+                case 'endpoint_reachable':
+                    return t('validate_endpoint_reachable');
+                case 'endpoint_responding':
+                    return t('validate_endpoint_responding');
+                case 'api_key_invalid':
+                    return t('validate_api_key_invalid');
+                case 'endpoint_not_found':
+                    return t('validate_endpoint_not_found');
+                case 'connection_refused':
+                    return t('validate_connection_refused');
+                case 'connection_timeout':
+                    return t('validate_connection_timeout');
+                case 'host_not_found':
+                    return t('validate_host_not_found');
+                case 'api_error':
+                    return `Error ${p.status}: ${p.message}`;
+                case 'engine_not_supported':
+                    return t('validate_engine_not_supported').replace('{engine}', p.engine);
+                default:
+                    return p.message || code;
+            }
         }
 
         async function validateApiKey() {
@@ -899,14 +1071,14 @@
             const containerEl = document.getElementById('api-key-section');
 
             if (!apiKey) {
-                setValidationStatus(statusEl, inputEl, containerEl, { valid: false, message: 'Ingresa una API Key primero' });
+                setValidationStatus(statusEl, inputEl, containerEl, { valid: false, message: translate('validate_enter_api_key') || 'Ingresa una API Key primero' });
                 return;
             }
 
             // Show loading state
             statusEl.classList.remove('hidden');
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Validando...</span>';
+            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
 
             const result = await api.validateApiKey(engine, apiKey);
             setValidationStatus(statusEl, inputEl, containerEl, result);
@@ -918,13 +1090,13 @@
             const inputEl = document.getElementById('local-endpoint');
 
             if (!endpoint) {
-                setValidationStatus(statusEl, inputEl, null, { valid: false, message: 'Ingresa un endpoint primero' });
+                setValidationStatus(statusEl, inputEl, null, { valid: false, message: translate('validate_enter_endpoint') || 'Ingresa un endpoint primero' });
                 return;
             }
 
             statusEl.classList.remove('hidden');
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Validando...</span>';
+            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
 
             const result = await api.validateApiKey('local-llm', '', endpoint);
             setValidationStatus(statusEl, inputEl, null, result);
@@ -936,13 +1108,13 @@
             const inputEl = document.getElementById('libretranslate-endpoint');
 
             if (!endpoint) {
-                setValidationStatus(statusEl, inputEl, null, { valid: false, message: 'Ingresa un endpoint primero' });
+                setValidationStatus(statusEl, inputEl, null, { valid: false, message: translate('validate_enter_endpoint') || 'Ingresa un endpoint primero' });
                 return;
             }
 
             statusEl.classList.remove('hidden');
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Validando...</span>';
+            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
 
             const result = await api.validateApiKey('libretranslate', '', endpoint);
             setValidationStatus(statusEl, inputEl, null, result);
@@ -954,13 +1126,13 @@
             const inputEl = document.getElementById('custom-mt-endpoint');
 
             if (!endpoint) {
-                setValidationStatus(statusEl, inputEl, null, { valid: false, message: 'Ingresa un endpoint primero' });
+                setValidationStatus(statusEl, inputEl, null, { valid: false, message: translate('validate_enter_endpoint') || 'Ingresa un endpoint primero' });
                 return;
             }
 
             statusEl.classList.remove('hidden');
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Validando...</span>';
+            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
 
             const result = await api.validateApiKey('custom-mt', '', endpoint);
             setValidationStatus(statusEl, inputEl, null, result);
@@ -985,9 +1157,141 @@
         function autoSaveDeepLFormality() {
             const formality = document.getElementById('deepl-formality').value;
             api.saveSettings({ deeplFormality: formality });
-            // Also update the engine instance if it exists
-            // (pipeline will recreate engines on next settings update)
             markUnsaved();
+        }
+
+        // v3.11.29: Auto-save DeepL custom instructions
+        function autoSaveDeepLCustomInstructions() {
+            const rawText = document.getElementById('deepl-custom-instructions').value;
+            const instructions = rawText.split('\n')
+                .map(line => line.trim())
+                .filter(line => line.length > 0)
+                .slice(0, 10)
+                .map(line => line.substring(0, 300));
+            api.saveSettings({ deeplCustomInstructions: instructions });
+            updateDeepLInstructionsCount();
+            updateDeepLInstructionsUI();
+            markUnsaved();
+        }
+
+        // v3.11.29: Reset custom instructions to defaults (clear the field)
+        function resetDeepLInstructions() {
+            document.getElementById('deepl-custom-instructions').value = '';
+            api.saveSettings({ deeplCustomInstructions: [] });
+            updateDeepLInstructionsCount();
+            updateDeepLInstructionsUI();
+            const t = translations[currentLang] || translations['en'];
+            showToast(t.deepl_reset_instructions + ' ✓' || 'Reset ✓');
+        }
+
+        // v3.11.29: Update the instruction counter display
+        function updateDeepLInstructionsCount() {
+            const rawText = document.getElementById('deepl-custom-instructions').value;
+            const count = rawText.split('\n').filter(line => line.trim().length > 0).length;
+            const counter = document.getElementById('deepl-instructions-count');
+            if (counter) {
+                counter.textContent = `${Math.min(count, 10)}/10`;
+                counter.classList.toggle('text-red-500', count > 10);
+                counter.classList.toggle('text-gray-400', count <= 10);
+            }
+        }
+
+        // v3.11.29: Update the default indicator and reset button visibility
+        function updateDeepLInstructionsUI() {
+            const rawText = document.getElementById('deepl-custom-instructions').value.trim();
+            const hasContent = rawText.length > 0;
+            const indicator = document.getElementById('deepl-default-instructions-indicator');
+            const resetBtn = document.getElementById('deepl-reset-instructions-btn');
+            if (indicator) {
+                indicator.classList.toggle('hidden', hasContent);
+            }
+            if (resetBtn) {
+                resetBtn.classList.toggle('hidden', !hasContent);
+            }
+        }
+
+        // v3.11.29: Update the textarea placeholder based on current UI language
+        function updateDeepLInstructionsPlaceholder() {
+            const textarea = document.getElementById('deepl-custom-instructions');
+            if (!textarea) return;
+            const t = translations[currentLang] || translations['en'];
+            textarea.placeholder = t.deepl_custom_instructions_ph || 'E.g.: Keep honorifics like -san, -chan unchanged\nUse casual language for dialogue\nPreserve character names';
+        }
+
+        // v3.11.28: Cache for DeepL language features from /v3/languages
+        let deeplLanguageFeaturesCache = null;
+
+        // v3.11.28: Fetch language features from DeepL API and update UI visibility
+        async function fetchDeepLLanguageFeatures(apiKey, targetLang) {
+            if (!apiKey || !targetLang) return;
+
+            const targetLangLower = targetLang.toLowerCase();
+
+            // Built-in fallback: known feature support per language
+            const BUILTIN_FORMALITY = new Set(['de', 'es', 'fr', 'it', 'ja', 'nl', 'pl', 'pt', 'ru']);
+            const BUILTIN_STYLE_RULES = new Set(['de', 'en', 'es', 'fr', 'it', 'ja', 'ko', 'zh']);
+
+            let formalitySupported = BUILTIN_FORMALITY.has(targetLangLower);
+            let styleRulesSupported = BUILTIN_STYLE_RULES.has(targetLangLower);
+
+            // Try fetching from /v3/languages API
+            if (apiKey && apiKey.length > 5) {
+                try {
+                    const result = await api.deeplFetchFeatures(apiKey);
+                    if (result.success && result.features) {
+                        deeplLanguageFeaturesCache = result.features;
+                        const langFeatures = result.features[targetLangLower];
+                        if (langFeatures) {
+                            formalitySupported = langFeatures.formality;
+                            styleRulesSupported = langFeatures.style_rules;
+                        }
+                    }
+                } catch (e) {
+                    // Silently fall back to built-in data
+                    console.log('[DeepL] Feature detection failed, using built-in data');
+                }
+            }
+
+            // Update UI visibility based on feature support
+            updateDeepLFeatureVisibility(formalitySupported, styleRulesSupported, targetLang);
+        }
+
+        // v3.11.29: Show/hide DeepL feature sections based on language support
+        function updateDeepLFeatureVisibility(formalitySupported, styleRulesSupported, targetLang) {
+            const engine = document.getElementById('engine-select')?.value;
+            if (engine !== 'deepl') return;
+
+            const t = translations[currentLang] || translations['en'];
+
+            const formalitySec = document.getElementById('deepl-formality-section');
+            const instructionsSec = document.getElementById('deepl-custom-instructions-section');
+            const noticeSec = document.getElementById('deepl-feature-notice');
+            const noticeText = document.getElementById('deepl-feature-notice-text');
+
+            // Hide features that aren't supported by the target language
+            if (formalitySec) {
+                formalitySec.classList.toggle('hidden', !formalitySupported);
+            }
+            if (instructionsSec) {
+                instructionsSec.classList.toggle('hidden', !styleRulesSupported);
+            }
+
+            // Show notice if some features are unavailable (v3.11.29: i18n)
+            const unavailable = [];
+            if (!formalitySupported) unavailable.push(t.deepl_feature_formality || 'Formality');
+            if (!styleRulesSupported) unavailable.push(t.deepl_feature_custom_instructions || 'Custom Instructions');
+
+            if (noticeSec && noticeText) {
+                if (unavailable.length > 0) {
+                    const template = t.deepl_feature_unavailable || 'Not available for {lang}: {features}';
+                    noticeText.textContent = template
+                        .replace('{lang}', targetLang.toUpperCase())
+                        .replace('{features}', unavailable.join(', '));
+                    noticeSec.classList.remove('hidden');
+                } else {
+                    noticeSec.classList.add('hidden');
+                }
+            }
         }
 
         function updateTargetLangDisplay(langCode) {
@@ -1958,6 +2262,56 @@
             }
         }
 
+        // ===== OCR ENGINE SELECTOR =====
+        // v3.13.01: Switch between Tesseract and PaddleOCR
+        async function setOcrEngine(engine) {
+            const descEl = document.getElementById('ocr-engine-desc');
+            const t = translations[currentLang] || translations['en'];
+
+            if (engine === 'paddle') {
+                // Check availability first
+                const status = await api.getOcrEngineStatus();
+                if (!status.paddleAvailable) {
+                    // PaddleOCR not available — revert to tesseract
+                    const selectEl = document.getElementById('ocr-engine-select');
+                    if (selectEl) selectEl.value = 'tesseract';
+                    if (descEl) descEl.textContent = t.ocr_paddle_not_available || 'PaddleOCR no disponible (onnxruntime-node no instalado)';
+                    return;
+                }
+                if (descEl) descEl.textContent = t.ocr_engine_paddle_desc || 'OCR de alta precisión para texto CJK';
+            } else {
+                if (descEl) descEl.textContent = t.ocr_engine_tesseract_desc || 'Motor OCR predeterminado. Funciona con todos los idiomas.';
+            }
+
+            await api.setOcrEngine(engine);
+        }
+
+        async function loadOcrEngineStatus() {
+            const selectEl = document.getElementById('ocr-engine-select');
+            const paddleOption = document.getElementById('ocr-engine-paddle-option');
+            const descEl = document.getElementById('ocr-engine-desc');
+            const t = translations[currentLang] || translations['en'];
+
+            try {
+                const status = await api.getOcrEngineStatus();
+                // Set current engine in selector
+                if (selectEl) selectEl.value = status.current || 'tesseract';
+                // Disable PaddleOCR option if not available
+                if (paddleOption && !status.paddleAvailable) {
+                    paddleOption.disabled = true;
+                    paddleOption.textContent = (t.ocr_engine_paddle || 'PaddleOCR') + ' (N/A)';
+                }
+                // Show appropriate description
+                if (status.current === 'paddle') {
+                    if (descEl) descEl.textContent = t.ocr_engine_paddle_desc || 'OCR de alta precisión para texto CJK';
+                } else {
+                    if (descEl) descEl.textContent = t.ocr_engine_tesseract_desc || 'Motor OCR predeterminado. Funciona con todos los idiomas.';
+                }
+            } catch (err) {
+                console.warn('[Tuhua] Could not load OCR engine status:', err);
+            }
+        }
+
         // ===== XUAT =====
         let xuatServerRunning = false;
 
@@ -2126,6 +2480,369 @@
                     }
                 }
             }
+        }
+
+        // ===== REGEX TEXT FILTER (v3.11.30, fixed v3.11.33) =====
+        let regexFilterEntries = [];
+        // v3.11.33: Staged regex filter changes — toggle/add/delete deferred until "Aplicar y Guardar"
+        let stagedRegexToggles = {};      // { filterId: enabled } — toggles to apply on save
+        let stagedRegexAdds = [];          // entries to add on save
+        let stagedRegexDeletes = [];       // filter IDs to delete on save
+        let stagedRegexEdits = {};         // { filterId: updates } — edits to apply on save
+        let stagedEnableRegexFilter = null; // null = no change, true/false = new value
+
+        /**
+         * v3.11.32: Simple i18n translate helper.
+         * Looks up a key in the current language's translations.
+         * Returns the key itself if not found (as fallback).
+         */
+        function translate(key) {
+            const t = translations[currentLang] || translations['en'];
+            return t[key] || key;
+        }
+
+        async function loadRegexFilters() {
+            if (!api) {
+                console.warn('[Tuhua] loadRegexFilters: API not available');
+                return;
+            }
+            try {
+                regexFilterEntries = await api.getRegexFilters();
+                console.log(`[Tuhua] Loaded ${regexFilterEntries.length} regex filters`);
+                renderRegexFilterList();
+            } catch (err) {
+                console.error('[Tuhua] loadRegexFilters failed:', err);
+                regexFilterEntries = [];
+                renderRegexFilterList();
+            }
+            // Restore toggle state from settings
+            try {
+                const settings = await api.getSettings();
+                const toggleEl = document.getElementById('enable-regex-filter');
+                if (toggleEl) toggleEl.checked = settings.enableRegexFilter !== false;
+            } catch (err) {
+                console.error('[Tuhua] loadRegexFilters: Failed to restore toggle state:', err);
+            }
+        }
+
+        function renderRegexFilterList() {
+            const listEl = document.getElementById('regex-filter-list');
+            if (!listEl) return;
+            listEl.innerHTML = '';
+
+            if (regexFilterEntries.length === 0) {
+                listEl.innerHTML = '<p class="text-[9px] text-gray-400 italic text-center" data-i18n="regex_filter_empty">Sin filtros configurados.</p>';
+                return;
+            }
+
+            // Sort: enabled first (by order), then disabled (by order)
+            const sorted = [...regexFilterEntries].sort((a, b) => {
+                if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+                return (a.order || 0) - (b.order || 0);
+            });
+
+            for (const entry of sorted) {
+                try {
+                    const displayName = entry.isBuiltIn ? translate(entry.name) : entry.name;
+                    const row = document.createElement('div');
+                    row.className = `flex items-center gap-1.5 p-1.5 rounded text-[10px] ${entry.enabled ? 'bg-amber-50 dark:bg-amber-900/10 border border-amber-200/50 dark:border-amber-800/20' : 'bg-gray-50/50 dark:bg-dark-900/50 opacity-70'}`;
+                    row.dataset.filterId = entry.id;
+                    const exampleHtml = entry.example ? `<span class="regex-tip" data-tooltip="${escapeHtml(entry.example)}"><span class="text-amber-400">ℹ️</span><span class="regex-tip-text">${escapeHtml(entry.example)}</span></span>` : (entry.isBuiltIn ? '<span class="text-[9px] text-amber-500/70 flex-shrink-0">⭐</span>' : '');
+                    row.innerHTML = `
+                        <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                            <input type="checkbox" ${entry.enabled ? 'checked' : ''} onchange="toggleRegexFilterEntry('${entry.id}', this.checked)" class="sr-only peer">
+                            <div class="w-5 h-3 bg-gray-300 dark:bg-dark-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[1px] after:left-[1px] after:bg-white after:rounded-full after:h-2 after:w-2 after:transition-all peer-checked:bg-amber-500"></div>
+                        </label>
+                        <span class="flex-1 truncate ${entry.isBuiltIn ? 'text-amber-700 dark:text-amber-400 font-medium' : 'text-gray-700 dark:text-gray-300'}" title="${escapeHtml(entry.pattern)}">${escapeHtml(displayName)}</span>
+                        ${exampleHtml}
+                        ${!entry.isBuiltIn ? `<button onclick="editRegexFilter('${entry.id}')" class="text-blue-500 hover:text-blue-400 flex-shrink-0" title="Edit">✏️</button>` : ''}
+                        ${!entry.isBuiltIn ? `<button onclick="deleteRegexFilterEntry('${entry.id}')" class="text-red-500 hover:text-red-400 flex-shrink-0" title="Delete">🗑️</button>` : ''}
+                    `;
+                    listEl.appendChild(row);
+                } catch (err) {
+                    console.error('[Tuhua] renderRegexFilterList: Error rendering entry:', entry.id, err);
+                }
+            }
+
+            // v3.11.34: Attach JS-positioned tooltip listeners to .regex-tip elements
+            listEl.querySelectorAll('.regex-tip').forEach(el => {
+                el.addEventListener('mouseenter', showRegexTooltip);
+                el.addEventListener('mouseleave', hideRegexTooltip);
+            });
+        }
+
+        // v3.11.34: Fixed-position tooltip for filter examples
+        // Uses position:fixed to avoid clipping by overflow containers
+        function showRegexTooltip(e) {
+            const tipEl = e.currentTarget;
+            const tipText = tipEl.dataset.tooltip || (tipEl.querySelector('.regex-tip-text') || {}).textContent;
+            if (!tipText) return;
+
+            const tooltip = document.getElementById('global-tooltip');
+            if (!tooltip) return;
+
+            tooltip.textContent = tipText;
+            tooltip.style.display = 'block';
+
+            // Calculate position relative to viewport
+            const rect = tipEl.getBoundingClientRect();
+            const tooltipRect = tooltip.getBoundingClientRect();
+
+            // Position above the element
+            let top = rect.top - tooltipRect.height - 6;
+            let left = rect.left;
+
+            // If tooltip goes above viewport, show below instead
+            if (top < 4) {
+                top = rect.bottom + 6;
+            }
+
+            // Ensure tooltip doesn't go off the right edge
+            if (left + tooltipRect.width > window.innerWidth - 8) {
+                left = window.innerWidth - tooltipRect.width - 8;
+            }
+
+            // Ensure tooltip doesn't go off the left edge
+            if (left < 4) {
+                left = 4;
+            }
+
+            tooltip.style.top = top + 'px';
+            tooltip.style.left = left + 'px';
+        }
+
+        function hideRegexTooltip() {
+            const tooltip = document.getElementById('global-tooltip');
+            if (tooltip) tooltip.style.display = 'none';
+        }
+
+        async function toggleRegexFilterEntry(id, enabled) {
+            // v3.11.33: Defer save until "Aplicar y Guardar"
+            stagedRegexToggles[id] = enabled;
+            markUnsaved();
+            // Update local state immediately for visual feedback
+            const entry = regexFilterEntries.find(e => e.id === id);
+            if (entry) entry.enabled = enabled;
+            renderRegexFilterList();
+        }
+
+        function addRegexFilter() {
+            // Show inline add form
+            const listEl = document.getElementById('regex-filter-list');
+            // Check if form already exists
+            if (document.getElementById('regex-add-form')) return;
+
+            const form = document.createElement('div');
+            form.id = 'regex-add-form';
+            form.className = 'p-2 rounded bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-800/30 space-y-1.5';
+            form.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <span class="text-[9px] font-bold text-emerald-600 dark:text-emerald-400" data-i18n="regex_filter_add_title">Agregar Filtro</span>
+                    <button onclick="cancelRegexFilterAdd()" class="text-[9px] text-gray-400 hover:text-gray-300">✕</button>
+                </div>
+                <input id="regex-add-name" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px]" placeholder="Name (e.g. Remove color codes)">
+                <input id="regex-add-pattern" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono" placeholder="Pattern (e.g. \\\\c[\\d+])">
+                <input id="regex-add-replacement" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono" placeholder="Replacement (empty = remove)">
+                <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-1 text-[9px] text-gray-500">
+                        <input id="regex-add-regex" type="checkbox" checked class="w-3 h-3"> Regex
+                    </label>
+                    <label class="flex items-center gap-1 text-[9px] text-gray-500">
+                        <input id="regex-add-case" type="checkbox" class="w-3 h-3"> Case-sensitive
+                    </label>
+                </div>
+                <button onclick="saveNewRegexFilter()" class="w-full py-1 text-[9px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded transition" data-i18n="regex_filter_save_btn">Guardar</button>
+            `;
+            listEl.prepend(form);
+        }
+
+        function cancelRegexFilterAdd() {
+            const form = document.getElementById('regex-add-form');
+            if (form) form.remove();
+        }
+
+        async function saveNewRegexFilter() {
+            const name = document.getElementById('regex-add-name').value.trim();
+            const pattern = document.getElementById('regex-add-pattern').value;
+            const replacement = document.getElementById('regex-add-replacement').value;
+            const isRegex = document.getElementById('regex-add-regex').checked;
+            const isCaseSensitive = document.getElementById('regex-add-case').checked;
+
+            if (!pattern) {
+                alert(translate('regex_filter_error_no_pattern') || 'Pattern is required');
+                return;
+            }
+
+            // Validate regex
+            if (isRegex) {
+                try {
+                    new RegExp(pattern);
+                } catch (e) {
+                    alert(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
+                    return;
+                }
+            }
+
+            // v3.11.33: Save immediately — adding a filter is a concrete action
+            const result = await api.saveRegexFilter({
+                name: name || 'Custom Filter',
+                pattern,
+                replacement,
+                isRegex,
+                isCaseSensitive,
+                enabled: true
+            });
+
+            if (result.success) {
+                cancelRegexFilterAdd();
+                await loadRegexFilters();
+                // Auto-scroll to the newly added filter
+                const newId = result.entry?.id;
+                if (newId) {
+                    const row = document.querySelector(`[data-filter-id="${newId}"]`);
+                    if (row) {
+                        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        row.classList.add('bg-emerald-50', 'dark:bg-emerald-900/20');
+                        setTimeout(() => row.classList.remove('bg-emerald-50', 'dark:bg-emerald-900/20'), 2000);
+                    }
+                }
+            }
+        }
+
+        function editRegexFilter(id) {
+            const entry = regexFilterEntries.find(e => e.id === id);
+            if (!entry || entry.isBuiltIn) return;
+
+            // Replace the row with an edit form
+            const listEl = document.getElementById('regex-filter-list');
+            // Check if form already exists
+            if (document.getElementById('regex-edit-form')) return;
+
+            const form = document.createElement('div');
+            form.id = 'regex-edit-form';
+            form.className = 'p-2 rounded bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 space-y-1.5';
+            form.innerHTML = `
+                <div class="flex items-center justify-between">
+                    <span class="text-[9px] font-bold text-blue-600 dark:text-blue-400" data-i18n="regex_filter_edit_title">Editar Filtro</span>
+                    <button onclick="cancelRegexFilterEdit()" class="text-[9px] text-gray-400 hover:text-gray-300">✕</button>
+                </div>
+                <input id="regex-edit-name" type="text" value="${escapeHtml(entry.name)}" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px]">
+                <input id="regex-edit-pattern" type="text" value="${escapeHtml(entry.pattern)}" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono">
+                <input id="regex-edit-replacement" type="text" value="${escapeHtml(entry.replacement)}" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono">
+                <div class="flex items-center gap-3">
+                    <label class="flex items-center gap-1 text-[9px] text-gray-500">
+                        <input id="regex-edit-regex" type="checkbox" ${entry.isRegex ? 'checked' : ''} class="w-3 h-3"> Regex
+                    </label>
+                    <label class="flex items-center gap-1 text-[9px] text-gray-500">
+                        <input id="regex-edit-case" type="checkbox" ${entry.isCaseSensitive ? 'checked' : ''} class="w-3 h-3"> Case-sensitive
+                    </label>
+                </div>
+                <button onclick="saveEditedRegexFilter('${entry.id}')" class="w-full py-1 text-[9px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition" data-i18n="regex_filter_save_btn">Guardar</button>
+            `;
+            listEl.prepend(form);
+        }
+
+        function cancelRegexFilterEdit() {
+            const form = document.getElementById('regex-edit-form');
+            if (form) form.remove();
+        }
+
+        async function saveEditedRegexFilter(id) {
+            const name = document.getElementById('regex-edit-name').value.trim();
+            const pattern = document.getElementById('regex-edit-pattern').value;
+            const replacement = document.getElementById('regex-edit-replacement').value;
+            const isRegex = document.getElementById('regex-edit-regex').checked;
+            const isCaseSensitive = document.getElementById('regex-edit-case').checked;
+
+            if (!pattern) {
+                alert(translate('regex_filter_error_no_pattern') || 'Pattern is required');
+                return;
+            }
+
+            // Validate regex
+            if (isRegex) {
+                try {
+                    new RegExp(pattern);
+                } catch (e) {
+                    alert(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
+                    return;
+                }
+            }
+
+            // v3.11.33: Save immediately — editing a filter is a concrete action
+            const result = await api.saveRegexFilter({
+                id,
+                name: name || 'Custom Filter',
+                pattern,
+                replacement,
+                isRegex,
+                isCaseSensitive,
+                isBuiltIn: false
+            });
+
+            if (result.success) {
+                cancelRegexFilterEdit();
+                await loadRegexFilters();
+            }
+        }
+
+        async function deleteRegexFilterEntry(id) {
+            if (!confirm(translate('regex_filter_confirm_delete') || 'Delete this filter?')) return;
+            // v3.11.33: Save immediately — deleting a filter is a concrete action
+            await api.deleteRegexFilter(id);
+            await loadRegexFilters();
+        }
+
+        async function resetRegexFilters() {
+            if (!confirm(translate('regex_filter_confirm_reset') || 'Reset all filters to defaults? Custom filters will be removed.')) return;
+            await api.resetRegexFilters();
+            await loadRegexFilters();
+        }
+
+        function stageRegexFilterToggle() {
+            // v3.11.33: Defer save until "Aplicar y Guardar"
+            stagedEnableRegexFilter = document.getElementById('enable-regex-filter').checked;
+            markUnsaved();
+        }
+
+        function testRegexFilter() {
+            const testArea = document.getElementById('regex-filter-test-area');
+            testArea.classList.toggle('hidden');
+            if (!testArea.classList.contains('hidden')) {
+                document.getElementById('regex-test-input').focus();
+            }
+        }
+
+        function closeRegexFilterTest() {
+            document.getElementById('regex-filter-test-area').classList.add('hidden');
+        }
+
+        let regexTestDebounce = null;
+        async function runRegexFilterTest() {
+            clearTimeout(regexTestDebounce);
+            regexTestDebounce = setTimeout(async () => {
+                const text = document.getElementById('regex-test-input').value;
+                if (!text) {
+                    document.getElementById('regex-test-output').textContent = '';
+                    document.getElementById('regex-test-steps').innerHTML = '';
+                    return;
+                }
+                const result = await api.testRegexFilter(text);
+                document.getElementById('regex-test-output').textContent = result.text;
+
+                // Show step-by-step results
+                const stepsEl = document.getElementById('regex-test-steps');
+                if (result.steps && result.steps.length > 0) {
+                    stepsEl.innerHTML = result.steps.map(step => {
+                        const name = step.name.startsWith('regex_filter_') ? translate(step.name) : step.name;
+                        const icon = step.changed ? '→' : '·';
+                        const errorIcon = step.error ? '⚠️' : '';
+                        return `<div class="${step.changed ? 'text-emerald-500' : 'text-gray-500'}">${icon} ${escapeHtml(name)}${errorIcon} ${step.error ? escapeHtml(step.error) : ''}</div>`;
+                    }).join('');
+                } else {
+                    stepsEl.innerHTML = '';
+                }
+            }, 200);
         }
 
         // ===== INIT =====

@@ -78,9 +78,23 @@
         .dark select { color-scheme: dark; }
         .dark select option { background-color: #1e293b; color: #e2e8f0; }
         .dark select optgroup { background-color: #1e293b; color: #94a3b8; }
+
+        /* Regex filter hover tooltip — v3.11.35: JS-positioned fixed tooltip */
+        .regex-tip { cursor: help; }
+        .regex-tip .regex-tip-text { display: none; } /* Hidden; JS reads text and shows global tooltip */
+        /* Global fixed tooltip (positioned by JS) */
+        #global-tooltip {
+            position: fixed; z-index: 99999; pointer-events: none;
+            background: #1e293b; color: #e2e8f0; font-size: 9px; white-space: pre;
+            padding: 4px 8px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            display: none;
+        }
+        .light #global-tooltip { background: #fff; color: #374151; border: 1px solid #e5e7eb; }
     </style>
 </head>
 <body class="bg-gray-100 dark:bg-dark-950 text-gray-800 dark:text-gray-100 h-screen flex flex-col overflow-hidden font-sans transition-colors duration-300">
+    <!-- Global tooltip for filter examples (positioned fixed by JS) -->
+    <div id="global-tooltip"></div>
 
     <!-- NAVBAR -->
     <nav class="bg-white dark:bg-dark-800 border-b border-gray-200 dark:border-dark-700 px-4 py-3 flex justify-between items-center shadow-sm z-20">
@@ -88,7 +102,7 @@
             <img src="assets/icon-256.png" alt="Tuhua" class="w-8 h-8 rounded-lg shadow-lg shadow-emerald-500/20 object-contain">
             <div>
                 <span class="font-bold text-base tracking-tight">Tuhua <span class="text-emerald-600 dark:text-emerald-400">Translator</span></span>
-                <span class="text-[10px] text-gray-400 ml-1.5" data-i18n="app_subtitle">Open Source VN Translator</span><span class="text-[9px] font-mono text-emerald-500/70 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-1.5">v3.11.24</span>
+                <span class="text-[10px] text-gray-400 ml-1.5" data-i18n="app_subtitle">Open Source VN Translator</span><span class="text-[9px] font-mono text-emerald-500/70 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-1.5">v3.13.14</span>
             </div>
         </div>
         <div class="flex items-center gap-3">
@@ -201,10 +215,30 @@
                             <option value="default" data-i18n="formality_default">Por defecto</option>
                             <option value="prefer_more" data-i18n="formality_prefer_more">Preferir formal</option>
                             <option value="prefer_less" data-i18n="formality_prefer_less">Preferir informal</option>
-                            <option value="more" data-i18n="formality_more">Siempre formal</option>
-                            <option value="less" data-i18n="formality_less">Siempre informal</option>
                         </select>
-                        <p class="text-[9px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="deepl_formality_desc">Controla el nivel de formalidad de la traducción. Útil para japonés (keigo/casual).</p>
+                        <p id="deepl-formality-hint" class="text-[9px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="deepl_formality_desc">Controla el nivel de formalidad de la traducción. Útil para japonés (keigo/casual).</p>
+                    </div>
+                    <!-- v3.11.29: DeepL Custom Instructions -->
+                    <div id="deepl-custom-instructions-section" class="hidden mt-2">
+                        <div class="flex items-center justify-between mb-1">
+                            <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase" data-i18n="deepl_custom_instructions">Instrucciones Personalizadas</label>
+                            <div class="flex items-center gap-2">
+                                <span id="deepl-default-instructions-indicator" class="text-[9px] text-emerald-500 dark:text-emerald-400 italic" data-i18n="deepl_using_default_instructions">Usando instrucciones recomendadas</span>
+                                <button id="deepl-reset-instructions-btn" onclick="resetDeepLInstructions()" class="hidden text-[9px] text-blue-500 hover:text-blue-400 font-medium transition" data-i18n="deepl_reset_instructions">Restablecer</button>
+                            </div>
+                        </div>
+                        <textarea id="deepl-custom-instructions" rows="3" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs resize-none transition-colors duration-200" placeholder="" oninput="autoSaveDeepLCustomInstructions()"></textarea>
+                        <div class="flex items-center justify-between mt-1">
+                            <div>
+                                <p class="text-[9px] text-amber-600 dark:text-amber-500" data-i18n="deepl_custom_instructions_desc">Directivas en lenguaje natural para guiar la traducción. 1 por línea, máx 300 caracteres cada una.</p>
+                                <p class="text-[9px] text-blue-500 dark:text-blue-400 mt-0.5" data-i18n="deepl_custom_instructions_english_note">Para mejores resultados, escribe las instrucciones en inglés</p>
+                            </div>
+                            <span id="deepl-instructions-count" class="text-[9px] text-gray-400 font-mono">0/10</span>
+                        </div>
+                    </div>
+                    <!-- v3.11.29: DeepL Feature Incompatibility Notice -->
+                    <div id="deepl-feature-notice" class="hidden mt-2 p-2 rounded-md bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
+                        <p id="deepl-feature-notice-text" class="text-[9px] text-blue-600 dark:text-blue-400"></p>
                     </div>
                 </div>
 
@@ -276,6 +310,7 @@
                                 <option value="en" data-i18n-lang="en">🇺🇸 English</option>
                                 <option value="es" data-i18n-lang="es">🇪🇸 Español</option>
                                 <option value="zh" data-i18n-lang="zh">🇨🇳 中文</option>
+                                <option value="lzh" data-i18n-lang="lzh">📜 文言文</option>
                                 <option value="ko" data-i18n-lang="ko">🇰🇷 한국어</option>
                                 <option value="ru" data-i18n-lang="ru">🇷🇺 Русский</option>
                                 <option value="pt" data-i18n-lang="pt">🇧🇷 Português</option>
@@ -322,6 +357,16 @@
 
                 <!-- OCR Status (shown only when OCR input method is selected) -->
                 <div id="ocr-settings-section" class="hidden border-t border-purple-800/30 dark:border-purple-500/30 pt-4 space-y-3">
+                    <!-- OCR Engine Selector -->
+                    <div class="flex items-center gap-2">
+                        <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400" data-i18n="ocr_engine_label">Motor OCR</span>
+                        <select id="ocr-engine-select" onchange="setOcrEngine(this.value)" class="flex-1 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[10px]">
+                            <option value="tesseract">Tesseract</option>
+                            <option value="paddle" id="ocr-engine-paddle-option">PaddleOCR</option>
+                        </select>
+                    </div>
+                    <p id="ocr-engine-desc" class="text-[9px] text-gray-400 italic" data-i18n="ocr_engine_tesseract_desc">Motor OCR predeterminado. Funciona con todos los idiomas.</p>
+                    <!-- v3.13.14: Removed "~15MB model download" warning — models download automatically and silently -->
                     <p id="ocr-status-text" class="text-[9px] text-gray-400 text-center"></p>
                 </div>
 
@@ -826,6 +871,50 @@
                                 <input type="checkbox" id="per-profile-glossary-toggle" class="sr-only peer" onchange="togglePerProfileGlossary(this.checked)">
                                 <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-purple-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                             </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ===== Filtro de Texto Category (collapsible) ===== -->
+                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
+                    <button onclick="toggleSettingsCategory('textfilter')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
+                        <div class="flex items-center gap-2">
+                            <div class="w-1 h-5 bg-amber-500 rounded-full"></div>
+                            <h3 class="text-xs font-bold text-amber-500 uppercase tracking-wider" data-i18n="settings_cat_textfilter">Filtro de Texto</h3>
+                        </div>
+                        <svg id="cat-textfilter-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                    </button>
+                    <div id="cat-textfilter-content" class="px-4 pb-4 pt-3 space-y-3">
+                        <!-- Enable toggle -->
+                        <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                            <div>
+                                <span class="text-xs font-medium" data-i18n="regex_filter_enabled">Filtro activo</span>
+                                <p class="text-[9px] text-gray-400" data-i18n="regex_filter_desc">Filtra el texto del juego antes de traducir. Elimina códigos, etiquetas y basura automáticamente.</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="enable-regex-filter" onchange="stageRegexFilterToggle()" class="sr-only peer" checked>
+                                <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                            </label>
+                        </div>
+                        <!-- Action buttons -->
+                        <div class="flex items-center gap-2">
+                            <button onclick="addRegexFilter()" class="flex-1 py-1.5 text-[10px] font-bold bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 rounded-md hover:bg-amber-200 dark:hover:bg-amber-900/50 transition" data-i18n="regex_filter_add_btn">+ Agregar</button>
+                            <button onclick="testRegexFilter()" class="flex-1 py-1.5 text-[10px] font-bold bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 rounded-md hover:bg-blue-200 dark:hover:bg-blue-900/50 transition" data-i18n="regex_filter_test_btn">Probar</button>
+                            <button onclick="resetRegexFilters()" class="flex-1 py-1.5 text-[10px] font-bold bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 rounded-md hover:bg-gray-200 dark:hover:bg-dark-600 transition" data-i18n="regex_filter_reset_btn">Restablecer</button>
+                        </div>
+                        <!-- Filter list -->
+                        <div id="regex-filter-list" class="space-y-1 max-h-[400px] overflow-y-auto scrollbar-thin">
+                            <!-- Dynamically populated -->
+                        </div>
+                        <!-- Test area -->
+                        <div id="regex-filter-test-area" class="hidden space-y-2 p-2 rounded-md bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
+                            <div class="flex items-center justify-between">
+                                <span class="text-[9px] font-bold text-blue-600 dark:text-blue-400" data-i18n="regex_filter_test_title">Probar Filtro</span>
+                                <button onclick="closeRegexFilterTest()" class="text-[9px] text-gray-400 hover:text-gray-300">✕</button>
+                            </div>
+                            <textarea id="regex-test-input" rows="2" class="w-full p-1.5 rounded bg-white dark:bg-dark-900 border border-blue-200 dark:border-blue-800 text-[10px] resize-none" placeholder='Ej: {桢字/かんじ}こんにちは<c[2]>世界' oninput="runRegexFilterTest()"></textarea>
+                            <div id="regex-test-output" class="text-[10px] text-emerald-600 dark:text-emerald-400 bg-white dark:bg-dark-900 p-1.5 rounded border border-gray-200 dark:border-dark-600 min-h-[20px]"></div>
+                            <div id="regex-test-steps" class="text-[8px] text-gray-400 space-y-0.5"></div>
                         </div>
                     </div>
                 </div>

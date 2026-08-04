@@ -4,7 +4,7 @@
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Electron](https://img.shields.io/badge/Electron-28-blue.svg)](https://www.electronjs.org/)
-[![Version](https://img.shields.io/badge/version-3.11.24-emerald.svg)]()
+[![Version](https://img.shields.io/badge/version-3.13.14-emerald.svg)]()
 
 ---
 

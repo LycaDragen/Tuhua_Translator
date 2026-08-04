@@ -9,24 +9,32 @@ const path = require('path');
 const axios = require('axios');
 
 const XuatInstaller = require('../services/xuat-installer');
+const VndbService = require('../services/vndb');
 
 class IpcHandlers {
-  constructor(store, pipeline, glossary, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer) {
+  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager) {
     this.store = store;
     this.pipeline = pipeline;
     this.glossary = glossary;
+    this.regexFilter = regexFilter;
     this.windowManager = windowManager;
     this.textractor = textractor;
     this.clipboardWatcher = clipboardWatcher;
     this.textractorLauncher = textractorLauncher;
     this.ocrService = ocrService;
     this.xuatServer = xuatServer;
+    // v3.11.25: Shortcut manager for OCR hotkey-triggered capture
+    this.shortcutManager = shortcutManager || null;
+    // v3.11.25: VNDB service for glossary import
+    this.vndbService = new VndbService();
     this.registered = false;
     // In-memory translation active flag for fast, reliable access
     this._translationActive = true;
     // Deduplication state for _handleText
     this._lastHandledHash = '';
     this._lastHandledTime = 0;
+    // v3.13.12: Store last handled text for auto-retranslation when settings change
+    this._lastHandledText = '';
     // OCR dedup: persistent hash that doesn't expire — same text from OCR
     // should NEVER be re-translated until the game screen changes
     this._lastOcrTextHash = '';
@@ -34,6 +42,15 @@ class IpcHandlers {
     this._ocrActive = false;
     this._ocrAutoCapture = false;
     this._ocrScanPaused = false; // v3.9.6: scan paused from capture area overlay
+  }
+
+  /**
+   * v3.13.14: Get the current input method from store.
+   * Used by index.js to filter Textractor status events when OCR/clipboard/XUAT is active.
+   * @returns {string} Current input method ('textractor', 'clipboard', 'ocr', 'xuat')
+   */
+  _getCurrentInputMethod() {
+    return this.store.get('inputMethod') || 'textractor';
   }
 
   register() {
@@ -126,11 +143,33 @@ class IpcHandlers {
       // Switch input method
       // v3.11.3: ALL xuatServer.stop() calls are now AWAITED to prevent
       // the "Port already in use" race condition.
-      if (data.inputMethod) {
+      // v3.13.08: Only run method switch logic if the input method actually changed.
+      // gatherConfig() always sends inputMethod, so the previous code ran teardown/restart
+      // on every "Apply & Save" click, causing the OCR capture area to disappear.
+      const previousInputMethod = currentSettings.inputMethod;
+      if (data.inputMethod && data.inputMethod !== previousInputMethod) {
         if (data.inputMethod === 'clipboard') {
           this.textractor.disconnect();
           this.textractorLauncher.kill();
           if (this.xuatServer) await this.xuatServer.stop();  // v3.11.3: AWAITED
+          // v3.13.04: Stop OCR if switching FROM OCR to clipboard
+          if (this._ocrActive) {
+            try {
+              this.ocrService.stopAutoCapture();
+              await this.ocrService.terminate();
+              this.windowManager.closeCaptureArea();
+              this._ocrActive = false;
+              if (this.shortcutManager) {
+                this.shortcutManager.setOcrCaptureCallback(null);
+              }
+            } catch (e) {
+              console.warn('[Tuhua] Error stopping OCR on method switch:', e.message);
+            }
+          }
+          // v3.13.04: Re-show output overlay for clipboard mode
+          if (this._translationActive) {
+            this.windowManager.showOutputOverlay();
+          }
           this.clipboardWatcher.start();
           // Notify renderer of new status
           setTimeout(() => {
@@ -157,6 +196,24 @@ class IpcHandlers {
           this.textractor.disconnect();
           this.textractorLauncher.kill();
           this.clipboardWatcher.stop();
+          // v3.13.04: Stop OCR if switching FROM OCR to XUAT
+          if (this._ocrActive) {
+            try {
+              this.ocrService.stopAutoCapture();
+              await this.ocrService.terminate();
+              this.windowManager.closeCaptureArea();
+              this._ocrActive = false;
+              if (this.shortcutManager) {
+                this.shortcutManager.setOcrCaptureCallback(null);
+              }
+            } catch (e) {
+              console.warn('[Tuhua] Error stopping OCR on method switch:', e.message);
+            }
+          }
+          // v3.13.04: XUAT replaces text directly in the game, no overlay needed.
+          // Hide and clear the output overlay when switching to XUAT mode.
+          this.windowManager.hideOutputOverlay();
+          this.windowManager.clearOverlayContent();
           console.log('[Tuhua] XUAT input method selected');
           // Update port if changed, but don't start the server
           if (this.xuatServer && data.xuatPort) {
@@ -166,6 +223,24 @@ class IpcHandlers {
         } else {
           this.clipboardWatcher.stop();
           if (this.xuatServer) await this.xuatServer.stop();  // v3.11.3: AWAITED
+          // v3.13.04: Stop OCR if switching FROM OCR to Textractor
+          if (this._ocrActive) {
+            try {
+              this.ocrService.stopAutoCapture();
+              await this.ocrService.terminate();
+              this.windowManager.closeCaptureArea();
+              this._ocrActive = false;
+              if (this.shortcutManager) {
+                this.shortcutManager.setOcrCaptureCallback(null);
+              }
+            } catch (e) {
+              console.warn('[Tuhua] Error stopping OCR on method switch:', e.message);
+            }
+          }
+          // v3.13.04: Re-show output overlay for Textractor mode (was hidden for XUAT)
+          if (this._translationActive) {
+            this.windowManager.showOutputOverlay();
+          }
           // Textractor mode: always try to connect TCP as a secondary channel
           // (CLI stdout is primary, but TCP works if "Start Server" extension is present)
           const port = this.store.get('textractorPort') || 9251;
@@ -175,6 +250,49 @@ class IpcHandlers {
           setTimeout(() => {
             this.windowManager.sendToMainWindow('textractor-status', 'reconnecting');
           }, 300);
+        }
+      }
+
+      // v3.13.10: When source language changes and OCR is active, update the OCR engine.
+      // This was a critical bug — the OCR engine was only initialized with the language
+      // set at startup, and changing the source language dropdown had no effect on
+      // which OCR model was used. Korean text would never be recognized if the user
+      // started OCR with 'auto' (defaults to English/Chinese) and then switched to Korean.
+      if (data.sourceLang && data.sourceLang !== currentSettings.sourceLang && this._ocrActive) {
+        const previousOcrLang = currentSettings.sourceLang || 'auto';
+        console.log(`[Tuhua] Source language changed while OCR active: ${previousOcrLang} → ${data.sourceLang}, updating OCR engine`);
+        try {
+          await this.ocrService.setLanguage(data.sourceLang);
+          console.log(`[Tuhua] OCR engine language updated to: ${data.sourceLang}`);
+        } catch (ocrLangErr) {
+          console.warn(`[Tuhua] Failed to update OCR language: ${ocrLangErr.message}`);
+        }
+      }
+
+      // v3.13.12: Auto-retranslate when engine or source language changes but the
+      // OCR text is the same (screen hasn't changed). Previously, changing the
+      // translation engine (e.g., DeepL → Google) or source language (e.g., Korean
+      // → Auto-detect) had no effect until the game screen changed, because the
+      // OCR dedup blocked re-translation of identical text. Now we force a
+      // retranslation with the new settings. Following VN Translator's approach
+      // of immediately retranslating when translation settings change.
+      const engineChanged = data.engine && data.engine !== currentSettings.engine;
+      const sourceLangChanged = data.sourceLang && data.sourceLang !== currentSettings.sourceLang;
+      const targetLangChanged = data.targetLang && data.targetLang !== currentSettings.targetLang;
+      if ((engineChanged || sourceLangChanged || targetLangChanged) && this._lastHandledText) {
+        const newEngine = data.engine || currentSettings.engine || 'google-free';
+        const newSourceLang = data.sourceLang || currentSettings.sourceLang || 'auto';
+        const newTargetLang = data.targetLang || currentSettings.targetLang || 'es';
+        console.log(`[Tuhua] Settings changed while text is on-screen — auto-retranslating last text with ${newEngine} (${newSourceLang} → ${newTargetLang})`);
+        // Use translateNow (no debounce) for immediate retranslation
+        try {
+          await this.pipeline.translateNow(this._lastHandledText, {
+            source: newSourceLang,
+            target: newTargetLang,
+            engine: newEngine
+          });
+        } catch (retransErr) {
+          console.warn(`[Tuhua] Auto-retranslation failed: ${retransErr.message}`);
         }
       }
 
@@ -211,35 +329,38 @@ class IpcHandlers {
       // The xuat-update-language IPC handler uses xuatSourceLang/xuatTargetLang
       // from the store, which are set independently by the XUAT language selectors.
 
-      // Handle translation active toggle
-      // NOTE: OCR start/stop is handled by the renderer through ocr-start/ocr-stop IPC.
-      // We do NOT start OCR here to avoid double initialization.
-      // XUAT mode does NOT need the output overlay — translations appear in-game.
+      // v3.13.06: Unified overlay visibility management.
+      // Previously, engine change and translationActive toggle were handled
+      // separately, causing race conditions when both arrive in the same
+      // save-settings call. Now we determine the FINAL state of both flags
+      // first, then apply overlay visibility ONCE at the end.
+
+      // Update _translationActive if it changed
       if (data.translationActive !== undefined) {
         this._translationActive = data.translationActive;
-
-        const currentInputMethod = data.inputMethod || this.store.get('inputMethod');
-
-        if (data.translationActive) {
-          // Only show overlay for non-XUAT input methods
-          // XUAT replaces text directly in the game, no overlay needed
-          if (currentInputMethod !== 'xuat') {
-            this.windowManager.showOutputOverlay();
-          }
-          // v3.11.22: Resume clipboard watcher when unpausing in clipboard mode
-          if (currentInputMethod === 'clipboard') {
-            this.clipboardWatcher.start();
-          }
-        } else {
-          // Pausing: hide output overlay and clear content
-          this.windowManager.hideOutputOverlay();
-          this.windowManager.clearOverlayContent();
-          // v3.11.22: Stop clipboard watcher when pausing to prevent reading
-          // sensitive clipboard content while the tool is paused
-          if (currentInputMethod === 'clipboard') {
-            this.clipboardWatcher.stop();
-          }
+        // v3.11.22: Resume/stop clipboard watcher when toggling
+        const imForClipboard = data.inputMethod || this.store.get('inputMethod');
+        if (data.translationActive && imForClipboard === 'clipboard') {
+          this.clipboardWatcher.start();
+        } else if (!data.translationActive && imForClipboard === 'clipboard') {
+          this.clipboardWatcher.stop();
         }
+      }
+
+      // v3.13.07: Improved unified overlay visibility management.
+      // Determine the FINAL overlay visibility based on current state.
+      // Key fix: when switching FROM XUAT to another method, only show overlay
+      // if translation is active. Also, always ensure overlay is hidden when paused.
+      const finalInputMethod = data.inputMethod || this.store.get('inputMethod');
+      const finalTranslationActive = this._translationActive;
+
+      if (finalTranslationActive && finalInputMethod !== 'xuat') {
+        // Translation is active AND not in XUAT mode — show overlay
+        this.windowManager.showOutputOverlay();
+      } else {
+        // Translation is paused OR in XUAT mode — hide overlay and clear content
+        this.windowManager.hideOutputOverlay();
+        this.windowManager.clearOverlayContent();
       }
 
       return { success: true };
@@ -383,6 +504,104 @@ class IpcHandlers {
       try {
         const count = this.glossary.exportToFile(filePath);
         return { success: true, exported: count };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
+
+    // ===== Regex Filter (v3.11.30) =====
+    ipcMain.handle('get-regex-filters', () => {
+      return this.regexFilter.getAll();
+    });
+
+    ipcMain.handle('save-regex-filter', (event, entry) => {
+      if (!entry || typeof entry.pattern !== 'string') {
+        return { success: false, error: 'Invalid filter entry' };
+      }
+      if (entry.id && !entry.isBuiltIn) {
+        this.regexFilter.update(entry.id, entry);
+        return { success: true, entry: this.regexFilter.getById(entry.id) };
+      } else {
+        const newEntry = this.regexFilter.add(entry);
+        return { success: true, entry: newEntry };
+      }
+    });
+
+    ipcMain.handle('delete-regex-filter', (event, id) => {
+      if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
+      const deleted = this.regexFilter.delete(id);
+      return { success: deleted };
+    });
+
+    ipcMain.handle('toggle-regex-filter', (event, id, enabled) => {
+      if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
+      const updated = this.regexFilter.toggle(id, enabled);
+      return { success: !!updated, entry: updated };
+    });
+
+    ipcMain.handle('reorder-regex-filters', (event, orderedIds) => {
+      if (!Array.isArray(orderedIds)) return { success: false, error: 'Invalid order' };
+      this.regexFilter.reorder(orderedIds);
+      return { success: true };
+    });
+
+    ipcMain.handle('test-regex-filter', (event, text, filterId) => {
+      if (typeof text !== 'string') return { text: '', steps: [] };
+      return this.regexFilter.test(text, filterId || null);
+    });
+
+    ipcMain.handle('reset-regex-filters', () => {
+      this.regexFilter.resetToDefaults();
+      return { success: true };
+    });
+
+    // ===== VNDB Glossary Import (v3.11.25) =====
+    // Search VNDB for visual novels by title
+    ipcMain.handle('vndb-search', async (event, query) => {
+      if (typeof query !== 'string' || query.trim().length < 2) {
+        return { success: false, error: 'Query too short (minimum 2 characters)' };
+      }
+      try {
+        const results = await this.vndbService.searchVN(query);
+        return { success: true, results };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
+
+    // Import glossary entries from a VNDB visual novel
+    ipcMain.handle('vndb-import', async (event, vnId, options) => {
+      if (typeof vnId !== 'string' || !vnId.match(/^v\d+$/)) {
+        return { success: false, error: 'Invalid VNDB VN ID (format: v123)' };
+      }
+      try {
+        const importResult = await this.vndbService.importGlossary(vnId, options || {});
+
+        // Add all imported entries to the glossary
+        let addedCount = 0;
+        for (const entry of importResult.entries) {
+          // Check for duplicates before adding
+          const existing = this.glossary.getAll();
+          const isDuplicate = existing.some(e =>
+            e.source === entry.source && e.target === entry.target
+          );
+          if (!isDuplicate) {
+            this.glossary.add({
+              source: entry.source,
+              target: entry.target,
+              mode: entry.mode || 'case-insensitive',
+              enabled: true
+            });
+            addedCount++;
+          }
+        }
+
+        return {
+          success: true,
+          imported: addedCount,
+          duplicates: importResult.stats.total - addedCount,
+          stats: importResult.stats
+        };
       } catch (e) {
         return { success: false, error: e.message };
       }
@@ -680,9 +899,9 @@ class IpcHandlers {
                 if (resp.data && resp.data.character_count !== undefined) {
                   const used = resp.data.character_count;
                   const limit = resp.data.character_limit;
-                  return { valid: true, message: `Key valida (${ep.label}) — ${used.toLocaleString()}/${limit.toLocaleString()} caracteres usados` };
+                  return { valid: true, code: 'deepl_key_valid', params: { type: ep.label, used: used.toLocaleString(), limit: limit.toLocaleString() } };
                 }
-                return { valid: true, message: `Key valida (${ep.label})` };
+                return { valid: true, code: 'deepl_key_valid_short', params: { type: ep.label } };
               } catch (err) {
                 lastError = err;
                 if (err.response && (err.response.status === 401 || err.response.status === 403)) {
@@ -695,9 +914,9 @@ class IpcHandlers {
             if (lastError && lastError.response) {
               const status = lastError.response.status;
               if (status === 401 || status === 403) {
-                return { valid: false, message: 'API Key invalida o sin permisos. Verifica que sea de DeepL (Free o Pro)' };
+                return { valid: false, code: 'deepl_key_invalid', params: {} };
               }
-              return { valid: false, message: `Error ${status}: ${lastError.response.data?.error?.message || lastError.message}` };
+              return { valid: false, code: 'api_error', params: { status, message: lastError.response.data?.error?.message || lastError.message } };
             }
             throw lastError;
           }
@@ -708,9 +927,9 @@ class IpcHandlers {
               headers: { 'Authorization': `Bearer ${apiKey}` }
             });
             if (resp.data && resp.data.data) {
-              return { valid: true, message: `Key valida — ${resp.data.data.length} modelos disponibles` };
+              return { valid: true, code: 'openai_key_valid', params: { count: resp.data.data.length } };
             }
-            return { valid: true, message: 'Key valida' };
+            return { valid: true, code: 'key_valid', params: {} };
           }
 
           case 'local-llm': {
@@ -719,34 +938,34 @@ class IpcHandlers {
             if (resp.data) {
               const models = resp.data.data || resp.data;
               const count = Array.isArray(models) ? models.length : 0;
-              return { valid: true, message: `Conectado — ${count} modelo(s) disponible(s)` };
+              return { valid: true, code: 'local_connected', params: { count } };
             }
-            return { valid: true, message: 'Conectado al servidor local' };
+            return { valid: true, code: 'local_connected_short', params: {} };
           }
 
           case 'libretranslate': {
             const base = endpoint || 'http://localhost:5000';
             const resp = await axios.get(`${base}/languages`, { timeout: 5000 });
             if (resp.data && Array.isArray(resp.data)) {
-              return { valid: true, message: `Conectado — ${resp.data.length} idiomas disponibles` };
+              return { valid: true, code: 'libre_connected', params: { count: resp.data.length } };
             }
-            return { valid: true, message: 'Conectado a LibreTranslate' };
+            return { valid: true, code: 'libre_connected_short', params: {} };
           }
 
           case 'custom-mt': {
             if (!endpoint) {
-              return { valid: false, message: 'Endpoint no configurado' };
+              return { valid: false, code: 'endpoint_not_configured', params: {} };
             }
             try {
               await axios.head(endpoint, { timeout: 5000 });
-              return { valid: true, message: 'Endpoint alcanzable' };
+              return { valid: true, code: 'endpoint_reachable', params: {} };
             } catch (headErr) {
               try {
                 await axios.get(endpoint, { timeout: 5000 });
-                return { valid: true, message: 'Endpoint alcanzable' };
+                return { valid: true, code: 'endpoint_reachable', params: {} };
               } catch (getErr) {
                 if (getErr.response) {
-                  return { valid: true, message: 'Endpoint alcanzable (respuesta del servidor)' };
+                  return { valid: true, code: 'endpoint_responding', params: {} };
                 }
                 throw getErr;
               }
@@ -754,29 +973,105 @@ class IpcHandlers {
           }
 
           default:
-            return { valid: false, message: `Motor "${engine}" no soporta validacion` };
+            return { valid: false, code: 'engine_not_supported', params: { engine } };
         }
       } catch (err) {
         if (err.response) {
           const status = err.response.status;
           if (status === 401 || status === 403) {
-            return { valid: false, message: 'API Key invalida o sin permisos' };
+            return { valid: false, code: 'api_key_invalid', params: {} };
           }
           if (status === 404) {
-            return { valid: false, message: 'Endpoint no encontrado — verifica la URL' };
+            return { valid: false, code: 'endpoint_not_found', params: {} };
           }
-          return { valid: false, message: `Error ${status}: ${err.response.data?.error?.message || err.message}` };
+          return { valid: false, code: 'api_error', params: { status, message: err.response.data?.error?.message || err.message } };
         }
         if (err.code === 'ECONNREFUSED') {
-          return { valid: false, message: 'Conexion rechazada — esta el servidor corriendo?' };
+          return { valid: false, code: 'connection_refused', params: {} };
         }
         if (err.code === 'ETIMEDOUT' || err.code === 'ECONNABORTED') {
-          return { valid: false, message: 'Tiempo de espera agotado — servidor no responde' };
+          return { valid: false, code: 'connection_timeout', params: {} };
         }
         if (err.code === 'ENOTFOUND') {
-          return { valid: false, message: 'Host no encontrado — verifica la URL' };
+          return { valid: false, code: 'host_not_found', params: {} };
         }
-        return { valid: false, message: `Error: ${err.message}` };
+        return { valid: false, code: 'api_error', params: { status: 0, message: err.message } };
+      }
+    });
+
+    // ===== DeepL Feature Detection (v3.11.28) =====
+    // Fetch language features from /v3/languages to dynamically show/hide UI options
+    ipcMain.handle('deepl-fetch-features', async (event, { apiKey }) => {
+      if (!apiKey || typeof apiKey !== 'string') {
+        return { success: false, error: 'API key required', features: null };
+      }
+      try {
+        const isFree = apiKey.endsWith(':fx');
+        const baseUrl = isFree
+          ? 'https://api-free.deepl.com/v3/languages'
+          : 'https://api.deepl.com/v3/languages';
+
+        const response = await axios.get(baseUrl, {
+          params: { resource: 'translate_text' },
+          timeout: 8000,
+          headers: { 'Authorization': `DeepL-Auth-Key ${apiKey}` }
+        });
+
+        if (response.data && Array.isArray(response.data)) {
+          const features = {};
+          for (const lang of response.data) {
+            features[lang.lang.toLowerCase()] = {
+              formality: 'formality' in (lang.features || {}),
+              style_rules: 'style_rules' in (lang.features || {}),
+              glossary: 'glossary' in (lang.features || {}),
+              tag_handling: 'tag_handling' in (lang.features || {})
+            };
+          }
+          return { success: true, features, languageCount: Object.keys(features).length };
+        }
+        return { success: false, error: 'Unexpected response format', features: null };
+      } catch (err) {
+        const status = err.response?.status;
+        const msg = err.response?.data?.message || err.message;
+        console.warn(`[DeepL] /v3/languages failed: HTTP ${status || 'N/A'} — ${msg}`);
+        return { success: false, error: `HTTP ${status || 'N/A'}: ${msg}`, features: null };
+      }
+    });
+
+    // v3.11.28: Fetch DeepL Translation Memories from user's account
+    ipcMain.handle('deepl-fetch-translation-memories', async (event, { apiKey }) => {
+      if (!apiKey || typeof apiKey !== 'string') {
+        return { success: false, error: 'API key required', memories: [] };
+      }
+      try {
+        const isFree = apiKey.endsWith(':fx');
+        const baseUrl = isFree
+          ? 'https://api-free.deepl.com/v3/translation_memories'
+          : 'https://api.deepl.com/v3/translation_memories';
+
+        const response = await axios.get(baseUrl, {
+          timeout: 8000,
+          headers: { 'Authorization': `DeepL-Auth-Key ${apiKey}` }
+        });
+
+        if (response.data && response.data.translation_memories) {
+          return {
+            success: true,
+            memories: response.data.translation_memories.map(tm => ({
+              id: tm.translation_memory_id,
+              name: tm.name,
+              sourceLanguage: tm.source_language,
+              targetLanguages: tm.target_languages,
+              segmentCount: tm.segment_count
+            }))
+          };
+        }
+        return { success: false, error: 'No translation memories found', memories: [] };
+      } catch (err) {
+        const status = err.response?.status;
+        const msg = err.response?.data?.message || err.message;
+        console.warn(`[DeepL] /v3/translation_memories failed: HTTP ${status || 'N/A'} — ${msg}`);
+        return { success: false, error: `HTTP ${status || 'N/A'}: ${msg}`, memories: [] };
       }
     });
 
@@ -807,6 +1102,7 @@ class IpcHandlers {
       const FONT_MAP = {
         'ja': "'Meiryo', 'MS Gothic', 'Noto Sans JP', sans-serif",
         'zh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', sans-serif",
+        'lzh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', serif",
         'ko': "'Noto Sans KR', 'Malgun Gothic', sans-serif",
         'th': "'Tahoma', 'Noto Sans Thai', sans-serif",
         'vi': "'Tahoma', 'Noto Sans', sans-serif",
@@ -832,12 +1128,31 @@ class IpcHandlers {
         const settings = this.store.get();
         const sourceLang = settings.sourceLang || 'ja';
 
+        // v3.13.01: Restore OCR engine from settings before initializing
+        if (settings.ocrEngine) {
+          this.ocrService.setOcrEngine(settings.ocrEngine);
+        }
+
+        // v3.13.08: Restore min confidence from settings (default: 0 = no minimum)
+        if (settings.ocrMinConfidence !== undefined) {
+          this.ocrService.setMinConfidence(settings.ocrMinConfidence);
+        }
+
         // Create and show capture area window
         this.windowManager.createCaptureArea();
         this.windowManager.showCaptureArea();
 
         // Initialize OCR service with the source language
         await this.ocrService.initialize(sourceLang);
+
+        // v3.13.01-fix: Check if OCR service actually became ready after initialization.
+        // If PaddleOCR failed and auto-fell back to Tesseract, the service should be ready
+        // via Tesseract. If BOTH failed, we need to handle it here.
+        if (!this.ocrService._isReady) {
+          console.error('[OCR] Failed to initialize any OCR engine');
+          this.windowManager.closeCaptureArea();
+          return { success: false, error: 'Failed to initialize any OCR engine. Check logs for details.' };
+        }
 
         // Forward OCR text events to the translation pipeline
         this.ocrService.removeAllListeners('text'); // Remove previous listeners
@@ -860,7 +1175,39 @@ class IpcHandlers {
           this.windowManager.sendToMainWindow('ocr-status', 'error');
         });
 
+        // v3.13.01-fix: Listen for PaddleOCR fallback event
+        this.ocrService.removeAllListeners('paddle-fallback');
+        this.ocrService.on('paddle-fallback', ({ reason }) => {
+          console.warn(`[OCR] PaddleOCR fell back to Tesseract: ${reason}`);
+          // Update the store to reflect the actual engine being used
+          this.store.set('ocrEngine', 'tesseract');
+          // Notify the renderer so the UI can update
+          this.windowManager.sendToMainWindow('ocr-engine-fallback', {
+            engine: 'tesseract',
+            reason: reason
+          });
+        });
+
         this._ocrActive = true;
+
+        // v3.11.25: Register OCR capture callback for global hotkey (Ctrl+Shift+S)
+        // When the user presses the hotkey, it performs an immediate single capture
+        // and sends the result through the translation pipeline.
+        if (this.shortcutManager) {
+          this.shortcutManager.setOcrCaptureCallback(async () => {
+            if (!this._ocrActive || !this.ocrService._isReady) {
+              console.log('[OCR] Hotkey capture skipped: OCR not active/ready');
+              return;
+            }
+            try {
+              const imageBuffer = await this._captureScreenRegion();
+              if (!imageBuffer) return;
+              await this.ocrService.recognize(imageBuffer);
+            } catch (err) {
+              console.error('[OCR] Hotkey capture error:', err.message);
+            }
+          });
+        }
 
         // Apply best preprocessing defaults automatically (grayscale ON, smart threshold)
         this.ocrService.setPreprocessing({
@@ -874,9 +1221,13 @@ class IpcHandlers {
         // Always start auto-capture with smart change detection
         this._startOcrAutoCapture();
 
-        return { success: true, status: this.ocrService.getStatus() };
+        // v3.13.01-fix: Return actual engine used (may differ from requested if fallback occurred)
+        const actualEngine = this.ocrService.getOcrEngine();
+        return { success: true, status: this.ocrService.getStatus(), engine: actualEngine };
       } catch (err) {
         console.error('[OCR] Start error:', err.message);
+        // Clean up: close capture area if start failed
+        this.windowManager.closeCaptureArea();
         return { success: false, error: err.message };
       }
     });
@@ -888,11 +1239,37 @@ class IpcHandlers {
         await this.ocrService.terminate();
         this.windowManager.closeCaptureArea();
         this._ocrActive = false;
+        // v3.11.25: Clear OCR hotkey callback when OCR stops
+        if (this.shortcutManager) {
+          this.shortcutManager.setOcrCaptureCallback(null);
+        }
         return { success: true };
       } catch (err) {
         console.error('[OCR] Stop error:', err.message);
         return { success: false, error: err.message };
       }
+    });
+
+    // v3.13.01: Set OCR engine (tesseract or paddle)
+    ipcMain.handle('set-ocr-engine', async (_event, engine) => {
+      try {
+        this.ocrService.setOcrEngine(engine);
+        this.store.set('ocrEngine', engine);
+        console.log(`[Tuhua] OCR engine set to: ${engine}`);
+        return { success: true, engine: this.ocrService.getOcrEngine() };
+      } catch (err) {
+        console.error('[Tuhua] Error setting OCR engine:', err.message);
+        return { success: false, error: err.message };
+      }
+    });
+
+    // v3.13.01: Get OCR engine status
+    ipcMain.handle('get-ocr-engine-status', async () => {
+      return {
+        current: this.ocrService.getOcrEngine(),
+        paddleAvailable: this.ocrService.isPaddleAvailable(),
+        paddleStatus: this.ocrService.getPaddleDownloadProgress()
+      };
     });
 
     ipcMain.handle('ocr-capture', async () => {
@@ -937,6 +1314,15 @@ class IpcHandlers {
       this.ocrService.setPreprocessing(options);
       this.store.set('ocrPreprocessing', options);
       return { success: true };
+    });
+
+    // v3.13.08: Set Tesseract minimum confidence threshold
+    ipcMain.handle('ocr-set-min-confidence', async (event, threshold) => {
+      if (typeof threshold !== 'number') return { success: false, error: 'Must be a number' };
+      const clamped = Math.max(0, Math.min(100, threshold));
+      this.ocrService.setMinConfidence(clamped);
+      this.store.set('ocrMinConfidence', clamped);
+      return { success: true, minConfidence: clamped };
     });
 
     ipcMain.handle('ocr-status', async () => {
@@ -1265,7 +1651,30 @@ class IpcHandlers {
     // v3.8.25: Safety net — strip any remaining null bytes, control chars,
     // and apply deduplication for text that arrives from TCP (bypassing _cleanGameText)
     if (text) {
+      const originalText = text;
       text = text.replace(/[\u0000\u0001-\u0008\u000B\u000C\u000E-\u001F\uFEFF]/g, '');
+
+      // v3.11.33: Apply regex text filters before dedup/translation
+      // Always apply if regexFilter service is available (respects enableRegexFilter toggle)
+      // v3.11.35: Pass srcLang for language-aware replacement (LunaTranslator-style:
+      //   ja/zh/ko newlines → '' (remove), other langs → ' ' (space))
+      const enableRegexFilter = this.store.get('enableRegexFilter');
+      const srcLangForFilter = this.store.get('sourceLang') || 'ja';
+      if (this.regexFilter) {
+        if (enableRegexFilter !== false) {
+          const filterResult = this.regexFilter.apply(text, srcLangForFilter);
+          if (filterResult.appliedCount > 0) {
+            console.log(`[Tuhua] Regex filter: ${filterResult.appliedCount} applied, ${filterResult.skipped.length} skipped — "${text.substring(0, 40)}" → "${filterResult.text.substring(0, 40)}"`);
+          } else {
+            console.log(`[Tuhua] Regex filter: 0 filters matched (0 applied)`);
+          }
+          text = filterResult.text;
+        } else {
+          console.log(`[Tuhua] Regex filter: DISABLED (enableRegexFilter=${enableRegexFilter})`);
+        }
+      } else {
+        console.warn(`[Tuhua] Regex filter: Service not available`);
+      }
 
       // v3.9.5: Only apply _deduplicateText for Textractor input.
       // For OCR text, _deduplicateText STRIPS numbers by splitting on digits
@@ -1314,11 +1723,39 @@ class IpcHandlers {
       this._lastHandledTime = now;
     }
 
+    // v3.13.12: Store last handled text for auto-retranslation when settings change
+    this._lastHandledText = text;
+
     console.log(`[Tuhua] _handleText: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}, active=${this._translationActive}, inputMethod=${settings.inputMethod}, text="${text.substring(0, 60)}..."`);
 
     // If translation is paused, skip everything — no text to overlays, no translation
+    // v3.13.07: Also defensively hide overlay and clear content when paused.
+    // This prevents stale overlay content from being visible after switching input methods.
     if (!this._translationActive) {
       console.log(`[Tuhua] Translation paused — skipping text`);
+      this.windowManager.hideOutputOverlay();
+      this.windowManager.clearOverlayContent();
+      return;
+    }
+
+    // v3.12.02: Skip translation for text that contains no translatable content.
+    // After filtering, text may consist solely of numbers, punctuation, or symbols
+    // (e.g. NFKC converts "！！！" → "!!!", "１２３" → "123"). Sending these to a
+    // translation engine wastes API calls and produces hallucinated translations
+    // (DeepL translates "!!!" to "¿¡Qué!?" in Spanish). Instead, show the
+    // filtered text directly in the overlay.
+    //
+    // "Translatable" means the text contains at least 2 letters or CJK characters
+    // across all supported scripts: Latin, Cyrillic, Hiragana, Katakana, Kanji, Hangul.
+    // v3.12.08: Also allow translation if the text contains a single CJK ideograph
+    // (kanji or hangul). A single kanji like 桜 (cerezo) or 花 (flor) is a real word
+    // that should be translated. A single Latin letter like "A" is not. After
+    // Strategy 1 collapses 桜桜桜 → 桜, the guard must still allow translation.
+    const translatableCharCount = (text.match(/[a-zA-Z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0400-\u052F]/g) || []).length;
+    const hasCJKIdeograph = /[\u4E00-\u9FFF\uAC00-\uD7AF]/.test(text);
+    if (translatableCharCount < 2 && !hasCJKIdeograph) {
+      console.log(`[Tuhua] Skipping translation — not enough translatable characters (${translatableCharCount}): "${text.substring(0, 40)}"`);
+      this.windowManager.sendToOutputOverlay('update-output', { text: text, targetLang: tgtLang });
       return;
     }
 
@@ -1332,6 +1769,13 @@ class IpcHandlers {
       });
 
       console.log(`[Tuhua] Translation result: "${translation?.substring(0, 60)}..."`);
+      // v3.13.06: Double-check that translation is still active before sending
+      // to overlay. There can be a race condition where the user pauses
+      // translation while a pipeline.translate() call is in-flight.
+      if (!this._translationActive) {
+        console.log(`[Tuhua] Translation became paused during translate — discarding result`);
+        return;
+      }
       // Send translation to output overlay
       this.windowManager.sendToOutputOverlay('update-output', { text: translation, targetLang: tgtLang });
     } catch (err) {
@@ -1348,7 +1792,9 @@ class IpcHandlers {
    * Handles patterns like: "0I softly murmured.0I softly murmured.0" → "I softly murmured."
    */
   _deduplicateText(text) {
-    if (!text || text.length < 4) return text;
+    // v3.12.07: Lowered minimum from 4 to 3. Strategy 1 needs at least 3
+    // consecutive CJK chars to match (e.g. "桜桜桜" has length 3).
+    if (!text || text.length < 3) return text;
 
     // v3.11.23: Improved Textractor text deduplication with multiple strategies.
     // Textractor hooks often produce text with these patterns:
@@ -1357,10 +1803,14 @@ class IpcHandlers {
     // 3. Incremental text: ABCDBCDCDD → ABCD (char-by-char display hook)
     // 4. Digit-delimited segments: "1text12more2" → "text more" (old method)
 
-    // Strategy 1: Character-level deduplication
-    // If a character appears 3+ times consecutively, collapse to single occurrence
+    // Strategy 1: CJK-only character-level deduplication
+    // If a CJK character (kanji, hiragana, katakana, hangul) appears 3+ times
+    // consecutively, collapse to single occurrence.
     // This handles: 恵恵恵麻麻麻 → 恵麻
-    let result = text.replace(/(.)\1{2,}/g, '$1');
+    // v3.12.04: Only CJK — Latin letters (AAAAA = scream) and punctuation (!!!???)
+    // are NEVER collapsed since they're always legitimate game text, not Textractor artifacts.
+    // Textractor hooks only produce CJK duplication artifacts.
+    let result = text.replace(/([\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF])\1{2,}/g, '$1');
 
     // Strategy 2: Check for full-line repetition
     // ABCDABCDABCD → ABCD
@@ -1375,7 +1825,17 @@ class IpcHandlers {
         if (fullRepeats >= 2) {
           const candidate = result.substring(0, unitLen);
           // Only accept if the repeated unit is meaningful (not just 1-2 chars)
-          if (candidate.trim().length >= 2) {
+          // v3.12.05: Skip if candidate is all the same character (e.g. "AA", "BBB").
+          // A repeated single letter like "AAAAAAAAA" is a legitimate game scream,
+          // not a Textractor artifact. Real Textractor repetitions have different
+          // characters in the unit (e.g. "恵麻恵麻恵麻" → unit "恵麻").
+          // v3.12.06: Only apply Strategy 2 if the candidate contains CJK characters.
+          // Textractor hooks only produce CJK duplication artifacts. Latin text
+          // repetition (e.g. "NONONONO", "HAHAHAHA") is always legitimate game
+          // content for emphasis/narrative, not Textractor artifacts.
+          // Restricting to CJK prevents losing narrative immersion.
+          const hasCJK = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]/.test(candidate);
+          if (candidate.trim().length >= 2 && !/^(.)\1*$/.test(candidate.trim()) && hasCJK) {
             // Verify the pattern
             let isRepetition = true;
             for (let i = 1; i < fullRepeats; i++) {
@@ -1412,13 +1872,19 @@ class IpcHandlers {
 
     // Strategy 4: Original digit-delimiter deduplication (from v3.8.25)
     // Split by digit delimiters that separate repeated text segments
+    // v3.12.07: Only apply when actual duplicates are found. Previously,
+    // splitting "HP:100 MP:50" by digits gave ["HP:", " MP:"] which are
+    // all different — but the code still joined them (losing the numbers).
+    // Now we track whether any duplicates were removed; if none were,
+    // we keep the original text with its digits intact.
     const segments = result.split(/\d+/)
       .map(s => s.trim())
       .filter(s => s.length >= 2);
 
     if (segments.length > 1) {
-      // Deduplicate: keep only unique segments
+      // Deduplicate: keep only unique segments, track if any were removed
       const unique = [];
+      let duplicatesFound = false;
       for (const seg of segments) {
         let isDupe = false;
         for (let i = 0; i < unique.length; i++) {
@@ -1442,17 +1908,41 @@ class IpcHandlers {
             break;
           }
         }
-        if (!isDupe) unique.push(seg);
+        if (isDupe) {
+          duplicatesFound = true;
+        } else {
+          unique.push(seg);
+        }
       }
 
-      if (unique.length === 1) return unique[0];
-
-      result = unique.join(' ');
+      // Only replace the result if we actually found duplicates to remove.
+      // If all segments were unique, the digits were meaningful content
+      // (e.g. "HP:100 MP:50" → segments ["HP:", "MP:"] → no dupes → keep original)
+      if (duplicatesFound) {
+        if (unique.length === 1) return unique[0];
+        result = unique.join(' ');
+      }
     }
 
     // Strip any remaining leading/trailing garbage
-    result = result.replace(/^[\d.]+\s*/, ''); // Leading garbage digits+dots
-    result = result.replace(/\d+\s*$/, '');     // Trailing garbage digits only (preserve sentence-ending dots)
+    // v3.12.02: Guard — only strip digits if there's actual text (letters/CJK) remaining.
+    // Without this guard, pure numbers like "12345" (from NFKC normalizing fullwidth digits)
+    // get completely erased to "".
+    // v3.12.07: Simplified guards:
+    // - Leading digits: always strip (Textractor artifacts like "1.Hello" or "3text")
+    //   The v3.12.06 guard for "1st/2nd" was overcorrecting; real game text rarely
+    //   starts with digits followed by letters.
+    // - Trailing digits: only strip if NOT preceded by a colon, since game stats
+    //   like "HP:100" or "MP:50" have meaningful trailing digits after colons.
+    const hasLetters = /[a-zA-Z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0400-\u052F]/.test(result);
+    if (hasLetters) {
+      result = result.replace(/^[\d.]+\s*/, ''); // Leading garbage digits+dots
+      // Only strip trailing digits if NOT preceded by a colon
+      // ("1text2" → "1text", but "HP:100" → preserved)
+      if (!/[:：]\s*\d+\s*$/.test(result)) {
+        result = result.replace(/\d+\s*$/, '');     // Trailing garbage digits only
+      }
+    }
     return result.trim();
   }
 
@@ -1597,7 +2087,7 @@ class IpcHandlers {
       'get-profiles', 'save-profile', 'delete-profile', 'load-profile',
       'validate-api-key', 'test-connection', 'detect-font-family',
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-set-language',
-      'ocr-set-interval', 'ocr-set-preprocessing', 'ocr-status',
+      'ocr-set-interval', 'ocr-set-preprocessing', 'ocr-set-min-confidence', 'ocr-status',
       'ocr-set-auto-capture', 'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-launch',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',

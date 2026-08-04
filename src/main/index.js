@@ -19,6 +19,7 @@ const OcrService = require('../services/ocr');
 const XuatServer = require('../services/xuat-server');
 const TranslationPipeline = require('../services/translation/pipeline');
 const GlossaryService = require('../services/translation/glossary');
+const RegexFilterService = require('../services/regex-filter');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -46,6 +47,7 @@ let pipeline;
 let glossary;
 let ocrService;
 let xuatServer;
+let regexFilter;
 
 app.whenReady().then(() => {
   // Initialize store with defaults
@@ -69,7 +71,12 @@ app.whenReady().then(() => {
       enableCache: true,
       enableGlossary: true,
       enableTranslationMemory: true,
-      deeplFormality: 'default',
+      deeplFormality: 'prefer_more',
+      deeplCustomInstructions: [],
+      deeplStyleId: '',
+      deeplTranslationMemoryId: '',
+      deeplTranslationMemoryThreshold: 75,
+      deeplLanguageFeatures: null,
       maxContextHistory: 5,
       historyLimit: 5,
       systemPrompt: '',
@@ -89,7 +96,11 @@ app.whenReady().then(() => {
       xuatConnectedPath: '',
       // v3.11.17: XUAT has its own language settings independent from global
       xuatSourceLang: 'en',   // XUAT requires a specific source language (no 'auto')
-      xuatTargetLang: 'es'
+      xuatTargetLang: 'es',
+      // v3.11.30: Regex text filter
+      enableRegexFilter: true,
+      // v3.13.01: OCR engine selection ('tesseract' or 'paddle')
+      ocrEngine: 'tesseract'
     }
   });
 
@@ -98,11 +109,18 @@ app.whenReady().then(() => {
 
   // Initialize services
   glossary = new GlossaryService();
+  regexFilter = new RegexFilterService();
   pipeline = new TranslationPipeline(settings);
   textractor = new TextractorConnector(settings.textractorPort || 9251);
   textractorLauncher = new TextractorLauncher();
   clipboardWatcher = new ClipboardWatcher({ interval: 500 });
   ocrService = new OcrService();
+
+  // v3.13.01: Restore OCR engine setting from saved config
+  if (settings.ocrEngine && settings.ocrEngine !== 'tesseract') {
+    ocrService.setOcrEngine(settings.ocrEngine);
+  }
+
   xuatServer = new XuatServer(pipeline, settings.xuatPort || 8419);
 
   // Configure TextractorLauncher from saved settings
@@ -161,19 +179,32 @@ app.whenReady().then(() => {
   // Textractor: in the game, Clipboard: in clipboard, OCR: behind capture area
   windowManager.createOutputOverlay();
 
-  // Initialize IPC handlers
-  ipcHandlers = new IpcHandlers(store, pipeline, glossary, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer);
+  // v3.13.04: Start periodic alwaysOnTop guard to prevent overlays from
+  // falling behind other windows (Windows can demote z-level on focus steal)
+  windowManager.startAlwaysOnTopGuard();
+
+  // v3.11.25: Initialize shortcuts BEFORE IPC handlers so the shortcut
+  // manager reference can be passed to IpcHandlers for OCR hotkey integration.
+  shortcuts = new ShortcutManager(windowManager, pipeline, textractor, clipboardWatcher, ocrService);
+  shortcuts.register();
+
+  // Initialize IPC handlers (v3.11.25: pass shortcuts for OCR hotkey integration)
+  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts);
   ipcHandlers.register();
 
-  // Restore translation active state from saved settings
-  // XUAT mode does NOT need the overlay — translations appear in-game
-  if (settings.translationActive === false || settings.inputMethod === 'xuat') {
-    ipcHandlers._translationActive = settings.translationActive !== false;
-    // Start with output overlay hidden if paused or XUAT mode
+  // v3.13.07: Improved startup overlay state management.
+  // Set _translationActive based on saved settings, then ensure overlay
+  // visibility matches the state: hidden when paused OR in XUAT mode.
+  if (settings.translationActive === false) {
+    ipcHandlers._translationActive = false;
     windowManager.hideOutputOverlay();
-    if (settings.translationActive === false) {
-      log.info('Starting in paused mode — overlays hidden');
-    }
+    windowManager.clearOverlayContent();
+    log.info('Starting in paused mode — overlays hidden');
+  } else if (settings.inputMethod === 'xuat') {
+    ipcHandlers._translationActive = true;
+    windowManager.hideOutputOverlay();
+    windowManager.clearOverlayContent();
+    log.info('Starting in XUAT mode — overlay hidden (XUAT renders in-game)');
   }
 
   // Connect Textractor text events to translation pipeline
@@ -184,6 +215,16 @@ app.whenReady().then(() => {
 
   textractor.on('status', (status) => {
     log.info('[Textractor] Status:', status);
+    // v3.13.14: Don't forward Textractor reconnecting/disconnected status to renderer
+    // when OCR or XUAT mode is active — the user doesn't care about Textractor's
+    // background state while using a different input method. This was causing the
+    // "Reconnecting..." yellow badge to appear even when OCR was working fine.
+    const currentInputMethod = ipcHandlers._getCurrentInputMethod();
+    if ((currentInputMethod === 'ocr' || currentInputMethod === 'xuat' || currentInputMethod === 'clipboard') &&
+        (status === 'reconnecting' || status === 'disconnected' || status === 'timeout')) {
+      log.info(`[Textractor] Suppressing '${status}' status — current input method is '${currentInputMethod}'`);
+      return;
+    }
     windowManager.sendToMainWindow('textractor-status', status);
   });
 
@@ -207,9 +248,7 @@ app.whenReady().then(() => {
   tray = new AppTray(windowManager, pipeline, textractor, clipboardWatcher, textractorLauncher);
   tray.create();
 
-  // Initialize shortcuts
-  shortcuts = new ShortcutManager(windowManager, pipeline, textractor, clipboardWatcher);
-  shortcuts.register();
+  // (shortcuts already initialized above before IPC handlers)
 
   // Start the appropriate input method based on saved settings
   if (settings.inputMethod === 'xuat') {

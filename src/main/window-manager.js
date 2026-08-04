@@ -4,6 +4,13 @@
  * - Main window (settings & status)
  * - Output overlay (translated text)
  * - Capture area (OCR region selector)
+ *
+ * v3.13.04: Added periodic alwaysOnTop reaffirmation to prevent overlays
+ *   from falling behind other windows on Windows. The 'screen-saver' z-level
+ *   is the highest normal level but Windows can demote it when other apps
+ *   steal focus aggressively (games, alt-tab, etc.). A 3-second timer
+ *   re-asserts the level, and focus-loss events trigger immediate reaffirmation.
+ * v3.13.06: No changes to window-manager in this version.
  */
 const { BrowserWindow, screen } = require('electron');
 const path = require('path');
@@ -17,8 +24,68 @@ class WindowManager {
     this.outputOverlay = null;
     this.captureArea = null;
     this.clickThrough = false;
+    // v3.13.04: Periodic alwaysOnTop reaffirmation timer
+    this._alwaysOnTopTimer = null;
     // Input overlay removed — original text is visible in all modes:
     // Textractor: in the game, Clipboard: in clipboard, OCR: behind capture area
+  }
+
+  /**
+   * v3.13.04: Re-assert alwaysOnTop on all overlay windows.
+   * Called periodically and on focus-loss events to prevent overlays
+   * from falling behind other windows on Windows.
+   * @private
+   */
+  _reaffirmAlwaysOnTop() {
+    const windows = [this.outputOverlay, this.captureArea];
+    for (const win of windows) {
+      if (win && !win.isDestroyed() && win.isVisible()) {
+        try {
+          win.setAlwaysOnTop(true, 'screen-saver');
+        } catch (e) {
+          // Window may have been closed between check and call
+        }
+      }
+    }
+  }
+
+  /**
+   * v3.13.04: Start the periodic alwaysOnTop reaffirmation timer.
+   * Re-asserts the z-level every 3 seconds and on overlay focus loss.
+   */
+  startAlwaysOnTopGuard() {
+    this.stopAlwaysOnTopGuard();
+    this._alwaysOnTopTimer = setInterval(() => this._reaffirmAlwaysOnTop(), 3000);
+
+    // Also reaffirm when overlay windows lose focus
+    const attachBlurHandler = (win) => {
+      if (!win) return;
+      win.on('blur', () => {
+        // Small delay to avoid fighting with window manager during normal interactions
+        setTimeout(() => this._reaffirmAlwaysOnTop(), 100);
+      });
+    };
+
+    // Attach handlers to existing windows
+    if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
+      attachBlurHandler(this.outputOverlay);
+    }
+    if (this.captureArea && !this.captureArea.isDestroyed()) {
+      attachBlurHandler(this.captureArea);
+    }
+
+    // Store the handler creator for future windows
+    this._attachBlurHandler = attachBlurHandler;
+  }
+
+  /**
+   * v3.13.04: Stop the periodic alwaysOnTop reaffirmation timer.
+   */
+  stopAlwaysOnTopGuard() {
+    if (this._alwaysOnTopTimer) {
+      clearInterval(this._alwaysOnTopTimer);
+      this._alwaysOnTopTimer = null;
+    }
   }
 
   createMainWindow() {
@@ -53,6 +120,7 @@ class WindowManager {
 
     this.mainWindow.on('closed', () => {
       this.mainWindow = null;
+      this.stopAlwaysOnTopGuard();
       this.closeAllOverlays();
     });
 
@@ -69,6 +137,7 @@ class WindowManager {
       const FONT_MAP = {
         'ja': "'Meiryo', 'MS Gothic', 'Noto Sans JP', sans-serif",
         'zh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', sans-serif",
+        'lzh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', serif",
         'ko': "'Noto Sans KR', 'Malgun Gothic', sans-serif",
         'th': "'Tahoma', 'Noto Sans Thai', sans-serif",
         'vi': "'Tahoma', 'Noto Sans', sans-serif",
@@ -111,6 +180,15 @@ class WindowManager {
 
     this.outputOverlay.loadFile(path.join(RENDERER_BASE, 'output-overlay', 'index.html'));
     this.outputOverlay.setAlwaysOnTop(true, 'screen-saver');
+
+    // v3.13.04: Re-assert alwaysOnTop when overlay loses focus
+    this.outputOverlay.on('blur', () => {
+      setTimeout(() => {
+        if (this.outputOverlay && !this.outputOverlay.isDestroyed() && this.outputOverlay.isVisible()) {
+          this.outputOverlay.setAlwaysOnTop(true, 'screen-saver');
+        }
+      }, 100);
+    });
 
     // Send initial styles to output overlay after it loads
     this.outputOverlay.webContents.on('did-finish-load', () => {
@@ -195,6 +273,9 @@ class WindowManager {
    */
   hideOutputOverlay() {
     if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
+      if (this.outputOverlay.isVisible()) {
+        console.log('[WindowManager] Hiding output overlay');
+      }
       this.outputOverlay.hide();
     }
   }
@@ -204,8 +285,21 @@ class WindowManager {
    */
   showOutputOverlay() {
     if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
+      if (!this.outputOverlay.isVisible()) {
+        console.log('[WindowManager] Showing output overlay');
+      }
       this.outputOverlay.show();
+      // v3.13.04: Re-assert alwaysOnTop when showing
+      this.outputOverlay.setAlwaysOnTop(true, 'screen-saver');
     }
+  }
+
+  /**
+   * v3.13.07: Check if the output overlay is currently visible.
+   * @returns {boolean}
+   */
+  isOutputOverlayVisible() {
+    return this.outputOverlay && !this.outputOverlay.isDestroyed() && this.outputOverlay.isVisible();
   }
 
   /**
@@ -216,10 +310,15 @@ class WindowManager {
   }
 
   closeAllOverlays() {
+    this.stopAlwaysOnTopGuard();
     if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
       this.outputOverlay.close();
     }
     this.outputOverlay = null;
+    if (this.captureArea && !this.captureArea.isDestroyed()) {
+      this.captureArea.close();
+    }
+    this.captureArea = null;
   }
 
   _saveMainWindowBounds() {
@@ -272,6 +371,15 @@ class WindowManager {
     this.captureArea.loadFile(path.join(RENDERER_BASE, 'capture-area', 'index.html'));
     this.captureArea.setAlwaysOnTop(true, 'screen-saver');
 
+    // v3.13.04: Re-assert alwaysOnTop when capture area loses focus
+    this.captureArea.on('blur', () => {
+      setTimeout(() => {
+        if (this.captureArea && !this.captureArea.isDestroyed() && this.captureArea.isVisible()) {
+          this.captureArea.setAlwaysOnTop(true, 'screen-saver');
+        }
+      }, 100);
+    });
+
     // Save bounds on move/resize
     this.captureArea.on('moved', () => this._saveCaptureAreaBounds());
     this.captureArea.on('resized', () => this._saveCaptureAreaBounds());
@@ -286,6 +394,8 @@ class WindowManager {
   showCaptureArea() {
     if (this.captureArea && !this.captureArea.isDestroyed()) {
       this.captureArea.showInactive();
+      // v3.13.04: Re-assert alwaysOnTop when showing
+      this.captureArea.setAlwaysOnTop(true, 'screen-saver');
     }
   }
 
