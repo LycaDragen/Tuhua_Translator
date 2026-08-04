@@ -49,7 +49,7 @@ try {
 
 const { PaddleModelManager, getRecModelKeyForLang, REC_MODELS } = require('./paddle-models');
 const { preprocessForDetection, preprocessForRecognition, cropRegion, isVerticalText, rotate90CCW } = require('./paddle-preprocess');
-const { decodeDetection, decodeRecognition } = require('./paddle-postprocess');
+const { decodeDetection, decodeRecognition, detectScript } = require('./paddle-postprocess');
 
 class PaddleOCREngine extends EventEmitter {
   constructor() {
@@ -78,7 +78,12 @@ class PaddleOCREngine extends EventEmitter {
       // The translation engine is much better at handling imperfect OCR text than
       // our heuristics are at filtering it. Only filter truly noise-level regions.
       crowdedRegionThresh: 50, // v3.13.14: Raised from 30 — allow even more regions before filtering
-      crowdedMinConf: 0.02     // v3.13.14: Lowered from 0.05 — only filter absolute noise
+      crowdedMinConf: 0.02,    // v3.13.14: Lowered from 0.05 — only filter absolute noise
+      // v3.13.16 Phase 1 (scoped): median denoise + auto-invert on recognition
+      // crops. Off by default — see preprocessForRecognition() in
+      // paddle-preprocess.js for why, and enable via setOptions({enhance: true})
+      // to A/B against the test-images bench.
+      enhance: false
     };
   }
 
@@ -259,9 +264,7 @@ class PaddleOCREngine extends EventEmitter {
 
   /**
    * v3.13.06: When sourceLang='auto', check if the recognition result suggests
-   * we should be using a different model. If the Chinese model produces empty
-   * or very low-quality results but regions were detected, try Korean model.
-   * Called after recognition completes.
+   * we should be using a different model. Called after recognition completes.
    * @param {string} text - Recognized text
    * @param {number} confidence - Recognition confidence
    * @param {number} regionCount - Number of detected text regions
@@ -269,69 +272,68 @@ class PaddleOCREngine extends EventEmitter {
    */
   async _maybeSwitchModelForAutoDetect(text, confidence, regionCount) {
     if (this._sourceLang !== 'auto') return; // Only for auto-detect mode
-    if (this._modelManager.getActiveRecLang() !== 'zh') return; // Already switched
+    const currentLang = this._modelManager.getActiveRecLang();
+    if (currentLang !== 'zh') return; // Already switched once — don't oscillate further
 
-    // v3.13.10: Improved Korean detection — check for hangul Jamo (U+1100-11FF)
-    // and compatibility hangul (U+3130-318F) in addition to syllable block hangul.
-    // The Chinese model may produce garbled nonsense instead of empty text
-    // when encountering Korean, so we also check for low-quality output.
-    const hasHangul = /[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/.test(text);
-    const hasLowQuality = text.length > 0 && confidence < 0.15 && regionCount > 0;
+    // v3.13.16: Replaced the hangul-only check with detectScript() (see
+    // paddle-postprocess.js), which also recognizes kana as evidence of
+    // Japanese. Previously this function could only ever switch to 'ko' —
+    // there was no path to 'ja' at all unless the 'ko' switch itself threw.
+    // Confirmed against the test-images bench: Japanese screens under
+    // sourceLang='auto' stayed on the zh model indefinitely and scored
+    // markedly worse than the same images with sourceLang='ja' explicit.
+    //
+    // Confidence-based heuristics remain removed (see v3.13.16 note in git
+    // history) — decodeRecognition() returns raw CTC logits, not calibrated
+    // probabilities, and the empirical confidence values for "zh correctly
+    // reading zh" (83-93%) and "zh incorrectly misreading ja" (83-92%)
+    // overlap too much in this bench to separate with a threshold.
     const hasNoText = text.length === 0 && regionCount > 0;
-    // v3.13.10: Check if text looks like garbled CJK (Chinese model misreading hangul)
-    // Pattern: mostly CJK ideographs but with unusual repetition or no recognizable words
-    // v3.13.14: Raised confidence threshold from 0.30 to 0.40 — the Chinese model
-    // can misread Korean hangul as CJK ideographs with moderate confidence (0.25-0.35),
-    // producing garbled text that looks plausible but is completely wrong. Following
-    // VN Translator's approach of trying Korean first when confidence is below 0.40
-    // and there's significant CJK content (likely a misread).
-    const hasGarbledCJK = text.length > 0 && regionCount > 0 &&
-      (text.match(/[\u4e00-\u9fff]/g) || []).length > text.length * 0.5 &&
-      confidence < 0.40;
+    const script = detectScript(text);
 
-    // v3.13.14: Also detect Korean by checking for repeated short CJK sequences.
-    // When the Chinese model misreads Korean hangul, it often produces the same
-    // wrong character repeatedly (e.g., "口口口" or "〇〇〇"). If we see 3+ repeated
-    // identical CJK characters in a row, that's a strong signal of Korean misread.
-    const hasRepeatedMisread = text.length > 0 && regionCount > 0 && confidence < 0.40 &&
-      /([\u4e00-\u9fff])\1{2,}/.test(text);
+    let targetLang;
+    let reason;
+    if (hasNoText) {
+      // No text at all gives no script signal — keep the established
+      // ko-first-then-ja-fallback order for this case specifically.
+      targetLang = 'ko';
+      reason = 'no text';
+    } else if (script.lang !== 'zh') {
+      targetLang = script.lang;
+      reason = script.lang === 'ko' ? `hangul detected (${script.hangul})` : `kana detected (${script.kana})`;
+    } else {
+      return; // Output looks like zh, or is ambiguous CJK-ideograph-only — keep it
+    }
 
-    // v3.13.14: Also try Korean when there are many short regions with low-moderate
-    // confidence. Korean text often gets split into many small regions by the
-    // detection model because hangul characters have a different aspect ratio
-    // than what the Chinese model expects. If we have many regions and the
-    // average confidence is below 0.50, Korean model might be better.
-    const hasManyLowConfRegions = regionCount >= 3 && confidence < 0.50 && text.length > 0;
+    const fallbackLang = targetLang === 'ko' ? 'ja' : 'ko';
+    const targetName = targetLang === 'ko' ? 'Korean' : 'Japanese';
+    const fallbackName = fallbackLang === 'ko' ? 'Korean' : 'Japanese';
 
-    if (hasNoText || hasHangul || hasLowQuality || hasGarbledCJK || hasRepeatedMisread || hasManyLowConfRegions) {
-      const reason = hasNoText ? 'no text' : hasHangul ? 'hangul detected' : hasLowQuality ? 'low quality' : hasRepeatedMisread ? 'repeated misread characters' : hasGarbledCJK ? 'garbled CJK' : 'many low-confidence regions';
-      log.info(`[PaddleOCR] Auto-detect: Chinese model may be wrong for this text (${reason}, ${regionCount} regions, conf=${(confidence * 100).toFixed(1)}%) — trying Korean model`);
+    log.info(`[PaddleOCR] Auto-detect: Chinese model may be wrong for this text (${reason}, ${regionCount} regions, conf=${(confidence * 100).toFixed(1)}%) — trying ${targetName} model`);
+    try {
+      if (!this._modelManager.isRecModelDownloaded(targetLang)) {
+        this.emit('status', 'downloading');
+        await this._modelManager.ensureRecModel(targetLang, (progress) => {
+          log.info(`[PaddleOCR] Download ${targetLang} model: ${progress.percent}%`);
+        });
+      }
+      await this._modelManager.switchRecModel(targetLang);
+      log.info(`[PaddleOCR] Switched to ${targetName} model for auto-detect`);
+      this.emit('status', 'ready');
+    } catch (err) {
+      log.warn(`[PaddleOCR] Failed to switch to ${targetName} model for auto-detect: ${err.message}`);
       try {
-        if (!this._modelManager.isRecModelDownloaded('ko')) {
+        if (!this._modelManager.isRecModelDownloaded(fallbackLang)) {
           this.emit('status', 'downloading');
-          await this._modelManager.ensureRecModel('ko', (progress) => {
-            log.info(`[PaddleOCR] Download ko model: ${progress.percent}%`);
+          await this._modelManager.ensureRecModel(fallbackLang, (progress) => {
+            log.info(`[PaddleOCR] Download ${fallbackLang} model: ${progress.percent}%`);
           });
         }
-        await this._modelManager.switchRecModel('ko');
-        log.info('[PaddleOCR] Switched to Korean model for auto-detect');
+        await this._modelManager.switchRecModel(fallbackLang);
+        log.info(`[PaddleOCR] Switched to ${fallbackName} model for auto-detect (${targetName} failed)`);
         this.emit('status', 'ready');
-      } catch (err) {
-        log.warn(`[PaddleOCR] Failed to switch to Korean model for auto-detect: ${err.message}`);
-        // v3.13.10: Also try Japanese model as fallback (better for some CJK text)
-        try {
-          if (!this._modelManager.isRecModelDownloaded('ja')) {
-            this.emit('status', 'downloading');
-            await this._modelManager.ensureRecModel('ja', (progress) => {
-              log.info(`[PaddleOCR] Download ja model: ${progress.percent}%`);
-            });
-          }
-          await this._modelManager.switchRecModel('ja');
-          log.info('[PaddleOCR] Switched to Japanese model for auto-detect (Korean failed)');
-          this.emit('status', 'ready');
-        } catch (jaErr) {
-          log.warn(`[PaddleOCR] Failed to switch to Japanese model too: ${jaErr.message}`);
-        }
+      } catch (fallbackErr) {
+        log.warn(`[PaddleOCR] Failed to switch to ${fallbackName} model too: ${fallbackErr.message}`);
       }
     }
   }
@@ -428,21 +430,20 @@ class PaddleOCREngine extends EventEmitter {
         const isVerticalDominant = tallRegions.length > boxes.length * 0.4;
 
         if (isVerticalDominant) {
-          // Vertical Japanese/Korean: right-to-left, top-to-bottom
-          // Columns are defined by x position, within each column sort by y
+          // Vertical Japanese/Korean (縦書き): rightmost column first, then leftward;
+          // within each column, top to bottom.
+          //
+          // v3.13.16: This was previously TWO consecutive sort() calls. The second
+          // call completely overwrote the first — Array.sort() re-orders the whole
+          // array, it doesn't refine the previous ordering. The leftover comments
+          // ("rightmost first? No, leftmost first" / "Wait:") show the intent was
+          // never settled. Replaced with a single comparator that does both keys.
+          const COLUMN_TOLERANCE = 20; // px — boxes within this x distance share a column
           boxes.sort((a, b) => {
-            const dx = a.x1 - b.x1;
-            if (Math.abs(dx) > 20) return dx; // Different columns — rightmost first? No, leftmost first for RTL reading
-            // Wait: right-to-left means higher x values come first in reading order
-            // Actually for vertical Japanese: rightmost column first, then left
-            return b.x1 - a.x1; // Higher x first (right column reads first)
-            // Within same column (similar x), top to bottom
-          });
-          // Now re-sort within same-column groups for top-to-bottom
-          boxes.sort((a, b) => {
-            const dx = b.x1 - a.x1;
-            if (Math.abs(a.x1 - b.x1) > 20) return dx; // Different columns
-            return a.y1 - b.y1; // Same column: top to bottom
+            if (Math.abs(a.x1 - b.x1) > COLUMN_TOLERANCE) {
+              return b.x1 - a.x1; // Different columns: higher x (rightmost) reads first
+            }
+            return a.y1 - b.y1;   // Same column: top to bottom
           });
         } else {
           // Horizontal CJK: standard top-to-bottom, left-to-right
@@ -523,14 +524,32 @@ class PaddleOCREngine extends EventEmitter {
       } else {
         text = textParts.join('\n');
       }
-      const confidence = validRegions > 0 ? totalConf / validRegions : 0;
+      // v3.13.16: MUST be `let` — the auto-detect second pass below reassigns this.
+      // Previously `const`, which made that reassignment throw
+      // `TypeError: Assignment to constant variable.` The throw was swallowed by
+      // recognize()'s catch block, so EVERY auto-detect model switch returned
+      // empty text even though the first pass had recognized it correctly.
+      let confidence = validRegions > 0 ? totalConf / validRegions : 0;
       const elapsed = Date.now() - startTime;
 
       log.info(`[PaddleOCR] Recognition complete in ${elapsed}ms: "${text.substring(0, 60)}" (${validRegions} regions, ${(confidence * 100).toFixed(1)}%)`);
 
       // v3.13.06: For auto-detect mode, check if we should switch to a different
       // recognition model based on the results (e.g. Korean model for hangul text)
-      await this._maybeSwitchModelForAutoDetect(text, confidence, validRegions);
+      //
+      // v3.13.16: Pass boxes.length (regions DETECTED), not validRegions (regions
+      // successfully RECOGNIZED by the current model). _maybeSwitchModelForAutoDetect's
+      // own docstring has always said "Number of detected text regions", but this call
+      // site passed validRegions instead — and validRegions is 0 by construction
+      // whenever text is empty (a region only counts as valid if it produced
+      // non-empty text). That made hasNoText's `regionCount > 0` guard impossible to
+      // satisfy in exactly the case it exists to catch: the wrong model completely
+      // failing to read the script (e.g. zh model on Korean input, which has no
+      // hangul in its dictionary and reliably produces empty output for every
+      // region). Confirmed against the test-images bench: test03 (Korean) under
+      // sourceLang='auto' stayed on the zh model and returned empty, while the same
+      // image under an explicit sourceLang='ko' recognized correctly.
+      await this._maybeSwitchModelForAutoDetect(text, confidence, boxes.length);
 
       // v3.13.10: Second-pass recognition if auto-detect switched models.
       // When the Chinese model produced empty/garbled text and we switched to
@@ -623,7 +642,11 @@ class PaddleOCREngine extends EventEmitter {
     const session = this._modelManager.getRecSession();
     if (!session) throw new Error('Recognition session not loaded');
 
-    const { tensor, shape } = preprocessForRecognition(imageBuffer);
+    // v3.13.16: Use the active model's real required input height (e.g. 32
+    // for 'ja') instead of the hardcoded 48 that used to crash every 'ja'
+    // recognition call. See PaddleModelManager.getRecInputHeight().
+    const targetH = this._modelManager.getRecInputHeight(this._modelManager.getActiveRecLang());
+    const { tensor, shape } = preprocessForRecognition(imageBuffer, targetH, this._options.enhance);
     const inputTensor = new ort.Tensor('float32', tensor, shape);
     const inputName = session.inputNames[0];
     const results = await session.run({ [inputName]: inputTensor });

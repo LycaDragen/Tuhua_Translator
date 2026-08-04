@@ -12,6 +12,7 @@
  * v3.13.02: Added softmax normalization in CTC decode for accurate confidence values
  *   (REVERTED — softmax over 6625 classes produces tiny probabilities that fail all thresholds)
  * v3.13.03: No changes to postprocessing — improvements are in region filtering (ocr-paddle.js)
+ * v3.13.16: Added detectScript() for auto-detect model switching (see docstring below).
  */
 
 /**
@@ -257,7 +258,52 @@ function computeBoxScore(probMap, width, minX, minY, maxX, maxY) {
   return count > 0 ? sum / count : 0;
 }
 
+/**
+ * v3.13.16: Detect which CJK script a recognized text is predominantly written
+ * in, by counting Unicode codepoint ranges. Replaces the old hangul-only check
+ * in ocr-paddle.js's _maybeSwitchModelForAutoDetect(), which could detect
+ * "this might be Korean" but had no way to detect "this might be Japanese" —
+ * confirmed against the test-images bench: under sourceLang='auto', Japanese
+ * screens (menus, dialogue, RPG battle text) stayed on the zh model forever,
+ * scoring markedly worse than the same images recognized with sourceLang='ja'
+ * explicitly (e.g. test08: 40% similarity on 'ja' vs 28% on 'auto').
+ *
+ * Hangul is decisive on its own: neither the zh nor the ja recognition
+ * model's dictionary contains hangul at all, so ANY hangul in the output is
+ * unambiguous evidence of Korean, regardless of surrounding noise.
+ *
+ * Kana (hiragana/katakana) is the next-strongest signal — Chinese text does
+ * not use kana, so its presence reliably indicates Japanese. Pure CJK
+ * ideographs are left classified as 'zh', the broadest-coverage default,
+ * since they're ambiguous between zh/ja-kanji-only/lzh.
+ *
+ * KNOWN LIMITATION: this only works when at least one genuine kana character
+ * survives in the zh model's misreading. In practice the zh model often
+ * substitutes a lookalike CJK ideograph from ITS OWN dictionary for katakana
+ * it can't represent well — e.g. it read タワー ("tower") as 夕一 (two
+ * unrelated kanji: "evening" + "one") in one of the bench images, leaving
+ * zero kana in the output for this function to find. detectScript() cannot
+ * recover a signal that the wrong model already destroyed; it only helps
+ * when some kana happens to survive misrecognition.
+ *
+ * @param {string} text - Recognized text to classify
+ * @returns {{ lang: 'ko'|'ja'|'zh', hangul: number, kana: number, cjk: number, latin: number }}
+ */
+function detectScript(text) {
+  const hangul = (text.match(/[가-힣ᄀ-ᇿ㄰-㆏]/g) || []).length;
+  const kana = (text.match(/[぀-ゟ゠-ヿ]/g) || []).length;
+  const cjk = (text.match(/[一-鿿]/g) || []).length;
+  const latin = (text.match(/[a-zA-Z]/g) || []).length;
+
+  let lang = 'zh';
+  if (hangul > 0) lang = 'ko';
+  else if (kana > 0) lang = 'ja';
+
+  return { lang, hangul, kana, cjk, latin };
+}
+
 module.exports = {
   decodeDetection,
-  decodeRecognition
+  decodeRecognition,
+  detectScript
 };

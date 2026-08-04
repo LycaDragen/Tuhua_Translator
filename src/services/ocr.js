@@ -149,6 +149,16 @@ class OcrService extends EventEmitter {
     await this._paddleEngine.deleteModels();
   }
 
+  /**
+   * v3.13.16: Forward detection/recognition option overrides to the PaddleOCR
+   * engine (e.g. { enhance: true } for the Phase 1 median-denoise + auto-invert
+   * pass on recognition crops — see PaddleOCREngine._options and
+   * preprocessForRecognition() in paddle-preprocess.js). No-op for Tesseract.
+   */
+  setPaddleOptions(options) {
+    this._paddleEngine.setOptions(options);
+  }
+
   async initialize(lang) {
     this._sourceLang = lang || 'ja';
     // v3.13.04: Update PaddleOCR source language for model selection

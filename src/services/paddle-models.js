@@ -109,10 +109,27 @@ const REC_MODELS = {
       'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv1/rec/korean_mobile_v2.0_rec_infer.onnx'
     ],
     filename: 'korean_mobile_v2.0_rec_mobile.onnx',
+    // v3.13.16: dictUrls[0] MUST match whichever model URL actually succeeds.
+    // urls[0] (monkt/paddleocr-onnx rec.onnx) is the one that has been
+    // downloading successfully — introspecting the .onnx file shows it has
+    // 11947 output classes. The previous dictUrls[0] (PaddlePaddle's official
+    // korean_dict.txt, 3688 lines / 3690 with blank+space) belongs to a
+    // DIFFERENT Korean model and was silently mismatched with it: nearly
+    // every predicted class index landed outside dictionary.length and
+    // decodeRecognition() dropped it, producing empty text with no error.
+    // Fetched monkt's dict.txt directly to confirm: 11945 lines / 11947 with
+    // blank+space — exact match for the model that is actually in use.
+    //
+    // Known fragility: urls[] and dictUrls[] are each tried independently in
+    // order, so if urls[0] (monkt) becomes unavailable and download falls
+    // back to urls[1]/[2] (the official PP-OCRv1 model), this pairing breaks
+    // again — the fallback model wants the PaddlePaddle dict, not monkt's.
+    // A real fix would fetch model+dict as one pinned pair instead of two
+    // independently-ordered fallback lists. Flagging for Phase 2/3 rather
+    // than restructuring the download system as part of this hotfix.
     dictUrls: [
-      // v3.13.08: Corrected path — PaddleOCR moved dicts to ppocr/utils/dict/
-      'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/korean_dict.txt',
-      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/dict.txt'
+      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/dict.txt',
+      'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/korean_dict.txt'
     ],
     dictFilename: 'korean_dict.txt',
     description: 'Korean (hangul + CJK + Latin)'
@@ -157,6 +174,7 @@ class PaddleModelManager {
     this._detSession = null;
     this._recSessions = {};   // v3.13.04: Multiple rec sessions keyed by language
     this._dictionaries = {};  // v3.13.04: Multiple dictionaries keyed by language
+    this._recInputHeights = {}; // v3.13.16: Required input height per rec model (see getRecInputHeight)
     this._activeRecLang = null; // v3.13.04: Currently active recognition model language
     this._initialized = false;
     this._downloading = false;
@@ -417,8 +435,48 @@ class PaddleModelManager {
     );
     log.info(`[PaddleOCR] ${model.description} recognition model loaded`);
 
+    // v3.13.16: PP-OCR recognition models don't all share the same required
+    // input height. Introspecting the downloaded .onnx files showed the 'ja'
+    // model has a FIXED height of 32 (not the 48 this pipeline used to
+    // hardcode for every model), which crashed every single 'ja' recognition
+    // call with "Got invalid dimensions for input: x ... Got: 48 Expected: 32".
+    // Read the real requirement from the session itself instead of assuming.
+    this._recInputHeights[langKey] = this._detectInputHeight(this._recSessions[langKey]);
+    log.info(`[PaddleOCR] ${langKey} recognition model input height: ${this._recInputHeights[langKey]}`);
+
     // Load dictionary
     await this._loadDictionary(langKey, dir);
+  }
+
+  /**
+   * v3.13.16: Read the required input height from a loaded recognition
+   * session's input shape. dims are [batch, channels, height, width]; batch
+   * and width are dynamic ("" or a symbolic name) for every model observed,
+   * but height may be a fixed number (e.g. the 'ja' model requires exactly
+   * 32) or also dynamic (e.g. 'zh', which accepts 48). Falls back to 48 —
+   * the PP-OCRv4 default — when the model reports a dynamic/unreadable
+   * height, since that is what this pipeline has always used successfully
+   * for 'zh' and 'ko'.
+   * @private
+   */
+  _detectInputHeight(session) {
+    try {
+      const shape = session.inputMetadata[0].shape;
+      const height = shape[2];
+      if (typeof height === 'number' && height > 0) return height;
+    } catch (e) {
+      log.debug('[PaddleOCR] Could not read input height from model metadata:', e.message);
+    }
+    return 48;
+  }
+
+  /**
+   * v3.13.16: Get the required recognition input height for a language.
+   * @param {string} langKey - 'zh', 'ja', or 'ko'
+   * @returns {number}
+   */
+  getRecInputHeight(langKey) {
+    return this._recInputHeights[langKey] || 48;
   }
 
   /**
