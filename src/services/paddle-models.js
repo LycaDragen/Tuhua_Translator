@@ -8,14 +8,7 @@
  * v3.13.01-fix: Replaced single ModelScope URLs with multi-source fallback system.
  * v3.13.04: Multi-language recognition model support. The detection model is shared
  *   across all languages (it finds text regions regardless of language). Recognition
- *   models are language-specific:
- *   - Chinese (ch_PP-OCRv4_rec): Default, supports CJK + Latin + digits (6625 chars)
- *   - Japanese (japan_mobile_v2.0_rec): Dedicated JP model with proper kana/kanji support
- *   - Korean (korean_mobile_v2.0_rec): Dedicated KR model with hangul support
- *
- *   When sourceLang is set to 'ja', the Japanese recognition model is auto-selected.
- *   When sourceLang is 'ko', the Korean model is used. For 'zh' or 'auto', the
- *   Chinese model (which has the broadest character coverage) is used.
+ *   models were originally language-specific (one model per language).
  *
  *   Models are downloaded on-demand when their language is first selected.
  *   Following Luna Translator and VN Translator's approach of language-specific
@@ -30,6 +23,37 @@
  *   model download fails, the Chinese model is used as a fallback instead of falling
  *   all the way to Tesseract (Chinese model has broad CJK coverage including some
  *   Korean hangul via CJK Unified Ideographs).
+ * v3.13.16: Fixed a real production bug from this exact fallback design: `urls[]` and
+ *   `dictUrls[]` were tried independently, so the Korean model that actually downloaded
+ *   (monkt/paddleocr-onnx, 11947 output classes) ended up paired with the official
+ *   PaddlePaddle dictionary (3690 entries) — a completely different vocabulary. Nearly
+ *   every predicted class index landed outside dictionary.length and got silently
+ *   dropped, producing empty text with no error.
+ * v3.13.17: Eliminated that bug class by construction. `REC_MODELS[key].sources` is now
+ *   an array of `{ url, dictUrl }` pairs tried together — a fallback always moves both
+ *   halves at once, so a model and dictionary from different sources can no longer end
+ *   up paired. `_loadDictionary()` also validates the pairing at load time (see
+ *   `_buildDictionary()`): it checks the model's real output class count against the
+ *   dictionary and fails loudly if neither the blank-only nor blank+space convention
+ *   matches, instead of silently loading a mismatched dictionary. This also catches
+ *   stale cached files — `_ensureFile()`/`_ensurePairedFiles()` skip re-downloading
+ *   when a file already exists, so a bad pairing left on disk from a previous version
+ *   would otherwise persist across upgrades undetected.
+ *
+ *   Also migrated `zh`+`ja` to a single unified PP-OCRv5 mobile recognition model
+ *   (ilaylow/PP_OCRv5_mobile_onnx, a paddle2onnx conversion of the official
+ *   PaddlePaddle/PP-OCRv5_mobile_rec + _det). Verified empirically before switching:
+ *   the mobile rec model (15.8 MB) and a much larger "server"-scale rec model from
+ *   monkt/paddleocr-onnx (84.5 MB) both report exactly 18385 output classes — same
+ *   vocabulary, smaller network — so mobile was chosen. Its dictionary (from
+ *   monkt/paddleocr-onnx languages/chinese/dict.txt, 18383 lines) was confirmed to
+ *   contain hiragana/katakana (86+94 entries, includes を and ー) and traditional
+ *   Chinese characters, not just simplified — so `ja` no longer needs (or has) its own
+ *   entry in REC_MODELS; `LANG_TO_REC_MODEL` maps it straight to `zh`. The previous
+ *   'ja' model (PP-OCRv1, fixed 32px input height, 4400 classes) is gone. The shared
+ *   detection model was upgraded to the matching PP-OCRv5 mobile det (4.6 MB — smaller
+ *   than the PP-OCRv4 det it replaces), so `ko` (already on a v5 rec model since
+ *   v3.13.08-fix) is no longer paired with a det model from a different generation.
  */
 
 const fs = require('fs');
@@ -50,107 +74,92 @@ try {
 
 // ─── Language-specific model definitions ─────────────────────────────────────
 
-// Detection model (shared across all languages — finds text regions regardless of script)
+// Detection model (shared across all languages — finds text regions regardless of
+// script). No dictionary to pair, so this stays a plain URL fallback list rather
+// than the {url, dictUrl} source pairing used for recognition models below.
 const DET_MODEL = {
   id: 'det',
   urls: [
+    'https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_det.onnx',
     'https://cdn.jsdelivr.net/npm/paddle-ocr-onnx-models@0.2.0/models/ch_PP-OCRv4_det_infer.onnx',
-    'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv4/det/ch_PP-OCRv4_det_mobile.onnx',
     'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_det_infer.onnx'
   ],
-  filename: 'ch_PP-OCRv4_det_mobile.onnx'
+  filename: 'ch_PP-OCRv5_det_mobile.onnx' // v3.13.17: new filename — see note below
 };
 
-// Recognition models (one per language group)
-// Following Luna Translator's model zoo structure:
-// https://github.com/HIllya51/LunaTranslator/tree/main/LunaTranslator/ocr
+// Recognition models. Each language key's `sources` array holds {url, dictUrl} pairs
+// tried together in order — see the v3.13.17 changelog note above for why this
+// replaced two independently-ordered urls[]/dictUrls[] lists.
+//
+// v3.13.17: `filename`/`dictFilename` changed for `zh` (still v3.13.16-cached
+// dictionary content differs) and there is no longer a `ja` entry at all. New
+// filenames are used deliberately — `_ensureFile()`/`_ensurePairedFiles()` skip
+// downloading when a file already exists at that path, so reusing the old v4/v1
+// filenames would silently keep serving the old model to upgrading users instead of
+// fetching the new one. This is the same lesson v3.13.16 learned the hard way with
+// the Korean dictionary: a stale cached file at a familiar path is invisible until
+// someone deletes it by hand.
 const REC_MODELS = {
   zh: {
     id: 'rec-zh',
-    urls: [
-      'https://cdn.jsdelivr.net/npm/paddle-ocr-onnx-models@0.2.0/models/ch_PP-OCRv4_rec_infer.onnx',
-      'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile.onnx',
-      'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv4/ch_PP-OCRv4_rec_infer.onnx'
+    sources: [
+      {
+        url: 'https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_rec.onnx',
+        dictUrl: 'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/chinese/dict.txt'
+      },
+      {
+        // Fallback: same vocabulary (18385 classes, verified), larger "server"-scale
+        // network. Only used if the mobile source above is unreachable.
+        url: 'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/chinese/rec.onnx',
+        dictUrl: 'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/chinese/dict.txt'
+      }
     ],
-    filename: 'ch_PP-OCRv4_rec_mobile.onnx',
-    dictUrls: [
-      'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/ppocr_keys_v1.txt',
-      'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/paddle/PP-OCRv4/rec/ch_PP-OCRv4_rec_mobile/ppocr_keys_v1.txt'
-    ],
-    dictFilename: 'ppocr_keys_v1.txt',
-    description: 'Chinese (broad CJK support — kanji, kana, Latin, digits)'
-  },
-  ja: {
-    id: 'rec-ja',
-    urls: [
-      // v3.13.08: jsDelivr does NOT include Japanese model — removed (was 404)
-      // v3.13.08: ModelScope unreliable for Japanese model — removed
-      'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/japan_rec_crnn.onnx',
-      // v3.13.08: Alternative source — monkt/paddleocr-onnx repo
-      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/japanese/rec.onnx'
-    ],
-    filename: 'japan_mobile_v2.0_rec_mobile.onnx',
-    dictUrls: [
-      // v3.13.08: Corrected path — PaddleOCR moved dicts to ppocr/utils/dict/
-      'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/japan_dict.txt',
-      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/japanese/dict.txt'
-    ],
-    dictFilename: 'japan_dict.txt',
-    description: 'Japanese (proper kana + kanji readings)'
+    filename: 'ch_ja_PP-OCRv5_mobile_rec.onnx',
+    dictFilename: 'ppocrv5_chinese_dict.txt',
+    description: 'Chinese + Japanese (PP-OCRv5 unified — kanji, kana, Latin, digits, traditional & simplified)'
   },
   ko: {
     id: 'rec-ko',
-    urls: [
-      // v3.13.08-fix: Primary source — monkt/paddleocr-onnx (most reliable for Korean)
-      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/rec.onnx',
-      // v3.13.08-fix: Alternative — SWHL/RapidOCR PP-OCRv1 folder
-      'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/korean_mobile_v2.0_rec_infer.onnx',
-      // v3.13.08-fix: Third fallback — RapidAI ModelScope (Chinese mirror)
-      'https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0/onnx/PP-OCRv1/rec/korean_mobile_v2.0_rec_infer.onnx'
+    sources: [
+      {
+        // v3.13.08-fix: monkt/paddleocr-onnx — the source that has actually been
+        // downloading successfully. 11947 output classes, verified.
+        url: 'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/rec.onnx',
+        dictUrl: 'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/dict.txt'
+      },
+      {
+        // Fallback: a DIFFERENT Korean model (official PP-OCRv1, 3690-class
+        // vocabulary) with its own matching dictionary — this is why sources are
+        // paired instead of two independent lists. Falling back to urls[1] used to
+        // mean "new model, old dict" silently; now a fallback always brings its own
+        // matching dict with it.
+        url: 'https://huggingface.co/SWHL/RapidOCR/resolve/main/PP-OCRv1/korean_mobile_v2.0_rec_infer.onnx',
+        dictUrl: 'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/korean_dict.txt'
+      }
     ],
     filename: 'korean_mobile_v2.0_rec_mobile.onnx',
-    // v3.13.16: dictUrls[0] MUST match whichever model URL actually succeeds.
-    // urls[0] (monkt/paddleocr-onnx rec.onnx) is the one that has been
-    // downloading successfully — introspecting the .onnx file shows it has
-    // 11947 output classes. The previous dictUrls[0] (PaddlePaddle's official
-    // korean_dict.txt, 3688 lines / 3690 with blank+space) belongs to a
-    // DIFFERENT Korean model and was silently mismatched with it: nearly
-    // every predicted class index landed outside dictionary.length and
-    // decodeRecognition() dropped it, producing empty text with no error.
-    // Fetched monkt's dict.txt directly to confirm: 11945 lines / 11947 with
-    // blank+space — exact match for the model that is actually in use.
-    //
-    // Known fragility: urls[] and dictUrls[] are each tried independently in
-    // order, so if urls[0] (monkt) becomes unavailable and download falls
-    // back to urls[1]/[2] (the official PP-OCRv1 model), this pairing breaks
-    // again — the fallback model wants the PaddlePaddle dict, not monkt's.
-    // A real fix would fetch model+dict as one pinned pair instead of two
-    // independently-ordered fallback lists. Flagging for Phase 2/3 rather
-    // than restructuring the download system as part of this hotfix.
-    dictUrls: [
-      'https://huggingface.co/monkt/paddleocr-onnx/resolve/main/languages/korean/dict.txt',
-      'https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/korean_dict.txt'
-    ],
     dictFilename: 'korean_dict.txt',
     description: 'Korean (hangul + CJK + Latin)'
   }
 };
 
 // Map from app sourceLang to recognition model key
-// 'auto' defaults to 'zh' because the Chinese model has the broadest CJK coverage
-// v3.13.10: Added 'KR', 'kor', 'jpn' mappings for robustness
+// v3.13.17: 'ja'/'jpn' now map to 'zh' — the unified PP-OCRv5 model covers both, so
+// there is no separate Japanese model to select. 'auto' also defaults to 'zh' since
+// it has the broadest coverage (now including Japanese).
+// v3.13.10: Added 'KR', 'kor' mappings for robustness
 const LANG_TO_REC_MODEL = {
   'zh': 'zh',
   'zh-CN': 'zh',
   'zh-TW': 'zh',
-  'ja': 'ja',
-  'jpn': 'ja',     // v3.13.10: Accept Tesseract-style code
+  'ja': 'zh',      // v3.13.17: unified into the zh model, no separate 'ja' entry
+  'jpn': 'zh',     // v3.13.10: Accept Tesseract-style code
   'ko': 'ko',
   'KR': 'ko',      // v3.13.10: Map 'KR' (common Korean code) to Korean model
   'kor': 'ko',     // v3.13.10: Accept Tesseract-style code
-  'lzh': 'zh',    // v3.13.08-fix: Classical Chinese uses Chinese model
-  'auto': 'zh',   // Default: Chinese model for broadest coverage
-  'en': 'zh',     // English text works fine with Chinese model (has Latin subset)
+  'lzh': 'zh',    // v3.13.08-fix: Classical Chinese uses the zh model (v5 covers traditional too)
+  'auto': 'zh',   // Default: broadest coverage (zh+ja unified)
+  'en': 'zh',     // English text works fine with the zh model (has Latin subset)
   'ru': 'zh',
   'es': 'zh',
   'fr': 'zh',
@@ -162,7 +171,7 @@ const LANG_TO_REC_MODEL = {
 /**
  * Get the recognition model key for a given source language
  * @param {string} sourceLang - App source language code
- * @returns {string} Model key: 'zh', 'ja', or 'ko'
+ * @returns {string} Model key: 'zh' or 'ko'
  */
 function getRecModelKeyForLang(sourceLang) {
   return LANG_TO_REC_MODEL[sourceLang] || 'zh';
@@ -182,6 +191,7 @@ class PaddleModelManager {
     // v3.13.04: Track per-language download progress
     for (const key of Object.keys(REC_MODELS)) {
       this._downloadProgress[`rec-${key}`] = 0;
+      this._downloadProgress[`dict-${key}`] = 0;
     }
   }
 
@@ -222,7 +232,7 @@ class PaddleModelManager {
    * v3.13.08-fix: Also validates minimum file size — corrupt/too-small files
    * (e.g., LFS pointers, error pages) are treated as not downloaded and will
    * be deleted and re-downloaded on next ensureRecModel() call.
-   * @param {string} langKey - 'zh', 'ja', or 'ko'
+   * @param {string} langKey - 'zh' or 'ko'
    * @returns {boolean}
    */
   isRecModelDownloaded(langKey) {
@@ -264,7 +274,7 @@ class PaddleModelManager {
 
   /**
    * v3.13.04: Get list of available (downloaded) recognition models.
-   * @returns {string[]} Array of downloaded model keys (e.g. ['zh', 'ja'])
+   * @returns {string[]} Array of downloaded model keys (e.g. ['zh', 'ko'])
    */
   getDownloadedRecModels() {
     return Object.keys(REC_MODELS).filter(key => this.isRecModelDownloaded(key));
@@ -278,8 +288,9 @@ class PaddleModelManager {
   }
 
   /**
-   * Ensure the detection model and the default (Chinese) recognition model are downloaded.
-   * Other language models are downloaded on-demand via ensureRecModel().
+   * Ensure the detection model and the default (Chinese+Japanese) recognition
+   * model are downloaded. Other language models (Korean) are downloaded
+   * on-demand via ensureRecModel().
    * @param {function} onProgress - Callback with progress info { file, percent }
    */
   async ensureModels(onProgress) {
@@ -293,10 +304,8 @@ class PaddleModelManager {
     // Download detection model
     await this._ensureFile(DET_MODEL.id, DET_MODEL.urls, path.join(dir, DET_MODEL.filename), onProgress);
 
-    // Download default (Chinese) recognition model + dictionary
-    const zhModel = REC_MODELS.zh;
-    await this._ensureFile(zhModel.id, zhModel.urls, path.join(dir, zhModel.filename), onProgress);
-    await this._ensureFile('dict-zh', zhModel.dictUrls, path.join(dir, zhModel.dictFilename), onProgress);
+    // Download default (Chinese+Japanese) recognition model + its paired dictionary
+    await this.ensureRecModel('zh', onProgress);
 
     this._downloading = false;
   }
@@ -304,7 +313,9 @@ class PaddleModelManager {
   /**
    * v3.13.04: Ensure a specific language's recognition model is downloaded.
    * Called on-demand when the user selects a language that needs a different model.
-   * @param {string} langKey - 'zh', 'ja', or 'ko'
+   * v3.13.17: Downloads the model and its dictionary as a paired unit — see
+   * _ensurePairedFiles() for why.
+   * @param {string} langKey - 'zh' or 'ko'
    * @param {function} onProgress - Callback with progress info { file, percent }
    */
   async ensureRecModel(langKey, onProgress) {
@@ -320,10 +331,13 @@ class PaddleModelManager {
 
     this._downloading = true;
 
-    // Download recognition model
-    await this._ensureFile(model.id, model.urls, path.join(dir, model.filename), onProgress);
-    // Download dictionary
-    await this._ensureFile(`dict-${langKey}`, model.dictUrls, path.join(dir, model.dictFilename), onProgress);
+    await this._ensurePairedFiles(
+      langKey,
+      model.sources,
+      path.join(dir, model.filename),
+      path.join(dir, model.dictFilename),
+      onProgress
+    );
 
     this._downloading = false;
     log.info(`[PaddleOCR] ${model.description} model ready`);
@@ -331,6 +345,7 @@ class PaddleModelManager {
 
   /**
    * Download a single file if it doesn't exist, trying multiple URLs with fallback.
+   * Used for the detection model, which has no dictionary to keep paired.
    * @private
    */
   async _ensureFile(key, urls, destPath, onProgress) {
@@ -343,7 +358,7 @@ class PaddleModelManager {
     const errors = [];
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
-      const sourceLabel = i === 0 ? 'jsDelivr' : (i === 1 ? 'ModelScope' : 'HuggingFace');
+      const sourceLabel = `source[${i}]`;
       try {
         log.info(`[PaddleOCR] Downloading ${key} from ${sourceLabel}...`);
         await this._downloadFile(url, destPath, (percent) => {
@@ -364,7 +379,70 @@ class PaddleModelManager {
   }
 
   /**
-   * Load detection session and the default (Chinese) recognition session.
+   * v3.13.17: Download a recognition model and its character dictionary as a
+   * paired unit, trying each {url, dictUrl} source in order.
+   *
+   * This replaces the old design of two independently-ordered fallback lists
+   * (urls[] and dictUrls[]), which is how the v3.13.16 Korean bug happened: the
+   * model download succeeded from source A while the dictionary download
+   * succeeded from source B, and nothing connected those two outcomes — they
+   * were just "whichever URL responded first" in each list, unrelated to each
+   * other. A model and its dictionary describe the same fixed vocabulary; they
+   * are not independently substitutable, so they must not be selected
+   * independently either.
+   *
+   * On failure from a source, BOTH files are deleted (even if only one of the
+   * two downloads actually failed) before trying the next source, so a
+   * mismatched pair can never be left on disk mid-fallback.
+   * @private
+   */
+  async _ensurePairedFiles(langKey, sources, modelPath, dictPath, onProgress) {
+    const modelKey = `rec-${langKey}`;
+    const dictKey = `dict-${langKey}`;
+
+    if (fs.existsSync(modelPath) && fs.existsSync(dictPath)) {
+      this._downloadProgress[modelKey] = 100;
+      this._downloadProgress[dictKey] = 100;
+      if (onProgress) onProgress({ file: modelKey, percent: 100 });
+      return;
+    }
+
+    const errors = [];
+    for (let i = 0; i < sources.length; i++) {
+      const { url, dictUrl } = sources[i];
+      const sourceLabel = `source[${i}]`;
+      try {
+        if (!fs.existsSync(modelPath)) {
+          log.info(`[PaddleOCR] Downloading ${modelKey} model from ${sourceLabel}...`);
+          await this._downloadFile(url, modelPath, (percent) => {
+            this._downloadProgress[modelKey] = percent;
+            if (onProgress) onProgress({ file: modelKey, percent });
+          });
+        }
+        if (!fs.existsSync(dictPath)) {
+          log.info(`[PaddleOCR] Downloading ${dictKey} from ${sourceLabel}...`);
+          await this._downloadFile(dictUrl, dictPath, (percent) => {
+            this._downloadProgress[dictKey] = percent;
+            if (onProgress) onProgress({ file: dictKey, percent });
+          });
+        }
+        log.info(`[PaddleOCR] ${langKey} model+dictionary ready from ${sourceLabel}`);
+        return;
+      } catch (err) {
+        log.warn(`[PaddleOCR] ${sourceLabel} failed for ${langKey}: ${err.message}`);
+        errors.push(`${sourceLabel}: ${err.message}`);
+        // v3.13.17: Delete BOTH files on any failure, not just the one that
+        // failed — this is the step that prevents a mismatched pair from
+        // surviving a partial failure mid-fallback.
+        if (fs.existsSync(modelPath)) { try { fs.unlinkSync(modelPath); } catch (e) { /* ignore */ } }
+        if (fs.existsSync(dictPath)) { try { fs.unlinkSync(dictPath); } catch (e) { /* ignore */ } }
+      }
+    }
+    throw new Error(`Failed to download ${langKey} model+dictionary from any source. Tried: ${errors.join('; ')}`);
+  }
+
+  /**
+   * Load detection session and the default (Chinese+Japanese) recognition session.
    * Call ensureModels() first.
    * @param {object} options - Session options
    */
@@ -395,7 +473,7 @@ class PaddleModelManager {
     );
     log.info('[PaddleOCR] Detection model loaded');
 
-    // Load default (Chinese) recognition model
+    // Load default (Chinese+Japanese) recognition model
     await this._loadRecSession('zh', sessionOptions);
 
     this._initialized = true;
@@ -408,7 +486,7 @@ class PaddleModelManager {
    * If the session is already loaded, just switch to it.
    * If the model file exists but isn't loaded, load it.
    * If the model file doesn't exist, throw (caller should download first).
-   * @param {string} langKey - 'zh', 'ja', or 'ko'
+   * @param {string} langKey - 'zh' or 'ko'
    * @param {object} sessionOptions - ONNX session options (optional, uses defaults if not provided)
    * @private
    */
@@ -436,15 +514,12 @@ class PaddleModelManager {
     log.info(`[PaddleOCR] ${model.description} recognition model loaded`);
 
     // v3.13.16: PP-OCR recognition models don't all share the same required
-    // input height. Introspecting the downloaded .onnx files showed the 'ja'
-    // model has a FIXED height of 32 (not the 48 this pipeline used to
-    // hardcode for every model), which crashed every single 'ja' recognition
-    // call with "Got invalid dimensions for input: x ... Got: 48 Expected: 32".
-    // Read the real requirement from the session itself instead of assuming.
+    // input height. Read the real requirement from the session itself instead
+    // of assuming a constant.
     this._recInputHeights[langKey] = this._detectInputHeight(this._recSessions[langKey]);
     log.info(`[PaddleOCR] ${langKey} recognition model input height: ${this._recInputHeights[langKey]}`);
 
-    // Load dictionary
+    // Load dictionary (v3.13.17: validated against the model's real class count)
     await this._loadDictionary(langKey, dir);
   }
 
@@ -452,11 +527,10 @@ class PaddleModelManager {
    * v3.13.16: Read the required input height from a loaded recognition
    * session's input shape. dims are [batch, channels, height, width]; batch
    * and width are dynamic ("" or a symbolic name) for every model observed,
-   * but height may be a fixed number (e.g. the 'ja' model requires exactly
-   * 32) or also dynamic (e.g. 'zh', which accepts 48). Falls back to 48 —
-   * the PP-OCRv4 default — when the model reports a dynamic/unreadable
-   * height, since that is what this pipeline has always used successfully
-   * for 'zh' and 'ko'.
+   * but height may be a fixed number (e.g. the old PP-OCRv1 'ja' model
+   * required exactly 32) or also dynamic (e.g. the PP-OCRv5 models, which
+   * accept 48). Falls back to 48 — what this pipeline has always used
+   * successfully — when the model reports a dynamic/unreadable height.
    * @private
    */
   _detectInputHeight(session) {
@@ -472,7 +546,7 @@ class PaddleModelManager {
 
   /**
    * v3.13.16: Get the required recognition input height for a language.
-   * @param {string} langKey - 'zh', 'ja', or 'ko'
+   * @param {string} langKey - 'zh' or 'ko'
    * @returns {number}
    */
   getRecInputHeight(langKey) {
@@ -480,9 +554,120 @@ class PaddleModelManager {
   }
 
   /**
+   * v3.13.17: Read the number of output classes from a loaded recognition
+   * session — used to validate the character dictionary against the model
+   * that will actually produce predictions. Output shape is
+   * [batch, timesteps, classes]; classes is the last dimension.
+   * @private
+   */
+  _getOutputClassCount(session) {
+    try {
+      const shape = session.outputMetadata[0].shape;
+      const numClasses = shape[shape.length - 1];
+      if (typeof numClasses === 'number' && numClasses > 0) return numClasses;
+    } catch (e) {
+      log.debug('[PaddleOCR] Could not read output class count from model metadata:', e.message);
+    }
+    return null;
+  }
+
+  /**
+   * v3.13.17: Build the CTC dictionary array from raw character lines,
+   * choosing between the 'blank'-only and 'blank'+trailing-space conventions
+   * based on which one actually matches the model's real output class count
+   * — instead of always appending a trailing space and hoping, which is what
+   * this pipeline did before.
+   *
+   * That "always append ' '" assumption was harmlessly wrong for the old
+   * Japanese model (4399 dict lines + blank = 4400, matching its class count
+   * exactly; the space made it 4401, one dead unreachable entry) but is not
+   * safe to assume for every future model. More importantly, this is also
+   * where the class-count-vs-dictionary mismatch from v3.13.16 gets caught:
+   * if NEITHER convention matches, that means the model and dictionary
+   * describe different vocabularies — most likely a stale cached file from a
+   * previous version, or (like the Korean bug) a source mismatch. Failing
+   * loudly here beats decodeRecognition() silently dropping most predictions
+   * because their class index falls outside dictionary.length.
+   *
+   * @param {string[]} lines - Raw dictionary lines (one character per line)
+   * @param {number|null} numClasses - The model's real output class count, or
+   *   null if it couldn't be read
+   * @param {string} label - For log/error messages, e.g. "zh (file)"
+   * @returns {string[]}
+   * @private
+   */
+  _buildDictionary(lines, numClasses, label) {
+    const withBlankOnly = ['blank', ...lines];
+    const withBlankAndSpace = ['blank', ...lines, ' '];
+
+    if (numClasses === null) {
+      log.warn(`[PaddleOCR] ${label}: could not read the model's output class count — ` +
+        `defaulting to the blank+space convention unverified. If recognition produces ` +
+        `mostly empty/garbled text, this pairing may be wrong.`);
+      return withBlankAndSpace;
+    }
+
+    if (withBlankAndSpace.length === numClasses) {
+      log.info(`[PaddleOCR] ${label} dictionary loaded (${withBlankAndSpace.length} chars, blank+space convention, matches model's ${numClasses} classes)`);
+      return withBlankAndSpace;
+    }
+
+    if (withBlankOnly.length === numClasses) {
+      log.info(`[PaddleOCR] ${label} dictionary loaded (${withBlankOnly.length} chars, blank-only convention, matches model's ${numClasses} classes)`);
+      return withBlankOnly;
+    }
+
+    // v3.13.17: Neither convention matches — this is exactly how the v3.13.16
+    // Korean bug manifested (dictionary.length=3690 vs model classes=11947).
+    throw new Error(
+      `${label}: dictionary/model mismatch — model has ${numClasses} output classes, ` +
+      `but the dictionary has ${lines.length} character lines (${withBlankOnly.length} ` +
+      `entries with blank, ${withBlankAndSpace.length} with blank+space). Neither matches. ` +
+      `The cached model and dictionary files most likely came from different sources or a ` +
+      `previous app version — delete them from the model cache directory (${this.getModelsDir()}) ` +
+      `and let them re-download.`
+    );
+  }
+
+  /**
+   * Load character dictionary for a specific language.
+   * Tries ONNX model metadata first, falls back to file.
+   * v3.13.17: Now validated against the model's real output class count via
+   * _buildDictionary() — see its docstring for why.
+   * @private
+   */
+  async _loadDictionary(langKey, dir) {
+    const model = REC_MODELS[langKey];
+    const session = this._recSessions[langKey];
+    const numClasses = this._getOutputClassCount(session);
+
+    // Try model metadata first
+    try {
+      const metadata = session.modelMetadata;
+      if (metadata && metadata.customMetadataMap && metadata.customMetadataMap.character) {
+        const lines = metadata.customMetadataMap.character.split(/\r?\n/);
+        this._dictionaries[langKey] = this._buildDictionary(lines, numClasses, `${langKey} (model metadata)`);
+        return;
+      }
+    } catch (e) {
+      log.debug(`[PaddleOCR] Could not read ${langKey} dictionary from model metadata:`, e.message);
+    }
+
+    // Fallback: load from file
+    const dictPath = path.join(dir, model.dictFilename);
+    if (fs.existsSync(dictPath)) {
+      const content = fs.readFileSync(dictPath, 'utf-8');
+      const lines = content.split(/\r?\n/).filter(line => line.length > 0);
+      this._dictionaries[langKey] = this._buildDictionary(lines, numClasses, `${langKey} (file)`);
+    } else {
+      throw new Error(`${langKey} character dictionary not found at ${dictPath}`);
+    }
+  }
+
+  /**
    * v3.13.04: Switch the active recognition model to a different language.
    * Downloads the model on-demand if not yet available.
-   * @param {string} langKey - 'zh', 'ja', or 'ko'
+   * @param {string} langKey - 'zh' or 'ko'
    * @param {function} onProgress - Download progress callback (if download needed)
    */
   async switchRecModel(langKey, onProgress) {
@@ -507,39 +692,6 @@ class PaddleModelManager {
 
     this._activeRecLang = langKey;
     log.info(`[PaddleOCR] Switched to ${model.description} recognition model`);
-  }
-
-  /**
-   * Load character dictionary for a specific language.
-   * Tries ONNX model metadata first, falls back to file.
-   * @private
-   */
-  async _loadDictionary(langKey, dir) {
-    const model = REC_MODELS[langKey];
-    const session = this._recSessions[langKey];
-
-    // Try model metadata first
-    try {
-      const metadata = session.modelMetadata;
-      if (metadata && metadata.customMetadataMap && metadata.customMetadataMap.character) {
-        this._dictionaries[langKey] = ['blank', ...metadata.customMetadataMap.character.split(/\r?\n/), ' '];
-        log.info(`[PaddleOCR] ${langKey} dictionary loaded from model metadata (${this._dictionaries[langKey].length} chars)`);
-        return;
-      }
-    } catch (e) {
-      log.debug(`[PaddleOCR] Could not read ${langKey} dictionary from model metadata:`, e.message);
-    }
-
-    // Fallback: load from file
-    const dictPath = path.join(dir, model.dictFilename);
-    if (fs.existsSync(dictPath)) {
-      const content = fs.readFileSync(dictPath, 'utf-8');
-      const lines = content.split(/\r?\n/).filter(line => line.length > 0);
-      this._dictionaries[langKey] = ['blank', ...lines, ' '];
-      log.info(`[PaddleOCR] ${langKey} dictionary loaded from file (${this._dictionaries[langKey].length} chars)`);
-    } else {
-      throw new Error(`${langKey} character dictionary not found at ${dictPath}`);
-    }
   }
 
   /**
@@ -614,6 +766,7 @@ class PaddleModelManager {
       this._downloadProgress = { det: 0 };
       for (const key of Object.keys(REC_MODELS)) {
         this._downloadProgress[`rec-${key}`] = 0;
+        this._downloadProgress[`dict-${key}`] = 0;
       }
       log.info('[PaddleOCR] All model files deleted');
     }

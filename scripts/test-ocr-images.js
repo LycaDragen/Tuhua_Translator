@@ -145,6 +145,14 @@ function printResult(r, quiet) {
   console.log(`  expected   : ${C.cyan}${r.expected.replace(/\n/g, ' / ')}${C.reset}`);
   console.log(`  actual     : ${r.actual ? r.actual.replace(/\n/g, ' / ') : C.dim + '(empty)' + C.reset}`);
   console.log(`  ${C.dim}engine     : ${r.regions === null ? 'N/A' : r.regions} regions, conf ${(r.confidence * 100).toFixed(1)}%, model '${r.activeModel}', ${r.elapsedMs}ms${C.reset}`);
+  // v3.13.17: Per-stage region counts — tells apart "the detector never found
+  // it" (detected is already low) from "we discarded it ourselves" (detected
+  // is healthy but a later stage drops it). That distinction picks the fix:
+  // swap the detection model vs. tune our own thresholds in ocr-paddle.js.
+  if (r.regionStages) {
+    const s = r.regionStages;
+    console.log(`  ${C.dim}stages     : detected=${s.detected} → minArea=${s.afterMinArea} → aspect=${s.afterAspectRatio} → merge=${s.afterMerge} → crowded=${s.afterCrowdedFilter} → maxRegions=${s.afterMaxRegions} → recognized=${s.recognized} → outlier=${s.afterOutlierFilter}${C.reset}`);
+  }
   if (r.furiganaLeaked.length) {
     console.log(`  ${C.yellow}furigana leaked into output: ${r.furiganaLeaked.join(' ')}${C.reset}`);
   }
@@ -235,6 +243,7 @@ async function run() {
       actual: '',
       confidence: 0,
       regions: null,
+      regionStages: null,
       activeModel: '?',
       elapsedMs: 0,
       similarity: 0,
@@ -258,15 +267,13 @@ async function run() {
       result.confidence = res.confidence || 0;
 
       if (args.engine === 'paddle') {
-        const status = ocr._paddleEngine.getStatus();
-        result.activeModel = status.activeRecModel || '?';
-        // OcrService._recognizePaddle() returns only { text, confidence } — it
-        // drops the region count that PaddleOCREngine.recognize() produces. So
-        // region counts are not observable through the service API; they show
-        // as null here rather than a misleading 0. Read them from the
-        // electron-log output ("Processing N regions") until the service
-        // forwards them.
+        // v3.13.17: OcrService._recognizePaddle() now forwards regions/regionStages/
+        // recModel from PaddleOCREngine.recognize() on every return path (previously
+        // only { text, confidence } escaped, so "detection never found it" and "our
+        // own thresholds discarded it" were indistinguishable from outside).
+        result.activeModel = res.recModel || ocr._paddleEngine.getStatus().activeRecModel || '?';
         result.regions = typeof res.regions === 'number' ? res.regions : null;
+        result.regionStages = res.regionStages || null;
       }
     } catch (err) {
       // The pipeline swallows internal throws and returns {text:''}, which makes
