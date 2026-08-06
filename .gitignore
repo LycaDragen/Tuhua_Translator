@@ -37,6 +37,7 @@ paddle-models/
 
 # ── Tesseract traineddata (large, downloaded) ──
 tessdata/
+*.traineddata
 
 # ── OS Generated Files ──
 .DS_Store
@@ -78,6 +79,7 @@ cache/
 test-assets/
 test-images/
 tests/screenshots/
+scripts/ocr-report.json
 
 # ── Coverage ──
 coverage/

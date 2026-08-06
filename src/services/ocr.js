@@ -149,6 +149,16 @@ class OcrService extends EventEmitter {
     await this._paddleEngine.deleteModels();
   }
 
+  /**
+   * v3.13.16: Forward detection/recognition option overrides to the PaddleOCR
+   * engine (e.g. { enhance: true } for the Phase 1 median-denoise + auto-invert
+   * pass on recognition crops — see PaddleOCREngine._options and
+   * preprocessForRecognition() in paddle-preprocess.js). No-op for Tesseract.
+   */
+  setPaddleOptions(options) {
+    this._paddleEngine.setOptions(options);
+  }
+
   async initialize(lang) {
     this._sourceLang = lang || 'ja';
     // v3.13.04: Update PaddleOCR source language for model selection
@@ -282,7 +292,7 @@ class OcrService extends EventEmitter {
   async _recognizePaddle(imageBuffer) {
     if (this._isBusy) {
       log.warn('[OCR] Busy, skipping PaddleOCR request');
-      return { text: '', confidence: 0 };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
     }
 
     this._isBusy = true;
@@ -314,7 +324,7 @@ class OcrService extends EventEmitter {
       if (!minCharsMet) {
         log.info(`[OCR/Paddle] Skipping empty result (0 meaningful chars): "${text.substring(0, 60)}"`);
         this.emit('status', 'ready');
-        return { text: '', confidence: result.confidence };
+        return { text: '', confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
       }
 
       // Log low confidence but still pass through — translation engine may handle it
@@ -327,19 +337,19 @@ class OcrService extends EventEmitter {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR/Paddle] Similar text skipped (${(similarity * 100).toFixed(0)}% similar): "${text.substring(0, 50)}"`);
         this.emit('status', 'ready');
-        return { text, confidence: result.confidence };
+        return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
       }
 
       this._lastEmittedText = text;
       log.info(`[OCR/Paddle] Recognized text (${(result.confidence * 100).toFixed(1)}%): "${text.substring(0, 80)}"`);
       this.emit('text', text);
       this.emit('status', 'ready');
-      return { text, confidence: result.confidence };
+      return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
     } catch (err) {
       log.error('[OCR/Paddle] Recognition error:', err.message);
       this.emit('error', err);
       this.emit('status', 'error');
-      return { text: '', confidence: 0 };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
     } finally {
       this._isBusy = false;
     }
@@ -641,6 +651,16 @@ class OcrService extends EventEmitter {
     // Furigana appears as small kana readings above/beside kanji in Japanese text.
     // OCR often reads them as separate text segments, producing noise like:
     //   "En Kanji" (reading the furigana label), or kana fragments mixed with kanji.
+    //
+    // v3.13.18: These 4 patterns target INLINE ruby markup ({kanji|reading},
+    // kanji(reading), kanji[reading]) — formats that image OCR never actually
+    // produces, since furigana arrives from detection as its own separate
+    // region, not as markup inside a recognized string. The real mechanism
+    // for image OCR is geometric: filterFuriganaBoxes() in
+    // paddle-postprocess.js drops the furigana box before recognition even
+    // runs, based on its size/position relative to its kanji line. Kept here
+    // (rather than removed) in case a future input source ever does produce
+    // literal ruby markup in text form.
     // Pattern 1: Ruby annotations {kanji|reading} — common in some OCR outputs
     text = text.replace(/\{[^|]+\|([^}]+)\}/g, '$1');
     // Pattern 2: Parenthetical kana readings after kanji: 漢字(かんじ)

@@ -1,0 +1,114 @@
+{
+  "_readme": [
+    "Ground truth for the test-images/ OCR bench.",
+    "",
+    "IMPORTANT: `expected` is what is ACTUALLY RENDERED in each image, not the",
+    "idiomatic phrase the image was meant to show. These images were AI-generated",
+    "and several contain near-miss glyphs (因書館 instead of 図書館, 移了 instead of",
+    "終了, てす without dakuten instead of です, ましよう with a large よ). Scoring",
+    "against the corrected phrase would report permanent false failures.",
+    "",
+    "The files are JPEG data with a .png extension — read them as buffers, never",
+    "infer the format from the extension.",
+    "",
+    "`lang` is what to pass to setSourceLang(). `alsoTestAuto` marks the cases",
+    "worth re-running under 'auto', which is the path the v3.13.15 const bug broke.",
+    "`notes` records why a case is hard, and `knownUnreadable` marks text that no",
+    "OCR can recover (e.g. glyphs cropped by the image border)."
+  ],
+
+  "images": [
+    {
+      "file": "test01-japanese-simple.png",
+      "lang": "ja",
+      "expected": "こんにちの世界",
+      "difficulty": "trivial",
+      "notes": "High contrast, light background. Baseline sanity check. Note the rendered text is こんにちの世界, NOT こんにちは世界."
+    },
+    {
+      "file": "test02-chinese-simple.png",
+      "lang": "zh",
+      "expected": "今天天气很好",
+      "difficulty": "trivial",
+      "notes": "Clean simplified Chinese, native to the default zh model."
+    },
+    {
+      "file": "test03-korean-simple.png",
+      "lang": "ko",
+      "alsoTestAuto": true,
+      "expected": "안녕하시오",
+      "difficulty": "hard",
+      "notes": "The reported Korean issue. The zh model has no hangul in its dictionary, so under 'auto' this triggers the model switch — the exact path the const bug made return empty. Glyphs are very large (~400px tall)."
+    },
+    {
+      "file": "test04-vn-dialogue.png",
+      "lang": "ja",
+      "expected": "私は学生てす。\n毎日学校に行きます。",
+      "difficulty": "medium",
+      "notes": "Semi-transparent dialogue box over a background. White text with outline. てす has no dakuten in the source."
+    },
+    {
+      "file": "test05-game-menu.png",
+      "lang": "ja",
+      "alsoTestAuto": true,
+      "expected": "ばじめから\nつづきから\n設定\n因書館\n移了",
+      "difficulty": "hard",
+      "notes": "Black background, white glow text, 5 separate regions. Near-miss glyphs: 因 not 図, 移 not 終, ばじめから not はじめから. The ▶ menu cursor is intentionally stripped by _cleanPaddleOcrText and is not in the expected text."
+    },
+    {
+      "file": "test06-vertical-text.png",
+      "lang": "ja",
+      "expected": "今日は良い天気てすわ",
+      "difficulty": "hard",
+      "notes": "Vertical single column on the right side. Very noisy dark background. Portrait 768x1344. Exercises isVerticalText() + rotate90CCW() and the vertical reading order fixed in Phase 0."
+    },
+    {
+      "file": "test07-mixed-ja-en.png",
+      "lang": "ja",
+      "alsoTestAuto": true,
+      "expected": "東京タワーへ行きましよう\nLet's go to Tokyo Tower\n入場料は大人1000円です",
+      "difficulty": "medium",
+      "notes": "Mixed JA/EN/digits. Phase 3 per-region script detection targets this: a Latin line sits between two Japanese ones. ましよう uses a large よ, not the small ょ."
+    },
+    {
+      "file": "test08-multiple-speakers.png",
+      "lang": "ja",
+      "alsoTestAuto": true,
+      "expected": "秀太郎\nどこへ行くの?\n美咲\n因書館に本を返しに行くの。",
+      "difficulty": "hard",
+      "notes": "Dark scene, 2 speaker labels + 2 bubbles = 4 regions whose order and association must survive. _mergeNearbyBoxes only merges horizontally today, so labels stay detached from their bubble (Phase 3). 因 not 図."
+    },
+    {
+      "file": "test09-rpg-battle.png",
+      "lang": "ja",
+      "alsoTestAuto": true,
+      "expected": "HP: 100/100\nMP: 50/50\nたたかう\nまほう\nにげる\nどうく",
+      "knownUnreadable": ["ヌライノ"],
+      "difficulty": "hard",
+      "notes": "Pixel font, dark background, ~7 scattered regions. The yellow katakana is CROPPED BY THE RIGHT IMAGE BORDER — unrecoverable, so it is excluded from `expected` and listed under knownUnreadable. どうく is likely meant to be どうぐ. Pixel fonts have diagonal-only glyph connections, which 4-connectivity flood fill fragments (Phase 2)."
+    },
+    {
+      "file": "test10-low-quality.png",
+      "lang": "ja",
+      "expected": "遅れました",
+      "difficulty": "hard",
+      "notes": "The reported low-quality issue. Heavy sensor-style noise over a near-black background, 864x1152 (below maxSideLen 1280, so it is not even upscaled today). Primary target for CLAHE + autoInvert in Phase 1."
+    },
+    {
+      "file": "test11-furigana.png",
+      "lang": "ja",
+      "expected": "漢字の上にぶりが\nながあります",
+      "furigana": ["か", "で"],
+      "difficulty": "hard",
+      "notes": "The reported furigana issue. Small kana above 漢 and 上. These must NOT appear in the output — they are listed under `furigana` so the bench can score them as false positives if they leak in. minRegionArea 100 currently discards them before they can even be filtered geometrically."
+    },
+    {
+      "file": "test12-classical-chinese.png",
+      "lang": "lzh",
+      "alsoTestAuto": true,
+      "expected": "學而時瞀之，不亦説乎？\n不亦説乎？有朋自遠方來，\n不亦樂乎？學而時時\n阴時 祒時",
+      "difficulty": "hard",
+      "notes": "The reported classical Chinese issue. Traditional/classical glyphs read by a SIMPLIFIED model (lzh maps to zh). The trailing 學而時時/阴時/祒時 are degenerate repetitions in the source image, not OCR errors. Several glyphs are genuinely ambiguous at this resolution — score by similarity, never exact match."
+    }
+  ]
+}
