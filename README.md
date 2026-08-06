@@ -4,7 +4,7 @@
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Electron](https://img.shields.io/badge/Electron-28-blue.svg)](https://www.electronjs.org/)
-[![Version](https://img.shields.io/badge/version-3.13.14-emerald.svg)]()
+[![Version](https://img.shields.io/badge/version-3.13.18-emerald.svg)]()
 
 ---
 
@@ -72,11 +72,14 @@ Conecta con [Textractor](https://github.com/Artikash/Textractor) para extraer te
 Monitorea el portapapeles del sistema y traduce automáticamente cualquier texto copiado. Ideal para juegos que permiten copiar texto.
 
 ### 📸 OCR
-Captura una región de la pantalla y detecta el texto usando Tesseract.js. Perfecto para juegos que no son compatibles con Textractor.
+Captura una región de la pantalla y detecta el texto directamente de la imagen. Perfecto para juegos que no son compatibles con Textractor.
 
+- **Motor por defecto: PaddleOCR (PP-OCRv5)** — modelo unificado chino+japonés (kanji, kana, texto simplificado y tradicional) más un modelo dedicado para coreano, corriendo 100% local vía ONNX Runtime, sin necesidad de Python ni conexión a internet tras la primera descarga de modelos
+- **Detección automática de idioma** (`auto`): identifica japonés/chino/coreano por el texto reconocido y cambia de modelo sin intervención
+- **Filtrado geométrico de furigana**: descarta automáticamente las lecturas kana pequeñas que aparecen sobre el kanji, para que no contaminen el texto a traducir
+- Soporte para texto vertical (縦書き) con detección y rotación automática
 - Captura manual o automática (intervalo configurable)
-- Preprocesamiento de imagen: escala de grises, umbral, contraste
-- Múltiples idiomas OCR soportados
+- **Tesseract.js disponible como motor alternativo** (legacy) — útil como fallback o para idiomas no cubiertos por PaddleOCR
 
 ### 🎮 XUAT (XUnity.AutoTranslator)
 Integra con [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTranslator) para juegos Unity. Tuhua actúa como servidor de traducción y XUAT reemplaza el texto directamente dentro del juego.
@@ -145,7 +148,8 @@ La memoria de traducción almacena pares de traducciones previas y los reutiliza
 ## 🛠️ Tecnologías
 
 - **[Electron](https://www.electronjs.org/)** — Framework de aplicación de escritorio
-- **[Tesseract.js](https://github.com/naptha/tesseract.js)** — OCR en el navegador (WebAssembly)
+- **[PaddleOCR (PP-OCRv5)](https://github.com/PaddlePaddle/PaddleOCR)** vía **[ONNX Runtime](https://github.com/microsoft/onnxruntime)** — Motor OCR por defecto, corre local sin Python
+- **[Tesseract.js](https://github.com/naptha/tesseract.js)** — OCR alternativo/legacy (WebAssembly)
 - **[electron-store](https://github.com/sindresorhus/electron-store)** — Persistencia de configuración
 - **[Tailwind CSS](https://tailwindcss.com/)** — Framework CSS utilitario (via CDN)
 
@@ -249,6 +253,7 @@ Si te gusta este proyecto, considera dejar una ⭐ en GitHub.
 
 - [Textractor](https://github.com/Artikash/Textractor) — Extractor de texto para juegos
 - [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTranslator) — Plugin de traducción para Unity
-- [Tesseract.js](https://github.com/naptha/tesseract.js) — OCR en JavaScript
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — Motor OCR por defecto (PP-OCRv5)
+- [Tesseract.js](https://github.com/naptha/tesseract.js) — OCR en JavaScript (alternativo/legacy)
 - [DeepL](https://www.deepl.com/) — Motor de traducción de alta calidad
 - [Electron](https://www.electronjs.org/) — Framework de aplicaciones de escritorio
