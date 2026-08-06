@@ -13,6 +13,12 @@
  *   (REVERTED — softmax over 6625 classes produces tiny probabilities that fail all thresholds)
  * v3.13.03: No changes to postprocessing — improvements are in region filtering (ocr-paddle.js)
  * v3.13.16: Added detectScript() for auto-detect model switching (see docstring below).
+ * v3.13.18: Added filterFuriganaBoxes() for geometric furigana detection (see
+ *   docstring below) — replaces the inline-ruby regex patterns in ocr.js's
+ *   _cleanPaddleOcrText(), which target a text format ({kanji|reading},
+ *   kanji(reading)) that image OCR never actually produces. Furigana arrives
+ *   from detection as its own separate box, not as markup inside a string, so
+ *   it has to be filtered geometrically, before recognition even runs.
  */
 
 /**
@@ -302,8 +308,104 @@ function detectScript(text) {
   return { lang, hangul, kana, cjk, latin };
 }
 
+/**
+ * v3.13.18: Detect and drop furigana boxes — small kana readings printed above
+ * kanji in Japanese text. Detection finds them as their own independent
+ * region, distinct from the kanji line they annotate, so left unfiltered
+ * their text (usually one or two kana) gets concatenated into the output
+ * with no context: "が 漢字の上にぶりが" instead of "漢字の上にぶりが".
+ *
+ * A box A is dropped as furigana of box B when ALL of these hold — every
+ * threshold below was set against real detection boxes from the bench
+ * (test-images/), not guessed:
+ *
+ *   1. A is short relative to B: A.h / B.h < heightRatioMax (default 0.60).
+ *      Measured furigana: 0.51. Closest real false-positive risk (test05,
+ *      a short line stacked over a much taller one): 0.71. There is real
+ *      margin on both sides of 0.60 — this is NOT a knife's-edge threshold.
+ *
+ *   2. A sits horizontally inside B: at least minHorizontalOverlap (default
+ *      0.80) of A's width falls within B's x-range. Measured furigana: 100%.
+ *      The nearest false-positive risk (test05 again) is only 43% contained
+ *      — a short menu label stacked over a wider one, not nested inside it.
+ *
+ *   3. A is above B: A.y1 < B.y1. Furigana is printed above its kanji, never
+ *      below — this alone rules out unrelated boxes that happen to be small
+ *      and narrow but sit below or beside their neighbor (e.g. speaker names,
+ *      which sit ABOVE their dialogue in the bench but are excluded by
+ *      criterion 1, not this one — kept as a second, independent guard since
+ *      a name box could in principle be narrow enough to pass 1 and 2 in a
+ *      different layout).
+ *
+ *   4. A is vertically adjacent to B, INCLUDING overlap: B.y1 - A.y2 must
+ *      fall within [-vOverlapMax * A.h, +vGapMax * A.h] (defaults -0.5, 1.0).
+ *      Measured furigana actually OVERLAPS its base line by 7px (B.y1=342,
+ *      A.y2=349) — an artifact of unclipRatio inflating every box. A naive
+ *      non-overlap check (A.y2 <= B.y1) would silently miss the real case.
+ *
+ * Each of the 4 checks is independently necessary: dropping any one of them
+ * lets through at least one of the bench's near-miss cases (speaker names in
+ * test08/test04, a stacked-but-not-nested menu line in test05).
+ *
+ * @param {Array<{x1,y1,x2,y2,score}>} boxes - Detected regions (post
+ *   min-area/aspect-ratio filtering, pre-merge)
+ * @param {object} options
+ * @param {number} options.heightRatioMax - Max A.h/B.h to count as furigana (default 0.60)
+ * @param {number} options.minHorizontalOverlap - Min fraction of A's width inside B's x-range (default 0.80)
+ * @param {number} options.vOverlapMax - Max allowed overlap of A into B, as a fraction of A.h (default 0.5)
+ * @param {number} options.vGapMax - Max allowed gap between A and B, as a fraction of A.h (default 1.0)
+ * @returns {{ kept: Array, dropped: Array<{box: object, baseBox: object, heightRatio: number, horizontalOverlap: number}> }}
+ */
+function filterFuriganaBoxes(boxes, options = {}) {
+  const heightRatioMax = options.heightRatioMax ?? 0.60;
+  const minHorizontalOverlap = options.minHorizontalOverlap ?? 0.80;
+  const vOverlapMax = options.vOverlapMax ?? 0.5;
+  const vGapMax = options.vGapMax ?? 1.0;
+
+  const dropped = [];
+  const droppedIndices = new Set();
+
+  for (let i = 0; i < boxes.length; i++) {
+    const a = boxes[i];
+    const aH = a.y2 - a.y1;
+    const aW = a.x2 - a.x1;
+    if (aH <= 0 || aW <= 0) continue;
+
+    for (let j = 0; j < boxes.length; j++) {
+      if (i === j) continue;
+      const b = boxes[j];
+      const bH = b.y2 - b.y1;
+      if (bH <= 0) continue;
+
+      // 1. Short relative to the candidate base line
+      const heightRatio = aH / bH;
+      if (heightRatio >= heightRatioMax) continue;
+
+      // 2. Horizontally nested inside the base line
+      const overlapX = Math.min(a.x2, b.x2) - Math.max(a.x1, b.x1);
+      const horizontalOverlap = Math.max(0, overlapX) / aW;
+      if (horizontalOverlap < minHorizontalOverlap) continue;
+
+      // 3. Above the base line
+      if (a.y1 >= b.y1) continue;
+
+      // 4. Vertically adjacent to the base line, tolerating overlap
+      const gap = b.y1 - a.y2; // negative = overlap
+      if (gap < -vOverlapMax * aH || gap > vGapMax * aH) continue;
+
+      dropped.push({ box: a, baseBox: b, heightRatio, horizontalOverlap });
+      droppedIndices.add(i);
+      break; // one matching base line is enough to drop A
+    }
+  }
+
+  const kept = boxes.filter((_, i) => !droppedIndices.has(i));
+  return { kept, dropped };
+}
+
 module.exports = {
   decodeDetection,
   decodeRecognition,
-  detectScript
+  detectScript,
+  filterFuriganaBoxes
 };

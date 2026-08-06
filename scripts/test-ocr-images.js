@@ -107,6 +107,12 @@ function charRecall(expected, actual) {
 /**
  * Furigana leakage: kana listed in ground truth that must NOT appear.
  * Only meaningful when the character is absent from the expected text itself.
+ *
+ * v3.13.18: This is a literal-character check, so it misses a leak whenever
+ * recognition misreads the furigana into something else — which is common
+ * (test11's か/で come out as が). Use result.furiganaBoxesDropped (from
+ * regionStages) for a ground-truth-independent signal that doesn't depend on
+ * recognition getting the leaked text exactly right.
  */
 function furiganaLeak(entry, actual) {
   if (!entry.furigana || entry.furigana.length === 0) return [];
@@ -151,7 +157,7 @@ function printResult(r, quiet) {
   // swap the detection model vs. tune our own thresholds in ocr-paddle.js.
   if (r.regionStages) {
     const s = r.regionStages;
-    console.log(`  ${C.dim}stages     : detected=${s.detected} → minArea=${s.afterMinArea} → aspect=${s.afterAspectRatio} → merge=${s.afterMerge} → crowded=${s.afterCrowdedFilter} → maxRegions=${s.afterMaxRegions} → recognized=${s.recognized} → outlier=${s.afterOutlierFilter}${C.reset}`);
+    console.log(`  ${C.dim}stages     : detected=${s.detected} → minArea=${s.afterMinArea} → aspect=${s.afterAspectRatio} → furigana=${s.afterFurigana} → merge=${s.afterMerge} → crowded=${s.afterCrowdedFilter} → maxRegions=${s.afterMaxRegions} → recognized=${s.recognized} → outlier=${s.afterOutlierFilter}${C.reset}`);
   }
   if (r.furiganaLeaked.length) {
     console.log(`  ${C.yellow}furigana leaked into output: ${r.furiganaLeaked.join(' ')}${C.reset}`);
@@ -249,6 +255,7 @@ async function run() {
       similarity: 0,
       charRecall: 0,
       furiganaLeaked: [],
+      furiganaBoxesDropped: null,
       verdict: 'ERROR',
       error: null,
       errorStack: null
@@ -274,6 +281,16 @@ async function run() {
         result.activeModel = res.recModel || ocr._paddleEngine.getStatus().activeRecModel || '?';
         result.regions = typeof res.regions === 'number' ? res.regions : null;
         result.regionStages = res.regionStages || null;
+        // v3.13.18: furiganaLeak() below only catches a leak if the exact
+        // ground-truth character survives into the output — but recognition
+        // regularly misreads furigana into something else entirely (test11's
+        // か/で come out as が), so that check reports zero leaks even when
+        // one happened. regionStages gives a ground-truth-independent signal
+        // instead: did the furigana filter actually drop a box this run.
+        if (result.regionStages) {
+          const s = result.regionStages;
+          result.furiganaBoxesDropped = s.afterAspectRatio - s.afterFurigana;
+        }
       }
     } catch (err) {
       // The pipeline swallows internal throws and returns {text:''}, which makes
@@ -308,6 +325,11 @@ async function run() {
   const leaks = results.filter(r => r.furiganaLeaked.length);
   if (leaks.length) {
     console.log(`${C.yellow}Furigana leaked in ${leaks.length} run(s): ${leaks.map(r => r.file).join(', ')}${C.reset}`);
+  }
+  // v3.13.18: The ground-truth-independent signal — see furiganaLeak()'s docstring.
+  const furiganaDrops = results.filter(r => r.furiganaBoxesDropped > 0);
+  if (furiganaDrops.length) {
+    console.log(`${C.dim}Furigana boxes dropped by the geometric filter: ${furiganaDrops.map(r => `${r.file}=${r.furiganaBoxesDropped}`).join(', ')}${C.reset}`);
   }
 
   const report = {

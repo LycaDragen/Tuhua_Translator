@@ -651,6 +651,16 @@ class OcrService extends EventEmitter {
     // Furigana appears as small kana readings above/beside kanji in Japanese text.
     // OCR often reads them as separate text segments, producing noise like:
     //   "En Kanji" (reading the furigana label), or kana fragments mixed with kanji.
+    //
+    // v3.13.18: These 4 patterns target INLINE ruby markup ({kanji|reading},
+    // kanji(reading), kanji[reading]) — formats that image OCR never actually
+    // produces, since furigana arrives from detection as its own separate
+    // region, not as markup inside a recognized string. The real mechanism
+    // for image OCR is geometric: filterFuriganaBoxes() in
+    // paddle-postprocess.js drops the furigana box before recognition even
+    // runs, based on its size/position relative to its kanji line. Kept here
+    // (rather than removed) in case a future input source ever does produce
+    // literal ruby markup in text form.
     // Pattern 1: Ruby annotations {kanji|reading} — common in some OCR outputs
     text = text.replace(/\{[^|]+\|([^}]+)\}/g, '$1');
     // Pattern 2: Parenthetical kana readings after kanji: 漢字(かんじ)

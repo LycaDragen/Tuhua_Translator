@@ -52,7 +52,7 @@ try {
 
 const { PaddleModelManager, getRecModelKeyForLang, REC_MODELS } = require('./paddle-models');
 const { preprocessForDetection, preprocessForRecognition, cropRegion, isVerticalText, rotate90CCW } = require('./paddle-preprocess');
-const { decodeDetection, decodeRecognition, detectScript } = require('./paddle-postprocess');
+const { decodeDetection, decodeRecognition, detectScript, filterFuriganaBoxes } = require('./paddle-postprocess');
 
 class PaddleOCREngine extends EventEmitter {
   constructor() {
@@ -86,7 +86,21 @@ class PaddleOCREngine extends EventEmitter {
       // crops. Off by default — see preprocessForRecognition() in
       // paddle-preprocess.js for why, and enable via setOptions({enhance: true})
       // to A/B against the test-images bench.
-      enhance: false
+      enhance: false,
+      // v3.13.18: Geometric furigana detection (see filterFuriganaBoxes() in
+      // paddle-postprocess.js). On by default — thresholds were set against
+      // real detection boxes from the bench, with margin on both sides
+      // against the closest false-positive risk (see that function's
+      // docstring). The bench only has one furigana image though, so a real
+      // game could use a size that falls in the gap between the furigana
+      // case (0.51) and the nearest false positive (0.71) — these are
+      // exposed via setOptions() so a bad call can be tuned without a code
+      // change, and every drop is logged with its metrics for the same reason.
+      furiganaFilter: true,
+      furiganaHeightRatioMax: 0.60,
+      furiganaMinHorizontalOverlap: 0.80,
+      furiganaVOverlapMax: 0.5,
+      furiganaVGapMax: 1.0
     };
   }
 
@@ -354,6 +368,7 @@ class PaddleOCREngine extends EventEmitter {
         detected: detResult.boxes.length,
         afterMinArea: 0,
         afterAspectRatio: 0,
+        afterFurigana: 0,
         afterMerge: 0,
         afterCrowdedFilter: 0,
         afterMaxRegions: 0,
@@ -400,6 +415,32 @@ class PaddleOCREngine extends EventEmitter {
         return true;
       });
       regionStages.afterAspectRatio = boxes.length;
+
+      // v3.13.18: Drop furigana boxes — small kana readings printed above
+      // kanji, detected as their own separate region. Left in, they show up
+      // as unrelated single-kana fragments in the output (e.g. "が 漢字の上
+      // にぶりが" instead of "漢字の上にぶりが"). Must run BEFORE merge:
+      // the furigana box overlaps its base line vertically (see
+      // filterFuriganaBoxes()'s docstring for why), which is close to what
+      // _mergeNearbyBoxes() itself looks for — a future change to that
+      // function could otherwise start absorbing furigana into its base
+      // line instead of dropping it. Runs after the aspect-ratio filter so
+      // it only has to consider boxes that already look like real text.
+      if (this._options.furiganaFilter) {
+        const { kept, dropped } = filterFuriganaBoxes(boxes, {
+          heightRatioMax: this._options.furiganaHeightRatioMax,
+          minHorizontalOverlap: this._options.furiganaMinHorizontalOverlap,
+          vOverlapMax: this._options.furiganaVOverlapMax,
+          vGapMax: this._options.furiganaVGapMax
+        });
+        if (dropped.length > 0) {
+          for (const d of dropped) {
+            log.info(`[PaddleOCR] Dropped furigana-like region (height ratio ${d.heightRatio.toFixed(2)}, horizontal overlap ${d.horizontalOverlap.toFixed(2)})`);
+          }
+          boxes = kept;
+        }
+      }
+      regionStages.afterFurigana = boxes.length;
 
       // Merge: combine overlapping or very close regions on the same line
       boxes = this._mergeNearbyBoxes(boxes);
