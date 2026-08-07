@@ -132,7 +132,7 @@
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
             if (settings.debounceMs) { document.getElementById('debounce-range').value = settings.debounceMs; document.getElementById('debounce-val').innerText = settings.debounceMs + 'ms'; }
             if (settings.systemPrompt) document.getElementById('system-prompt').value = settings.systemPrompt;
-            if (settings.maxContextHistory) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
+            if (settings.maxContextHistory !== undefined) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
             if (settings.historyLimit) { document.getElementById('history-limit-range').value = settings.historyLimit; document.getElementById('history-limit-val').innerText = settings.historyLimit; }
 
             // Click-through toggle - restore from saved settings
@@ -177,6 +177,7 @@
             loadGlossary();
             loadProfiles();
             loadRegexFilters();
+            loadHookCleaningSteps();
 
             // Listen for events
             api.onTextractorStatus((status) => updateConnectionStatus(status));
@@ -767,6 +768,27 @@
             const deeplNoticeSec = document.getElementById('deepl-feature-notice');
             if (deeplNoticeSec) {
                 deeplNoticeSec.classList.add('hidden');
+            }
+
+            // v3.13.19: Google/Bing translate each line independently — the
+            // pipeline still sends them the context window (it doesn't hurt
+            // anything), but they ignore it, so the slider would do nothing.
+            // Confirmed empirically, not assumed: concatenating a real
+            // antecedent sentence into the same translation request produced
+            // byte-identical output to translating the line alone.
+            const contextUnsupported = ['google-free', 'bing'].includes(engine);
+            const contextRange = document.getElementById('context-range');
+            const contextVal = document.getElementById('context-val');
+            const contextNote = document.getElementById('context-unsupported-note');
+            if (contextRange) {
+                contextRange.disabled = contextUnsupported;
+                contextRange.classList.toggle('opacity-50', contextUnsupported);
+            }
+            if (contextVal) {
+                contextVal.classList.toggle('opacity-50', contextUnsupported);
+            }
+            if (contextNote) {
+                contextNote.classList.toggle('hidden', !contextUnsupported);
             }
 
             // Load engine-specific API key after showing the right section
@@ -1433,6 +1455,10 @@
             await api.clearHistory();
             historyEntries = [];
             renderHistory();
+        }
+
+        async function clearContext() {
+            await api.clearContext();
         }
 
         async function exportHistory() {
@@ -2499,6 +2525,43 @@
         function translate(key) {
             const t = translations[currentLang] || translations['en'];
             return t[key] || key;
+        }
+
+        // v3.13.21: HOOK cleaning step settings — five fixed, known toggles
+        // (unlike regex filters' open-ended user list), so the checkboxes
+        // already exist in the HTML with fixed IDs; this just sets their
+        // state from the store instead of building DOM dynamically.
+        async function loadHookCleaningSteps() {
+            if (!api) {
+                console.warn('[Tuhua] loadHookCleaningSteps: API not available');
+                return;
+            }
+            try {
+                const steps = await api.getHookCleaningSteps();
+                for (const step of steps) {
+                    const enableEl = document.getElementById('hook-clean-' + step.id);
+                    if (enableEl) enableEl.checked = step.enabled;
+                    if (step.supportsCjkOnly) {
+                        const cjkEl = document.getElementById('hook-clean-cjk-' + step.id);
+                        if (cjkEl) cjkEl.checked = step.cjkOnly;
+                    }
+                }
+            } catch (err) {
+                console.error('[Tuhua] loadHookCleaningSteps error:', err);
+            }
+        }
+
+        async function toggleHookCleanStep(id, enabled) {
+            await api.toggleHookCleaningStep(id, enabled);
+        }
+
+        async function toggleHookCleanCjkOnly(id, cjkOnly) {
+            await api.setHookCleaningCjkOnly(id, cjkOnly);
+        }
+
+        async function resetHookCleaningSteps() {
+            await api.resetHookCleaningSteps();
+            await loadHookCleaningSteps();
         }
 
         async function loadRegexFilters() {

@@ -14,6 +14,7 @@ const EventEmitter = require('events');
 const TranslationCache = require('./cache');
 const TranslationMemory = require('./translation-memory');
 const GlossaryService = require('./glossary');
+const ContextMemory = require('./context-memory');
 
 // Engine imports
 const GoogleFreeEngine = require('./engines/google-free');
@@ -222,6 +223,12 @@ class TranslationPipeline extends EventEmitter {
     // v3.11.23: Translation Memory — engine-agnostic persistent store
     this.translationMemory = new TranslationMemory({ maxSize: 10000, enabled: settings.enableTranslationMemory !== false });
     this.glossary = new GlossaryService();
+    // v3.13.19: Context Memory — owned here, not per-engine (see context-memory.js).
+    // `!== undefined` matters: `settings.maxContextHistory || 5` would silently turn
+    // an explicit 0 (disable context) back into 5, since 0 is falsy in JS.
+    this.contextMemory = new ContextMemory(
+      settings.maxContextHistory !== undefined ? parseInt(settings.maxContextHistory) : 5
+    );
 
     // Debounce
     this.debounceMs = settings.debounceMs || 300;
@@ -271,7 +278,6 @@ class TranslationPipeline extends EventEmitter {
       case 'deepl':
         this.engines[engineName] = new DeepLEngine(s.deeplKey, s.deeplUsePro, {
           formality: s.deeplFormality || 'prefer_more',
-          maxContext: s.maxContextHistory || 3,
           // v3.11.28: New DeepL features
           customInstructions: s.deeplCustomInstructions || [],
           styleId: s.deeplStyleId || '',
@@ -282,16 +288,14 @@ class TranslationPipeline extends EventEmitter {
       case 'openai':
         this.engines[engineName] = new OpenAIEngine(s.openaiKey, {
           model: s.openaiModel || 'gpt-3.5-turbo',
-          systemPrompt: s.systemPrompt || '',
-          maxContext: s.maxContextHistory || 5
+          systemPrompt: s.systemPrompt || ''
         });
         break;
       case 'local-llm':
         this.engines[engineName] = new LocalLLMEngine({
           endpoint: s.customEndpoint || 'http://localhost:1234/v1',
           model: s.customModel || 'local-model',
-          systemPrompt: s.systemPrompt || '',
-          maxContext: s.maxContextHistory || 5
+          systemPrompt: s.systemPrompt || ''
         });
         break;
       case 'libretranslate':
@@ -432,6 +436,13 @@ class TranslationPipeline extends EventEmitter {
         timestamp: Date.now()
       });
 
+      // v3.13.19: Push BEFORE returning — this is the fix for Bug A. The old
+      // per-engine contextHistory only got pushed inside engine.translate(),
+      // which a cache hit never calls, so repeated lines silently vanished
+      // from the context window. Order matters here: push first, return
+      // second — swapping them reintroduces the exact bug this line fixes.
+      this.contextMemory.push(preprocessed, cached);
+
       return postprocessed;
     }
 
@@ -461,6 +472,9 @@ class TranslationPipeline extends EventEmitter {
         targetLang: tgtLang,
         timestamp: Date.now()
       });
+
+      // v3.13.19: Same fix as the cache-hit branch above — push before return.
+      this.contextMemory.push(preprocessed, tmResult.translation);
 
       return postprocessed;
     }
@@ -501,6 +515,8 @@ class TranslationPipeline extends EventEmitter {
         timestamp: Date.now()
       });
 
+      this.contextMemory.push(preprocessed, result.text);
+
       return postprocessed;
     }
 
@@ -528,6 +544,8 @@ class TranslationPipeline extends EventEmitter {
           targetLang: tgtLang,
           timestamp: Date.now()
         });
+
+        this.contextMemory.push(preprocessed, fallbackResult.text);
 
         return postprocessed;
       }
@@ -557,7 +575,8 @@ class TranslationPipeline extends EventEmitter {
           sourceLang: srcLang,
           targetLang: tgtLang,
           sourceLangName: getLanguageName(srcLang),
-          targetLangName: getLanguageName(tgtLang)
+          targetLangName: getLanguageName(tgtLang),
+          context: this.contextMemory.get()
         });
         return result;
       } catch (err) {
@@ -629,6 +648,17 @@ class TranslationPipeline extends EventEmitter {
   }
 
   /**
+   * Reset the context window. Must be called explicitly at real scene/game
+   * boundaries (profile load, source/target language change, engine change,
+   * or a manual user action) — see ipc-handlers.js for the call sites. This
+   * method existing is not enough by itself; before v3.13.19 the equivalent
+   * per-engine clearContext() had zero callers anywhere in the codebase.
+   */
+  clearContext() {
+    this.contextMemory.clear();
+  }
+
+  /**
    * Replace all history entries (used by profile loading)
    */
   replaceHistory(newHistory) {
@@ -662,6 +692,12 @@ class TranslationPipeline extends EventEmitter {
       } else if (this.maxHistory === 0) {
         this.history = [];
       }
+    }
+    // v3.13.19: Resize (not clear) the context window when the setting
+    // changes. `!== undefined` matters — an explicit 0 must disable context,
+    // not fall back to a default (see the constructor's comment for why).
+    if (newSettings.maxContextHistory !== undefined) {
+      this.contextMemory.resize(parseInt(newSettings.maxContextHistory));
     }
   }
 

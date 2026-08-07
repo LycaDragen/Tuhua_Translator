@@ -1,0 +1,177 @@
+{
+  "_meta": {
+    "description": "Context Memory bench corpus — two scenes of Japanese VN dialogue with deliberate cross-line dependencies, a verbatim-repeated line to exercise cache-hit behavior, and a scene boundary to exercise context reset.",
+    "sourceLang": "ja",
+    "targetLang": "en-us",
+    "targetLangNote": "Fixed to English (en-us), not overridable via CLI. Spanish (the app's usual default) is pro-drop like Japanese, so DeepL can legally omit the subject pronoun in the elided-subject test lines regardless of whether context reached it — that would make the pronoun/gender assertions pass or fail for the wrong reason. English forces an overt subject pronoun, which is what makes those assertions diagnostic instead of noise. en-us (not bare 'en') to avoid DeepL's variant-required target_lang behavior.",
+    "windowSize": 2,
+    "windowSizeNote": "Default context window size for the 'with-context' leg. The no-context leg always uses window=0. Override via --window."
+  },
+  "scenes": [
+    {
+      "id": "A",
+      "label": "Yuki and Hina walk to the park",
+      "resetContextBefore": false,
+      "lines": [
+        {
+          "id": "A1",
+          "source": "はい、行きます。",
+          "note": "Cache-prime: first occurrence of this exact line. Also the very first line of the whole run, so the incoming context window must be empty.",
+          "assertions": [
+            { "type": "contextWindowEmpty" }
+          ]
+        },
+        {
+          "id": "A2",
+          "source": "雪は静かに頷いて、コートを羽織った。",
+          "note": "Establishes the name Yuki (雪) as a person doing human actions (nodding, putting on a coat) — the antecedent the next line's elided subject depends on.",
+          "assertions": []
+        },
+        {
+          "id": "A3",
+          "source": "微笑んで、そっと囁いた。",
+          "note": "Elided subject — Japanese omits it entirely. Correct English translation requires inferring 'she' from A2's context. Without context, DeepL must still pick some subject (English is not pro-drop) and has no basis to prefer 'she'.",
+          "assertions": [
+            { "type": "contextWindowContains", "ref": "A2" },
+            { "type": "mustContain", "text": "she" },
+            { "type": "mustNotContain", "text": "snow" }
+          ]
+        },
+        {
+          "id": "A4",
+          "source": "陽菜「星が綺麗だね」と言った。",
+          "note": "Filler #2 of 3 — introduces a second speaker (Hina) and an unrelated topic (stars). Exists to put distance between A1 and A5: with windowSize=2, by the time A5 is processed, A1 must already have aged out of the window (A2/A3/A4 = 3 lines of separation, > windowSize).",
+          "assertions": []
+        },
+        {
+          "id": "A5",
+          "source": "はい、行きます。",
+          "note": "Verbatim repeat of A1 — MUST be served from cache/translation-memory, not re-sent to the engine. This is the cache-hit scenario: expectCacheHit is a precondition the bench aborts on if unmet, not a scored assertion — a corpus where this silently falls through to a live call would prove nothing about Bug A.",
+          "expectCacheHit": true,
+          "assertions": []
+        },
+        {
+          "id": "A6",
+          "source": "どこへ？",
+          "note": "Depends on A5 being in the context window. THIS is the regression guard for Bug A: pipeline._doTranslate() returns early on a cache hit (pipeline.js:417-436) without ever calling engine.translate(), and the context push lives inside the engine — so today A5's cache hit never reaches the window, and this assertion is expected to FAIL until the push moves to a single site in the pipeline that also runs on cache/TM hits.",
+          "assertions": [
+            { "type": "contextWindowContains", "ref": "A5" }
+          ]
+        },
+        {
+          "id": "A7",
+          "source": "雪も一緒に公園まで歩いた。",
+          "note": "Name continuity check — 雪 (Yuki) must keep being translated as the name, not as the common noun 'snow'. Largely self-disambiguating from grammar alone, kept as a general sanity check rather than a strict context-dependency test.",
+          "assertions": [
+            { "type": "mustContain", "text": "yuki" },
+            { "type": "mustNotContain", "text": "snow" }
+          ]
+        },
+        {
+          "id": "A8",
+          "source": "先輩、お先に失礼します。",
+          "note": "Register/honorific coverage (senpai + polite leave-taking). Deliberately left without a strict assertion — how keigo maps onto English politeness markers is subjective and DeepL's rendering isn't stable enough to assert on without inflating false failures. Kept as corpus content and as a normal (non-cache) push so A9's context check has a clean antecedent.",
+          "assertions": []
+        },
+        {
+          "id": "A9",
+          "source": "「うん、また明日」と微笑んだ。",
+          "note": "Continuity check on the NORMAL (non-cache) path, contrasted deliberately with A6: A8 was never a cache hit, so this assertion is expected to PASS today even though A6 fails — showing the bug is isolated to the cache/TM shortcut, not the context mechanism in general.",
+          "assertions": [
+            { "type": "contextWindowContains", "ref": "A8" }
+          ]
+        },
+        {
+          "id": "A10",
+          "source": "二人は駅で別れた。",
+          "note": "Scene wrap-up. Simple, context-independent content check.",
+          "assertions": [
+            { "type": "mustContain", "text": "station" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "B",
+      "label": "Takuya studies in the library",
+      "resetContextBefore": true,
+      "resetContextNote": "The bench calls engine.clearContext() directly here (the same method that exists in deepl.js/openai.js/local-llm.js today but has zero callers anywhere in the codebase). This tests two things at once: (1) that clearContext()'s own implementation is correct — it should genuinely empty the window when invoked, which B1's contextWindowEmpty assertion confirms; (2) it gives Scene B a clean boundary so B1's content assertions test 'no leftover Yuki/female context', not 'we forgot to call the one working reset method'. It does NOT by itself prove production leaks between games — that's already established statically (zero callers, found by grep) and is exactly what Fase 2 (automatic reset on profile load / language change / engine change) exists to fix.",
+      "lines": [
+        {
+          "id": "B1",
+          "source": "机に向かって、黙々と問題集を解いていた。",
+          "note": "Elided subject, first line of a new scene with no name given yet. If context leaked from Scene A, an MT engine could plausibly lean female/Yuki; with a real reset, there is nothing to lean on.",
+          "assertions": [
+            { "type": "contextWindowEmpty" },
+            { "type": "mustNotContain", "text": "yuki" },
+            { "type": "mustNotContain", "text": "she" }
+          ]
+        },
+        {
+          "id": "B2",
+          "source": "分かりました、頑張ります。",
+          "note": "Cache-prime for the second cache-hit scenario, in a different scene than A1/A5 to confirm the bug isn't specific to Scene A's setup.",
+          "assertions": []
+        },
+        {
+          "id": "B3",
+          "source": "拓也は時計を見て、ため息をついた。",
+          "note": "Introduces the name Takuya (拓也), male — the scene's protagonist for the name-continuity checks.",
+          "assertions": []
+        },
+        {
+          "id": "B4",
+          "source": "「あと十分か……」と机の上の参考書を睨んだ。",
+          "note": "Normal-path context check (B3 was never a cache hit), mirrors A3/A9.",
+          "assertions": [
+            { "type": "contextWindowContains", "ref": "B3" }
+          ]
+        },
+        {
+          "id": "B5",
+          "source": "隣の席の友人が、小さく笑った。",
+          "note": "Filler #3 of 3 — same purpose as A4: puts 3 lines of separation between B2 and B6 so B2 ages out of a windowSize=2 window before the repeat.",
+          "assertions": []
+        },
+        {
+          "id": "B6",
+          "source": "分かりました、頑張ります。",
+          "note": "Verbatim repeat of B2 — second independent cache-hit scenario.",
+          "expectCacheHit": true,
+          "assertions": []
+        },
+        {
+          "id": "B7",
+          "source": "拓也はそう答えて、また問題に向き直った。",
+          "note": "Regression guard for Bug A, second instance in a different scene — expected to FAIL today for the same reason as A6.",
+          "assertions": [
+            { "type": "contextWindowContains", "ref": "B6" },
+            { "type": "mustContain", "text": "takuya" }
+          ]
+        },
+        {
+          "id": "B8",
+          "source": "先生が教室に入ってきた。",
+          "note": "Filler, introduces a neutral third character (teacher) — no gender-continuity claim attached, deliberately.",
+          "assertions": []
+        },
+        {
+          "id": "B9",
+          "source": "「静かに」と先生は言った。",
+          "note": "Normal-path context check, mirrors A9/B4.",
+          "assertions": [
+            { "type": "contextWindowContains", "ref": "B8" }
+          ]
+        },
+        {
+          "id": "B10",
+          "source": "拓也たちは静かに席についた。",
+          "note": "Scene wrap-up and final name-continuity check across the whole scene.",
+          "assertions": [
+            { "type": "mustContain", "text": "takuya" }
+          ]
+        }
+      ]
+    }
+  ]
+}

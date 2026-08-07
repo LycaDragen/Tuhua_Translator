@@ -10,13 +10,15 @@ const axios = require('axios');
 
 const XuatInstaller = require('../services/xuat-installer');
 const VndbService = require('../services/vndb');
+const textCleaning = require('../services/text-cleaning');
 
 class IpcHandlers {
-  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager) {
+  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings) {
     this.store = store;
     this.pipeline = pipeline;
     this.glossary = glossary;
     this.regexFilter = regexFilter;
+    this.hookCleaningSettings = hookCleaningSettings || null;
     this.windowManager = windowManager;
     this.textractor = textractor;
     this.clipboardWatcher = clipboardWatcher;
@@ -279,6 +281,17 @@ class IpcHandlers {
       const engineChanged = data.engine && data.engine !== currentSettings.engine;
       const sourceLangChanged = data.sourceLang && data.sourceLang !== currentSettings.sourceLang;
       const targetLangChanged = data.targetLang && data.targetLang !== currentSettings.targetLang;
+
+      // v3.13.19: Reset Context Memory on any of these three changes — mixing
+      // context lines from a different engine/source language/target language
+      // into the next translation call ranges from meaningless (DeepL's
+      // context must be the same language as the new source) to actively
+      // misleading (an LLM engine would see prior turns in the old target
+      // language while being told to now answer in a different one).
+      if (engineChanged || sourceLangChanged || targetLangChanged) {
+        this.pipeline.clearContext();
+      }
+
       if ((engineChanged || sourceLangChanged || targetLangChanged) && this._lastHandledText) {
         const newEngine = data.engine || currentSettings.engine || 'google-free';
         const newSourceLang = data.sourceLang || currentSettings.sourceLang || 'auto';
@@ -555,6 +568,36 @@ class IpcHandlers {
       return { success: true };
     });
 
+    // ===== HOOK Cleaning Settings (v3.13.21) =====
+    // Deliberately no reorder handler, unlike regex filters above — the
+    // five steps have a fixed, order-dependent pipeline (see
+    // hook-cleaning-settings.js's header comment for why letting a user
+    // reorder them would be unsafe, not just unsupported).
+    ipcMain.handle('get-hook-cleaning-steps', () => {
+      if (!this.hookCleaningSettings) return [];
+      return this.hookCleaningSettings.getAll();
+    });
+
+    ipcMain.handle('toggle-hook-cleaning-step', (event, id, enabled) => {
+      if (!this.hookCleaningSettings) return { success: false, error: 'Service not available' };
+      if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
+      const updated = this.hookCleaningSettings.toggle(id, enabled);
+      return { success: !!updated, entry: updated };
+    });
+
+    ipcMain.handle('set-hook-cleaning-cjk-only', (event, id, cjkOnly) => {
+      if (!this.hookCleaningSettings) return { success: false, error: 'Service not available' };
+      if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
+      const updated = this.hookCleaningSettings.setCjkOnly(id, cjkOnly);
+      return { success: !!updated, entry: updated };
+    });
+
+    ipcMain.handle('reset-hook-cleaning-steps', () => {
+      if (!this.hookCleaningSettings) return { success: false, error: 'Service not available' };
+      this.hookCleaningSettings.resetToDefaults();
+      return { success: true };
+    });
+
     // ===== VNDB Glossary Import (v3.11.25) =====
     // Search VNDB for visual novels by title
     ipcMain.handle('vndb-search', async (event, query) => {
@@ -614,6 +657,12 @@ class IpcHandlers {
 
     ipcMain.handle('clear-history', () => {
       this.pipeline.clearHistory();
+      return { success: true };
+    });
+
+    // ===== Context Memory =====
+    ipcMain.handle('clear-context', () => {
+      this.pipeline.clearContext();
       return { success: true };
     });
 
@@ -845,6 +894,11 @@ class IpcHandlers {
       const mergedSettings = { ...this.store.get(), ...profileSettings };
       this.store.set(mergedSettings);
       this.pipeline.updateSettings(profileSettings);
+
+      // v3.13.19: A profile switch is the closest thing this app has to
+      // "changed games" — the previous game's dialogue context must not
+      // bleed into the new one.
+      this.pipeline.clearContext();
 
       // Restore glossary: only if glossary.perProfile is enabled
       const perProfileGlossary = this.store.get('perProfileGlossary', false);
@@ -1676,13 +1730,23 @@ class IpcHandlers {
         console.warn(`[Tuhua] Regex filter: Service not available`);
       }
 
-      // v3.9.5: Only apply _deduplicateText for Textractor input.
-      // For OCR text, _deduplicateText STRIPS numbers by splitting on digits
+      // v3.9.5: Only apply HOOK cleaning for Textractor input.
+      // For OCR text, this STRIPS numbers by splitting on digits
       // (e.g., "Interval of 1500ms" → "Interval of ms" — losing the "1500").
       // OCR text doesn't have Textractor's digit-delimiter pattern, so skip it.
+      // v3.13.20: Delegates to src/services/text-cleaning.js's single
+      // consolidated pipeline — this used to call this class's own
+      // _deduplicateText, which duplicated (and, before three 2026-08-06
+      // patches, diverged from) textractor-launcher.js's _cleanGameText.
+      // See text-cleaning.js's header comment for the full history.
       const currentInputMethod = this.store.get('inputMethod');
       if (currentInputMethod !== 'ocr') {
-        text = this._deduplicateText(text);
+        // v3.13.21 (Fase 2): per-step enable + cjkOnly now come from
+        // HookCleaningSettingsService, not hardcoded — defaults reproduce
+        // Fase 1's fixed pipeline exactly (verified: the bench report did
+        // not change when this service's defaults were introduced).
+        const cleaningOptions = this.hookCleaningSettings ? this.hookCleaningSettings.getOptions() : {};
+        text = textCleaning.cleanHookText(text, cleaningOptions);
       }
     }
 
@@ -1786,206 +1850,10 @@ class IpcHandlers {
     }
   }
 
-  /**
-   * Deduplicate text segments split by garbage digit delimiters.
-   * Safety net for text arriving from TCP or other sources that bypass _cleanGameText.
-   * Handles patterns like: "0I softly murmured.0I softly murmured.0" → "I softly murmured."
-   */
-  _deduplicateText(text) {
-    // v3.12.07: Lowered minimum from 4 to 3. Strategy 1 needs at least 3
-    // consecutive CJK chars to match (e.g. "桜桜桜" has length 3).
-    if (!text || text.length < 3) return text;
-
-    // v3.11.23: Improved Textractor text deduplication with multiple strategies.
-    // Textractor hooks often produce text with these patterns:
-    // 1. Character repeat: 恵恵恵麻麻麻 → 恵麻 (same char repeated N times)
-    // 2. Line repeat: ABCDABCDABCD → ABCD (full sentence repeated)
-    // 3. Incremental text: ABCDBCDCDD → ABCD (char-by-char display hook)
-    // 4. Digit-delimited segments: "1text12more2" → "text more" (old method)
-
-    // Strategy 1: CJK-only character-level deduplication
-    // If a CJK character (kanji, hiragana, katakana, hangul) appears 3+ times
-    // consecutively, collapse to single occurrence.
-    // This handles: 恵恵恵麻麻麻 → 恵麻
-    // v3.12.04: Only CJK — Latin letters (AAAAA = scream) and punctuation (!!!???)
-    // are NEVER collapsed since they're always legitimate game text, not Textractor artifacts.
-    // Textractor hooks only produce CJK duplication artifacts.
-    let result = text.replace(/([\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF])\1{2,}/g, '$1');
-
-    // Strategy 2: Check for full-line repetition
-    // ABCDABCDABCD → ABCD
-    // Try different repeat lengths
-    for (let unitLen = 1; unitLen <= Math.floor(result.length / 2); unitLen++) {
-      const unit = result.substring(0, unitLen);
-      const repeated = unit.repeat(Math.floor(result.length / unitLen));
-      // If the text is mostly the unit repeated (allowing some trailing chars)
-      if (repeated.length >= result.length * 0.8 && result.startsWith(repeated.substring(0, repeated.length))) {
-        // Verify it's actually a clean repetition
-        const fullRepeats = Math.floor(result.length / unitLen);
-        if (fullRepeats >= 2) {
-          const candidate = result.substring(0, unitLen);
-          // Only accept if the repeated unit is meaningful (not just 1-2 chars)
-          // v3.12.05: Skip if candidate is all the same character (e.g. "AA", "BBB").
-          // A repeated single letter like "AAAAAAAAA" is a legitimate game scream,
-          // not a Textractor artifact. Real Textractor repetitions have different
-          // characters in the unit (e.g. "恵麻恵麻恵麻" → unit "恵麻").
-          // v3.12.06: Only apply Strategy 2 if the candidate contains CJK characters.
-          // Textractor hooks only produce CJK duplication artifacts. Latin text
-          // repetition (e.g. "NONONONO", "HAHAHAHA") is always legitimate game
-          // content for emphasis/narrative, not Textractor artifacts.
-          // Restricting to CJK prevents losing narrative immersion.
-          const hasCJK = /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]/.test(candidate);
-          if (candidate.trim().length >= 2 && !/^(.)\1*$/.test(candidate.trim()) && hasCJK) {
-            // Verify the pattern
-            let isRepetition = true;
-            for (let i = 1; i < fullRepeats; i++) {
-              if (result.substring(i * unitLen, (i + 1) * unitLen) !== candidate) {
-                isRepetition = false;
-                break;
-              }
-            }
-            if (isRepetition) {
-              result = candidate;
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    // Strategy 3: Incremental text pattern
-    // ABCDBCDCDD → ABCD (each line adds one more character)
-    // This happens with character-by-character display hooks
-    // The pattern is: S1, S1+S2, S1+S2+S3, ... where each adds one char
-    // The final text contains all previous text as prefixes
-    if (result.length > 10) {
-      // Check if removing each char from the end gives us a prefix of the remaining text
-      const lines = [];
-      let current = '';
-      // Try to find the incremental pattern by looking at the end
-      // If the last N chars appear N times as suffixes, it's incremental
-      let incrementalCleaned = this._removeIncrementalPattern(result);
-      if (incrementalCleaned && incrementalCleaned.length < result.length) {
-        result = incrementalCleaned;
-      }
-    }
-
-    // Strategy 4: Original digit-delimiter deduplication (from v3.8.25)
-    // Split by digit delimiters that separate repeated text segments
-    // v3.12.07: Only apply when actual duplicates are found. Previously,
-    // splitting "HP:100 MP:50" by digits gave ["HP:", " MP:"] which are
-    // all different — but the code still joined them (losing the numbers).
-    // Now we track whether any duplicates were removed; if none were,
-    // we keep the original text with its digits intact.
-    const segments = result.split(/\d+/)
-      .map(s => s.trim())
-      .filter(s => s.length >= 2);
-
-    if (segments.length > 1) {
-      // Deduplicate: keep only unique segments, track if any were removed
-      const unique = [];
-      let duplicatesFound = false;
-      for (const seg of segments) {
-        let isDupe = false;
-        for (let i = 0; i < unique.length; i++) {
-          const existing = unique[i];
-          // Exact duplicate (case-insensitive)
-          if (existing.toLowerCase() === seg.toLowerCase()) {
-            isDupe = true;
-            break;
-          }
-          // One is a prefix/suffix of the other — keep the longer one
-          if (existing.toLowerCase().startsWith(seg.toLowerCase()) ||
-              seg.toLowerCase().startsWith(existing.toLowerCase())) {
-            if (seg.length > existing.length) unique[i] = seg;
-            isDupe = true;
-            break;
-          }
-          if (existing.toLowerCase().endsWith(seg.toLowerCase()) ||
-              seg.toLowerCase().endsWith(existing.toLowerCase())) {
-            if (seg.length > existing.length) unique[i] = seg;
-            isDupe = true;
-            break;
-          }
-        }
-        if (isDupe) {
-          duplicatesFound = true;
-        } else {
-          unique.push(seg);
-        }
-      }
-
-      // Only replace the result if we actually found duplicates to remove.
-      // If all segments were unique, the digits were meaningful content
-      // (e.g. "HP:100 MP:50" → segments ["HP:", "MP:"] → no dupes → keep original)
-      if (duplicatesFound) {
-        if (unique.length === 1) return unique[0];
-        result = unique.join(' ');
-      }
-    }
-
-    // Strip any remaining leading/trailing garbage
-    // v3.12.02: Guard — only strip digits if there's actual text (letters/CJK) remaining.
-    // Without this guard, pure numbers like "12345" (from NFKC normalizing fullwidth digits)
-    // get completely erased to "".
-    // v3.12.07: Simplified guards:
-    // - Leading digits: always strip (Textractor artifacts like "1.Hello" or "3text")
-    //   The v3.12.06 guard for "1st/2nd" was overcorrecting; real game text rarely
-    //   starts with digits followed by letters.
-    // - Trailing digits: only strip if NOT preceded by a colon, since game stats
-    //   like "HP:100" or "MP:50" have meaningful trailing digits after colons.
-    const hasLetters = /[a-zA-Z\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF\u0400-\u052F]/.test(result);
-    if (hasLetters) {
-      result = result.replace(/^[\d.]+\s*/, ''); // Leading garbage digits+dots
-      // Only strip trailing digits if NOT preceded by a colon
-      // ("1text2" → "1text", but "HP:100" → preserved)
-      if (!/[:：]\s*\d+\s*$/.test(result)) {
-        result = result.replace(/\d+\s*$/, '');     // Trailing garbage digits only
-      }
-    }
-    return result.trim();
-  }
-
-  /**
-   * v3.11.23: Remove incremental display pattern from Textractor hooks.
-   * Character-by-character display hooks produce: "A" "AB" "ABC" "ABCD"
-   * which arrives as concatenated text "ABCDBCDCDD" or similar.
-   * We want to extract just "ABCD".
-   */
-  _removeIncrementalPattern(text) {
-    if (!text || text.length < 4) return text;
-
-    // Try to find the longest string that, when incremented char by char,
-    // produces the observed text pattern.
-    // Simple approach: find the longest prefix that is repeated with incremental additions
-    for (let baseLen = Math.min(50, Math.floor(text.length / 2)); baseLen >= 2; baseLen--) {
-      const base = text.substring(0, baseLen);
-      let pos = 0;
-      let expected = base;
-      let found = true;
-
-      while (pos < text.length) {
-        if (text.substring(pos, pos + expected.length) === expected) {
-          pos += expected.length;
-          // Next expected is one char longer (or same if we're at a boundary)
-          if (pos < text.length) {
-            expected = text.substring(0, Math.min(baseLen + (expected.length - baseLen) + 1, text.length - pos + expected.length));
-          }
-        } else {
-          found = false;
-          break;
-        }
-        // Safety: don't loop forever
-        if (expected.length > text.length) break;
-      }
-
-      if (found && pos >= text.length * 0.8) {
-        return base;
-      }
-    }
-
-    return null;
-  }
+  // v3.13.20: _deduplicateText and _removeIncrementalPattern moved to
+  // src/services/text-cleaning.js (cleanHookText, detectGrowingPrefix) as
+  // part of consolidating the previously-duplicated dedup logic that used
+  // to be split across this file and textractor-launcher.js.
 
   /**
    * Capture the screen region defined by the capture area window bounds.
@@ -2083,7 +1951,7 @@ class IpcHandlers {
       'get-settings', 'save-settings',
       'get-glossary', 'save-glossary', 'delete-glossary-entry',
       'import-glossary', 'export-glossary',
-      'get-history', 'clear-history', 'export-history',
+      'get-history', 'clear-history', 'export-history', 'clear-context',
       'get-profiles', 'save-profile', 'delete-profile', 'load-profile',
       'validate-api-key', 'test-connection', 'detect-font-family',
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-set-language',

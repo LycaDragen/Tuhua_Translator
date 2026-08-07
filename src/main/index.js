@@ -20,6 +20,7 @@ const XuatServer = require('../services/xuat-server');
 const TranslationPipeline = require('../services/translation/pipeline');
 const GlossaryService = require('../services/translation/glossary');
 const RegexFilterService = require('../services/regex-filter');
+const HookCleaningSettingsService = require('../services/hook-cleaning-settings');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -48,6 +49,7 @@ let glossary;
 let ocrService;
 let xuatServer;
 let regexFilter;
+let hookCleaningSettings;
 
 app.whenReady().then(() => {
   // Initialize store with defaults
@@ -110,9 +112,10 @@ app.whenReady().then(() => {
   // Initialize services
   glossary = new GlossaryService();
   regexFilter = new RegexFilterService();
+  hookCleaningSettings = new HookCleaningSettingsService();
   pipeline = new TranslationPipeline(settings);
   textractor = new TextractorConnector(settings.textractorPort || 9251);
-  textractorLauncher = new TextractorLauncher();
+  textractorLauncher = new TextractorLauncher(hookCleaningSettings);
   clipboardWatcher = new ClipboardWatcher({ interval: 500 });
   ocrService = new OcrService();
 
@@ -189,7 +192,7 @@ app.whenReady().then(() => {
   shortcuts.register();
 
   // Initialize IPC handlers (v3.11.25: pass shortcuts for OCR hotkey integration)
-  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts);
+  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings);
   ipcHandlers.register();
 
   // v3.13.07: Improved startup overlay state management.

@@ -30,6 +30,7 @@ const EventEmitter = require('events');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const textCleaning = require('./text-cleaning');
 
 /**
  * Interpret Windows exit codes into human-readable messages.
@@ -55,8 +56,13 @@ function interpretExitCode(code) {
 }
 
 class TextractorLauncher extends EventEmitter {
-  constructor() {
+  constructor(hookCleaningSettings) {
     super();
+    // v3.13.20: optional — if not passed (e.g. a test constructing this
+    // class directly), _cleanGameText falls back to cleanHookText's
+    // built-in defaults, which are the same values this service ships
+    // with (all steps enabled, cjkOnly true).
+    this.hookCleaningSettings = hookCleaningSettings || null;
     this.process = null;
     this.cliPath = '';
     this.isRunning = false;
@@ -891,227 +897,57 @@ class TextractorLauncher extends EventEmitter {
   /**
    * Clean game text before sending to translation pipeline.
    * v3.8.25: Fixes common Textractor text issues.
-   *
-   * Fixes applied:
-   * 1. Strip null bytes and control characters
-   * 2. Remove progressive counter patterns ("0\n0\n0..." or "1\n2\n3...")
-   * 3. Split text by garbage digit delimiters and deduplicate repeated segments
-   *    (e.g. "0I softly murmured to myself.0I softly murmured to myself.0" → "I softly murmured to myself.")
-   * 4. Detect and fix doubled characters ("NNooww" → "Now")
-   * 5. Strip excessive whitespace and leading/trailing garbage
+   * v3.13.20: Reduced to launcher-specific framing (progressive counter
+   * lines are a stdout artifact that TCP never sees) plus whitespace
+   * normalize. The dedup/artifact-removal work (control chars, char/line
+   * repeat collapse, doubled-text fix, digit-delimiter dedup, garbage
+   * digit stripping) now lives once in src/services/text-cleaning.js and
+   * is delegated to here — previously this method duplicated most of that
+   * logic itself, and ipc-handlers.js's _handleText ran a near-identical
+   * second copy on the same text a second time after this emitted it.
+   * Confirmed idempotent (see plan-hook-text-cleaning's Fase 1 section)
+   * so calling cleanHookText here AND again in _handleText is harmless,
+   * not a correctness requirement to avoid — this method still calls it
+   * directly (rather than emitting unclean text) so the hook-preview UI
+   * (_cleanGameText is also called for previews, not just the actual
+   * emit path) shows accurately cleaned text.
    */
   _cleanGameText(text) {
     if (!text) return text;
-
     let cleaned = text;
 
-    // 1. Strip null bytes and control characters (except newline, tab)
-    cleaned = cleaned.replace(/[\u0000\u0001-\u0008\u000B\u000C\u000E-\u001F\uFEFF]/g, '');
-
-    // 2. Remove progressive counter patterns
-    //    Textractor sometimes outputs progressive char-by-char updates like:
-    //    " 0\n  0\n   0\n    0" which are just cursor position indicators
-    //    Remove lines that are just a number with leading/trailing whitespace
-    cleaned = cleaned.split('\n')
+    // Progressive counter lines: Textractor sometimes outputs progressive
+    // char-by-char cursor-position updates as short numeric-only lines.
+    // Launcher/stdout-specific framing (TCP delivers text differently and
+    // never has this problem), so this stays here rather than moving to
+    // the shared module.
+    cleaned = cleaned.split("\n")
       .filter(line => {
         const trimmed = line.trim();
-        // Skip lines that are just a number
         if (/^\d+$/.test(trimmed) && trimmed.length <= 3) return false;
-        // Skip lines that are only whitespace
         if (/^\s*$/.test(line)) return false;
         return true;
       })
-      .join(' ');
+      .join(" ");
 
-    // 3. Split by garbage digit delimiters and deduplicate
-    //    VN engines and Textractor often produce patterns like:
-    //    "0I softly murmured to myself.0I softly murmured to myself.0"
-    //    "0... Now that I'm on my own I'll have to do my best0"
-    //    The "0" (or other single digits) act as delimiters between repeated text segments
-    //    Strategy: split by isolated digit delimiters, collect non-empty segments,
-    //    and keep only unique ones (deduplicate exact and near-duplicate repetitions)
-    cleaned = this._deduplicateSegments(cleaned);
+    // v3.13.20: settings-derived options, not defaults — if this ran with
+    // defaults regardless of what the user configured, a step disabled via
+    // settings would still fire here (the launcher route's FIRST pass),
+    // making the setting silently ineffective on this route even though
+    // _handleText's second pass (also settings-aware) would correctly skip
+    // it — there'd just be nothing left for it to skip.
+    const cleaningOptions = this.hookCleaningSettings ? this.hookCleaningSettings.getOptions() : {};
+    cleaned = textCleaning.cleanHookText(cleaned, cleaningOptions);
 
-    // 4. Detect and fix doubled characters
-    //    "NNooww tthhaatt" → "Now that"
-    //    Check if stripping every other character produces more readable text
-    if (this._isDoubledText(cleaned)) {
-      const unDoubled = this._unDoubleText(cleaned);
-      if (unDoubled && unDoubled.length > 0) {
-        cleaned = unDoubled;
-      }
-    }
+    // Whitespace normalize — launcher-specific historically (TCP text
+    // never went through this step; preserved as-is here rather than
+    // added to the shared module, to keep this consolidation neutral on
+    // anything beyond the dedup algorithms it set out to unify).
+    cleaned = cleaned.replace(/[ \t]+/g, " ").trim();
+    cleaned = cleaned.replace(/\n+/g, " ");
 
-    // 5. Normalize whitespace
-    cleaned = cleaned.replace(/[ \t]+/g, ' ').trim();
-    // Collapse multiple newlines into single space (unless they're meaningful)
-    cleaned = cleaned.replace(/\n+/g, ' ');
-
-    // 6. Strip leading garbage: isolated digits/dots at the start
-    //    "0I softly..." → "I softly..." (digit glued to letter = garbage delimiter)
-    //    "0... Now that..." → "Now that..." (digit+dot prefix)
-    //    ". Now that..." → "Now that..." (lone dot prefix)
-    //    BUT: "3 hours" should NOT be stripped (number is part of the text)
-    //    Strategy: strip leading digits/dots only when they're clearly garbage
-    //    - A single digit followed by a letter (no space) = garbage: "0I..." → "I..."
-    //    - Digits+dot followed by space and letter = garbage: "0... Now" → "Now"
-    //    - Multiple digits followed by letter = garbage: "00I..." → "I..."
-    cleaned = cleaned.replace(/^\d+(?=[A-Za-z])/, '');  // "0I..." → "I..."
-    cleaned = cleaned.replace(/^\d*\.\s+/, '');          // "0. " or ". " → strip
-    cleaned = cleaned.replace(/^\.{2,}\s*/, '');         // "... " → strip (ellipsis garbage)
-    // Strip trailing garbage digits (NOT dots — those could be sentence-ending punctuation)
-    //    "...to myself.0" → "...to myself." (only strip trailing digit)
-    cleaned = cleaned.replace(/\d+\s*$/, '');
-
-    // 7. Final cleanup: strip any remaining leading/trailing whitespace
-    cleaned = cleaned.trim();
-
-    return cleaned;
+    return cleaned.trim();
   }
-
-  /**
-   * Split text by garbage digit delimiters and deduplicate repeated segments.
-   *
-   * Textractor + VN engines commonly produce text like:
-   *   "0I softly murmured to myself.0I softly murmured to myself.0"
-   *   "0... Now that I'm on my own0"
-   *   "1Hello world2Hello world3"
-   *
-   * These digit delimiters are NOT part of the game text — they are
-   * memory counters, buffer indicators, or rendering artifacts.
-   *
-   * Strategy:
-   *   1. Split the text by isolated digit delimiters (single digits that separate segments)
-   *   2. Collect non-empty, meaningful segments
-   *   3. Deduplicate: if segments are identical or one is a prefix of another, keep the longest
-   *   4. Return the deduplicated text
-   */
-  _deduplicateSegments(text) {
-    if (!text || text.length < 4) return text;
-
-    // Split by single-digit delimiters that separate text segments
-    // Pattern: a digit (0-9) that acts as a boundary between text segments
-    // e.g., "0I softly murmured.0I softly murmured.0" splits into ["I softly murmured.", "I softly murmured."]
-    const segments = text.split(/\d+/)
-      .map(s => s.trim())
-      .filter(s => s.length >= 2); // Keep segments with at least 2 chars
-
-    if (segments.length <= 1) {
-      // No delimiters found or only one segment — return as-is
-      return text;
-    }
-
-    // Deduplicate: find unique segments
-    // Two segments are "duplicates" if:
-    //   - They are identical (case-insensitive)
-    //   - One is a prefix/suffix of the other
-    const unique = [];
-    for (const seg of segments) {
-      let isDupe = false;
-      for (let i = 0; i < unique.length; i++) {
-        const existing = unique[i];
-        // Exact duplicate (case-insensitive)
-        if (existing.toLowerCase() === seg.toLowerCase()) {
-          isDupe = true;
-          break;
-        }
-        // One is a prefix of the other — keep the longer one
-        if (existing.toLowerCase().startsWith(seg.toLowerCase()) ||
-            seg.toLowerCase().startsWith(existing.toLowerCase())) {
-          // Keep the longer segment
-          if (seg.length > existing.length) {
-            unique[i] = seg;
-          }
-          isDupe = true;
-          break;
-        }
-        // One is a suffix of the other
-        if (existing.toLowerCase().endsWith(seg.toLowerCase()) ||
-            seg.toLowerCase().endsWith(existing.toLowerCase())) {
-          if (seg.length > existing.length) {
-            unique[i] = seg;
-          }
-          isDupe = true;
-          break;
-        }
-        // Near-duplicate: very similar (Levenshtein-like check for short strings)
-        // If 80%+ of characters match, consider it a duplicate
-        if (seg.length > 5 && existing.length > 5) {
-          const shorter = seg.length < existing.length ? seg : existing;
-          const longer = seg.length < existing.length ? existing : seg;
-          let matchCount = 0;
-          for (let j = 0; j < shorter.length; j++) {
-            if (shorter[j].toLowerCase() === longer[j].toLowerCase()) {
-              matchCount++;
-            }
-          }
-          if (matchCount / shorter.length > 0.85) {
-            if (seg.length > existing.length) {
-              unique[i] = seg;
-            }
-            isDupe = true;
-            break;
-          }
-        }
-      }
-      if (!isDupe) {
-        unique.push(seg);
-      }
-    }
-
-    // If deduplication reduced multiple segments to 1, return that
-    if (unique.length === 1) {
-      return unique[0];
-    }
-
-    // If we still have multiple unique segments, join them
-    // (they might be different parts of the dialogue)
-    return unique.join(' ');
-  }
-
-  /**
-   * Check if text has doubled characters pattern.
-   * "NNooww" → each pair has same char → true
-   */
-  _isDoubledText(text) {
-    if (!text || text.length < 6) return false;
-    const stripped = text.replace(/\s+/g, '');
-    if (stripped.length < 6) return false;
-    let doubledPairs = 0;
-    let totalPairs = 0;
-    for (let i = 0; i < stripped.length - 1; i += 2) {
-      totalPairs++;
-      if (stripped[i] === stripped[i + 1]) {
-        doubledPairs++;
-      }
-    }
-    if (totalPairs < 3) return false;
-    return (doubledPairs / totalPairs) > 0.6;
-  }
-
-  /**
-   * Fix doubled text by taking every other character.
-   * "NNooww  tthhaatt" → "Now that"
-   */
-  _unDoubleText(text) {
-    if (!text) return text;
-    // Process character by character, keeping one of each doubled pair
-    let result = '';
-    let i = 0;
-    while (i < text.length) {
-      const ch = text[i];
-      // If next char is same, skip it (un-double)
-      if (i + 1 < text.length && text[i + 1] === ch) {
-        result += ch;
-        i += 2; // Skip the doubled char
-      } else {
-        result += ch;
-        i++;
-      }
-    }
-    return result;
-  }
-
   /**
    * Process stdout data — with UTF-16LE auto-detection, BOM stripping, hex dump diagnostics.
    * v3.8.24: Auto-detects UTF-16LE encoding from TextractorCLI on Windows.

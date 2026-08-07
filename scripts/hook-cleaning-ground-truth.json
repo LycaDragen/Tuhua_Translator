@@ -1,0 +1,217 @@
+{
+  "_meta": {
+    "description": "HOOK text-cleaning ground truth — garbage in, clean text out, exact match (no ambiguity, unlike the Context Memory bench's assertions). Three groups: (1) Luna Translator's 5 canonical HOOK dedup patterns isolated, (2) regressions that must survive on both routes unchanged, (3) gaps that differ by underlying mechanism (3a: route-wiring gap, fixed by Fase 1 consolidation; 3b: cjkOnly-restriction gap, only fixable by Fase 3 relaxing it, and only if it does not break group 2).",
+    "routes": [
+      "tcp",
+      "launcher"
+    ],
+    "routesNote": "Each entry is run through BOTH composed routes (cleanViaTcpRoute, cleanViaLauncherRoute in scripts/lib/hook-cleaning-snapshot.js). Entries with a real Textractor hook prefix in `input` should set `hookPrefixed: true` so the bench knows to pass it through as-is for the TCP route and strip it before the launcher route (which never sees the prefix in production — the launcher parses it separately, see textractor-launcher.js's _parseHookLine)."
+  },
+  "entries": [
+    {
+      "id": "L8_3x",
+      "group": 1,
+      "input": "恵恵恵麻麻麻さんは再び液タブへ視線を落とす。",
+      "expected": "恵麻さんは再び液タブへ視線を落とす。",
+      "appliesTo": [
+        "luna#8"
+      ],
+      "note": "Char repeated 3x+ (Luna's own documentation example). Covered today by Strategy 1's regex (\\1{2,} requires 3+ total occurrences).",
+      "hookPrefixed": false
+    },
+    {
+      "id": "L8_2x",
+      "group": 1,
+      "input": "桜桜咲咲久久です",
+      "expected": "桜咲久です",
+      "appliesTo": [
+        "luna#8"
+      ],
+      "note": "Char repeated EXACTLY 2x (doubled), CJK. The gap: Strategy 1's regex requires 3+ occurrences (\\1{2,}), so a clean 2x double passes through untouched on the TCP route. Only _cleanGameText's _isDoubledText/_unDoubleText (launcher route only) catches this.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "L9_cjk",
+      "group": 1,
+      "input": "ありがとうありがとうありがとう",
+      "expected": "ありがとう",
+      "appliesTo": [
+        "luna#9"
+      ],
+      "note": "Full CJK line/sentence repeated 3x, no delimiter. Covered today by Strategy 2 (both routes).",
+      "hookPrefixed": false
+    },
+    {
+      "id": "L9_latin_gap",
+      "group": 1,
+      "input": "I love you.I love you.I love you.",
+      "expected": "I love you.",
+      "appliesTo": [
+        "luna#9",
+        "cjkOnly-gap"
+      ],
+      "note": "Same pattern as L9_cjk but in English. FAILS on both routes today — Strategy 2 requires the candidate unit to contain a CJK character (hasCJK check), so pure-Latin full-sentence repetition is never collapsed by either route. This is a Fase-3 cjkOnly-relaxation candidate, not a route-wiring gap (both routes already share the same Strategy 2 code) — relaxing cjkOnly must not break the Group 2 latin-scream rows.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "L10",
+      "group": 1,
+      "input": "やめてやめてやめてお願いお願いお願い",
+      "expected": "やめてお願い",
+      "appliesTo": [
+        "luna#10"
+      ],
+      "note": "Multi-sentence variable refresh rate: S1 repeated 3x, then S2 repeated 3x, concatenated. FAILS today — no existing strategy handles this; the closest (Strategy 2) only detects a SINGLE repeating unit across the whole string, not two different repeating units back to back. Luna's own docs call this \"complex deduplication logic\" and expose a configurable repetition-count parameter because auto-detection isn't reliable — worth replicating that escape hatch in Fase 3, not just the heuristic.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "L11",
+      "group": 1,
+      "input": "ありがとうりがとうがとうとうう",
+      "expected": "ありがとう",
+      "appliesTo": [
+        "luna#11"
+      ],
+      "note": "Progressive substring calls where parameters DECREASE (shrinking suffix): full string, then drop 1 char from the front each time, concatenated. Expected = the FIRST/longest/complete segment. FAILS today — confirmed by direct execution that _removeIncrementalPattern (the function whose docstring claims to handle exactly this example, \"ABCDBCDCDD\") returns null on every realistic input tested, including its own textbook example. Effectively dead code, not a mislabeled algorithm.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "L12",
+      "group": 1,
+      "input": "ああいあいうあいうえあいうえお",
+      "expected": "あいうえお",
+      "appliesTo": [
+        "luna#12"
+      ],
+      "note": "Character-by-character redraw (growing prefix): \"A\"+\"AB\"+\"ABC\"+... concatenated. Expected = the LAST/longest/complete segment (opposite end from L11). FAILS today for the same reason as L11 — _removeIncrementalPattern returns null on this pattern too, verified directly, not assumed from reading the code. The approved plan originally guessed this function implemented Luna #12 by misreading its structure; running it against this exact case disproved that.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_scream_single",
+      "group": 2,
+      "input": "AAAAA",
+      "expected": "AAAAA",
+      "appliesTo": [
+        "strategy1",
+        "strategy2"
+      ],
+      "note": "Single-char Latin scream must never collapse — legitimate emphasis, not a Textractor artifact (v3.12.04/06 regression guard).",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_scream_2unit",
+      "group": 2,
+      "input": "HAHAHAHA",
+      "expected": "HAHAHAHA",
+      "appliesTo": [
+        "strategy2"
+      ],
+      "note": "2-char repeating Latin unit (\"HA\") must never collapse — same regression class as above.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_scream_nono",
+      "group": 2,
+      "input": "NONONONO",
+      "expected": "NONONONO",
+      "appliesTo": [
+        "strategy2"
+      ],
+      "note": "Another documented real-world Latin emphasis case from the code's own comments.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_stats_colon",
+      "group": 2,
+      "input": "HP:100 MP:50",
+      "expected": "HP:100 MP:50",
+      "appliesTo": [
+        "strategy4",
+        "deduplicateSegments"
+      ],
+      "note": "Digit-delimiter dedup must not eat meaningful Label:Number pairs. This was the active data-loss bug patched 2026-08-06 on the launcher route (both _deduplicateSegments and _cleanGameText's trailing-digit strip).",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_leading_number_word",
+      "group": 2,
+      "input": "3 hours",
+      "expected": "3 hours",
+      "appliesTo": [
+        "strategy4-leading-strip"
+      ],
+      "note": "A legitimate leading number followed by a space+word must survive. Second data-loss bug patched 2026-08-06 (_deduplicateText's leading-digit strip had no space-awareness, unlike _cleanGameText's copy).",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_leading_number_word2",
+      "group": 2,
+      "input": "3 people arrived",
+      "expected": "3 people arrived",
+      "appliesTo": [
+        "strategy4-leading-strip"
+      ],
+      "note": "Same class as above, different wording — guards against the fix being coincidentally correct for only one exact string.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_real_digit_dup",
+      "group": 2,
+      "input": "0I softly murmured to myself.0I softly murmured to myself.0",
+      "expected": "I softly murmured to myself.",
+      "appliesTo": [
+        "strategy4",
+        "deduplicateSegments"
+      ],
+      "note": "The actual positive case Strategy 4 exists for — digit delimiters ARE garbage here since the segments are true duplicates. Must still work after the two data-loss patches above (guards should only suppress the destructive path, not the whole feature).",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_jp_quotes",
+      "group": 2,
+      "input": "「静かに」と先生は言った。",
+      "expected": "「静かに」と先生は言った。",
+      "appliesTo": [
+        "none"
+      ],
+      "note": "Ordinary Japanese dialogue with legitimate quotation marks — must pass through completely untouched by all HOOK dedup strategies.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_hook_prefix_real_text",
+      "group": 2,
+      "input": "[0x004A1B20:1:GameThread] 恵恵恵麻麻麻さんは再び。",
+      "expected": "恵麻さんは再び。",
+      "appliesTo": [
+        "stripHookPrefix",
+        "strategy1"
+      ],
+      "note": "TCP-route-only case: real hook prefix wrapping a char-repeat artifact — confirms stripHookPrefix + downstream dedup compose correctly.",
+      "hookPrefixed": true
+    },
+    {
+      "id": "G3a_doubled_latin",
+      "group": 3,
+      "input": "NNooww tthhaatt",
+      "expected": "Now that",
+      "appliesTo": [
+        "unDoubleText",
+        "route-gap"
+      ],
+      "note": "Route-composition gap, confirmed asymmetric today: launcher route correctly un-doubles this via _isDoubledText/_unDoubleText; TCP route has no equivalent step at all and leaves it completely untouched. Fixed by Fase 1 applying the same doubled-text check to both routes — NOT a cjkOnly question, this mechanism has no CJK restriction, it's simply missing from one route entirely.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G3b_sentence_repeat_latin",
+      "group": 3,
+      "input": "Now that I am on my own.Now that I am on my own.Now that I am on my own.",
+      "expected": "Now that I am on my own.",
+      "appliesTo": [
+        "strategy2",
+        "cjkOnly-gap"
+      ],
+      "note": "cjkOnly-restriction gap, confirmed symmetric today: FAILS on both routes identically (same Strategy 2 code, same hasCJK gate). Only fixable in Fase 3 by relaxing cjkOnly for Strategy 2 specifically — and only if doing so doesn't break Group 2's Latin-scream rows (G2_scream_*). This is the OTHER half of L9_latin_gap in Group 1; kept as a separate row here because it's what \"does relaxing cjkOnly help\" gets scored against directly.",
+      "hookPrefixed": false
+    }
+  ]
+}

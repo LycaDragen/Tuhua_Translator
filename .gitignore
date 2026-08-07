@@ -80,6 +80,8 @@ test-assets/
 test-images/
 tests/screenshots/
 scripts/ocr-report.json
+scripts/context-report.json
+scripts/hook-cleaning-report.json
 
 # ── Coverage ──
 coverage/

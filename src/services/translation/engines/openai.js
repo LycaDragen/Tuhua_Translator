@@ -14,8 +14,8 @@ class OpenAIEngine {
     this.model = options.model || 'gpt-3.5-turbo';
     this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
     this.systemPrompt = options.systemPrompt || '';
-    this.contextHistory = [];
-    this.maxContext = options.maxContext || 5;
+    // v3.13.19: Context is owned by the pipeline's ContextMemory, passed in
+    // via options.context — see context-memory.js.
     this.supportedLanguages = [
       'ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh', 'ar', 'hi', 'th', 'vi'
     ];
@@ -59,7 +59,7 @@ Output:`;
     }
 
     // Add context history for better translation quality
-    for (const ctx of this.contextHistory) {
+    for (const ctx of options.context || []) {
       messages.push({ role: 'user', content: ctx.source });
       messages.push({ role: 'assistant', content: ctx.translation });
     }
@@ -88,12 +88,6 @@ Output:`;
       throw new Error('Empty OpenAI response');
     }
 
-    // Add to context history
-    this.contextHistory.push({ source: text, translation });
-    if (this.contextHistory.length > this.maxContext) {
-      this.contextHistory.shift();
-    }
-
     return {
       text: translation,
       detectedLang: null,
@@ -107,10 +101,6 @@ Output:`;
 
   setModel(model) {
     this.model = model;
-  }
-
-  clearContext() {
-    this.contextHistory = [];
   }
 }
 

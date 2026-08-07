@@ -87,9 +87,10 @@ class DeepLEngine {
     // DeepL ignores it silently instead of returning an error.
     this.formality = formality;
 
-    // v3.11.23: Context — recent translation history for better quality
-    this.contextHistory = [];
-    this.maxContext = options.maxContext || 3;
+    // v3.13.19: Context is no longer stored on the engine — it's owned by the
+    // pipeline's ContextMemory and passed in via options.context on each call.
+    // See context-memory.js for why (the old per-engine contextHistory never
+    // received cache/TM hits, and nothing ever called clearContext()).
 
     // v3.11.28: Custom instructions — natural language directives
     // Up to 10 instructions, max 300 chars each.
@@ -249,8 +250,11 @@ class DeepLEngine {
     // DeepL's context parameter accepts additional text that influences translation
     // but is not translated itself. Characters in context are NOT billed.
     // We send the last few source strings as context for better disambiguation.
-    if (this.contextHistory.length > 0) {
-      const contextTexts = this.contextHistory.slice(-this.maxContext).map(h => h.source);
+    // v3.13.19: context now comes from the pipeline's ContextMemory (already
+    // capped to the configured window size), not a per-engine array.
+    const contextWindow = options.context || [];
+    if (contextWindow.length > 0) {
+      const contextTexts = contextWindow.map(h => h.source);
       const contextStr = contextTexts.join(' ');
       // DeepL recommends context < 2000 chars, and it must be same language as source
       if (contextStr.length > 0 && contextStr.length <= 2000) {
@@ -299,12 +303,6 @@ class DeepLEngine {
           engine: this.name
         };
 
-        // Add to context history for next translation
-        this.contextHistory.push({ source: text, translation: result.text });
-        if (this.contextHistory.length > this.maxContext) {
-          this.contextHistory.shift();
-        }
-
         log.info(`[DeepL] Success: "${text.substring(0, 30)}..." → "${result.text.substring(0, 30)}..."`);
         return result;
       }
@@ -346,11 +344,6 @@ class DeepLEngine {
               detectedLang: data.translations[0].detected_source_language?.toLowerCase() || null,
               engine: this.name
             };
-
-            this.contextHistory.push({ source: text, translation: result.text });
-            if (this.contextHistory.length > this.maxContext) {
-              this.contextHistory.shift();
-            }
 
             return result;
           }
@@ -430,9 +423,6 @@ class DeepLEngine {
     this.translationMemoryThreshold = threshold || 75;
   }
 
-  clearContext() {
-    this.contextHistory = [];
-  }
 }
 
 // Export the feature sets and default instructions for use by the UI (pipeline/renderer)

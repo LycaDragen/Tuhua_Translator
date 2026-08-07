@@ -831,13 +831,17 @@
                             <textarea id="system-prompt" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono resize-none" data-i18n-ph="system_prompt_ph" placeholder="Custom instructions for LLM engines..." oninput="markUnsaved()"></textarea>
                         </div>
                         <!-- Context History -->
-                        <div>
+                        <div id="context-history-section">
                             <div class="flex justify-between mb-1">
                                 <span class="text-[10px] text-gray-400" data-i18n="context_history">Context History</span>
                                 <span id="context-val" class="text-[10px] font-mono text-emerald-500">5</span>
                             </div>
                             <input type="range" id="context-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('context-val').innerText=this.value; markUnsaved()">
-                            <p class="text-[9px] text-gray-500" data-i18n="context_history_desc">Previous lines sent as context for LLM engines.</p>
+                            <p id="context-unsupported-note" class="hidden text-[9px] text-amber-500 mt-1" data-i18n="context_unsupported_note">This engine translates each line independently — context has no effect here.</p>
+                            <div class="flex items-center justify-between mt-1">
+                                <p class="text-[9px] text-gray-500" data-i18n="context_history_desc">Previous lines sent as context for LLM engines.</p>
+                                <button onclick="clearContext()" class="shrink-0 ml-2 text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition" data-i18n="context_clear_btn">Clear Now</button>
+                            </div>
                         </div>
                         <!-- History Limit -->
                         <div>
@@ -915,6 +919,113 @@
                             <textarea id="regex-test-input" rows="2" class="w-full p-1.5 rounded bg-white dark:bg-dark-900 border border-blue-200 dark:border-blue-800 text-[10px] resize-none" placeholder='Ej: {桢字/かんじ}こんにちは<c[2]>世界' oninput="runRegexFilterTest()"></textarea>
                             <div id="regex-test-output" class="text-[10px] text-emerald-600 dark:text-emerald-400 bg-white dark:bg-dark-900 p-1.5 rounded border border-gray-200 dark:border-dark-600 min-h-[20px]"></div>
                             <div id="regex-test-steps" class="text-[8px] text-gray-400 space-y-0.5"></div>
+                        </div>
+
+                        <!-- HOOK Cleaning Steps (v3.13.21) -->
+                        <div class="pt-3 mt-1 border-t border-gray-200 dark:border-dark-600">
+                            <div class="flex items-center justify-between mb-1">
+                                <span class="text-[10px] font-bold text-gray-400 uppercase" data-i18n="hook_clean_section_title">Limpieza HOOK</span>
+                                <button onclick="resetHookCleaningSteps()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition" data-i18n="hook_clean_reset_btn">Restablecer</button>
+                            </div>
+                            <p class="text-[9px] text-gray-400 mb-2" data-i18n="hook_clean_section_desc">Deduplicación de texto de Textractor (repeticiones y basura del hook). No aplica a OCR.</p>
+                            <div class="space-y-1.5">
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_chars">Caracteres repetidos</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_chars_desc">Colapsa un carácter repetido 3+ veces (恵恵恵→恵).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-collapse-repeated-chars" onchange="toggleHookCleanStep('collapse-repeated-chars', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                    <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
+                                        <input type="checkbox" id="hook-clean-cjk-collapse-repeated-chars" onchange="toggleHookCleanCjkOnly('collapse-repeated-chars', this.checked)" class="w-3 h-3" checked>
+                                        <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
+                                    </label>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_line">Línea repetida</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_line_desc">Colapsa una oración completa repetida (ABCDABCD→ABCD).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-collapse-repeated-line" onchange="toggleHookCleanStep('collapse-repeated-line', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                    <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
+                                        <input type="checkbox" id="hook-clean-cjk-collapse-repeated-line" onchange="toggleHookCleanCjkOnly('collapse-repeated-line', this.checked)" class="w-3 h-3" checked>
+                                        <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
+                                    </label>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_variable_refresh">Repetición con conteo variable</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_variable_refresh_desc">Colapsa dos oraciones distintas repetidas cada una su propia cantidad de veces (S1S1S1S2S2S2→S1S2).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-detect-variable-refresh" onchange="toggleHookCleanStep('detect-variable-refresh', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                    <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
+                                        <input type="checkbox" id="hook-clean-cjk-detect-variable-refresh" onchange="toggleHookCleanCjkOnly('detect-variable-refresh', this.checked)" class="w-3 h-3" checked>
+                                        <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
+                                    </label>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_shrinking">Sufijo decreciente</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_shrinking_desc">Detecta llamadas con parámetro decreciente (ABCD+BCD+CD+D→ABCD).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-detect-shrinking-suffix" onchange="toggleHookCleanStep('detect-shrinking-suffix', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_doubled">Texto doblado</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_doubled_desc">Corrige texto donde cada carácter aparece dos veces (NNooww→Now).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-undouble-text" onchange="toggleHookCleanStep('undouble-text', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_segments">Segmentos por dígito</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_segments_desc">Elimina delimitadores basura y segmentos duplicados (0texto0texto0→texto).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-deduplicate-segments" onchange="toggleHookCleanStep('deduplicate-segments', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_growing">Prefijo creciente</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_growing_desc">Detecta redibujado carácter por carácter (A+AB+ABC→ABC).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-detect-growing-prefix" onchange="toggleHookCleanStep('detect-growing-prefix', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>

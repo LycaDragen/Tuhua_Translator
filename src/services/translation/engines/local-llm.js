@@ -13,8 +13,8 @@ class LocalLLMEngine {
     this.endpoint = options.endpoint || 'http://localhost:1234/v1';
     this.model = options.model || 'local-model';
     this.systemPrompt = options.systemPrompt || '';
-    this.contextHistory = [];
-    this.maxContext = options.maxContext || 5;
+    // v3.13.19: Context is owned by the pipeline's ContextMemory, passed in
+    // via options.context — see context-memory.js.
     this.supportedLanguages = ['ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh'];
   }
 
@@ -51,7 +51,7 @@ Output:`;
       }
     }
 
-    for (const ctx of this.contextHistory) {
+    for (const ctx of options.context || []) {
       messages.push({ role: 'user', content: ctx.source });
       messages.push({ role: 'assistant', content: ctx.translation });
     }
@@ -79,11 +79,6 @@ Output:`;
       throw new Error('Empty local LLM response');
     }
 
-    this.contextHistory.push({ source: text, translation });
-    if (this.contextHistory.length > this.maxContext) {
-      this.contextHistory.shift();
-    }
-
     return {
       text: translation,
       detectedLang: null,
@@ -97,10 +92,6 @@ Output:`;
 
   setModel(model) {
     this.model = model;
-  }
-
-  clearContext() {
-    this.contextHistory = [];
   }
 }
 

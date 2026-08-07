@@ -16,6 +16,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'get-history',
   'clear-history',
   'export-history',
+  'clear-context',
   'import-glossary',
   'export-glossary',
   'get-profiles',
@@ -58,6 +59,9 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   // v3.11.30: Regex text filter
   'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
   'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',
+  // v3.13.21: HOOK cleaning step settings
+  'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
+  'reset-hook-cleaning-steps',
   // v3.13.01: PaddleOCR engine selection
   'set-ocr-engine', 'get-ocr-engine-status',
   // v3.13.08: OCR confidence threshold
@@ -152,6 +156,7 @@ const api = {
   // History
   getHistory: () => secureInvoke('get-history'),
   clearHistory: () => secureInvoke('clear-history'),
+  clearContext: () => secureInvoke('clear-context'),
   exportHistory: (filePath) => {
     if (typeof filePath !== 'string') throw new Error('Invalid file path');
     return secureInvoke('export-history', filePath);
@@ -344,6 +349,20 @@ const api = {
     return secureInvoke('test-regex-filter', text, filterId || null);
   },
   resetRegexFilters: () => secureInvoke('reset-regex-filters'),
+
+  // v3.13.21: HOOK cleaning step settings
+  getHookCleaningSteps: () => secureInvoke('get-hook-cleaning-steps'),
+  toggleHookCleaningStep: (id, enabled) => {
+    if (typeof id !== 'string') throw new Error('Invalid step ID');
+    if (typeof enabled !== 'boolean') throw new Error('Enabled must be boolean');
+    return secureInvoke('toggle-hook-cleaning-step', id, enabled);
+  },
+  setHookCleaningCjkOnly: (id, cjkOnly) => {
+    if (typeof id !== 'string') throw new Error('Invalid step ID');
+    if (typeof cjkOnly !== 'boolean') throw new Error('cjkOnly must be boolean');
+    return secureInvoke('set-hook-cleaning-cjk-only', id, cjkOnly);
+  },
+  resetHookCleaningSteps: () => secureInvoke('reset-hook-cleaning-steps'),
 
   // Platform info
   platform: process.platform,
