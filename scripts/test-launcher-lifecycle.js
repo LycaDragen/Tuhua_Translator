@@ -120,6 +120,37 @@ function installFakeSpawn() {
   return () => { cp.spawn = origSpawn; };
 }
 
+// v3.13.31: fakes the `tasklist` call inside _checkPidIsRunning. Same
+// require-order caveat as installFakeSpawn — textractor-launcher.js
+// destructures `execSync` out of child_process at require-time, so this
+// must be installed before that require, not after. Controlled via the
+// mutable `execSyncBehavior` object so individual test cases can pick a
+// mode without re-installing the fake.
+let execSyncBehavior = { mode: 'pid-found' };
+function installFakeExecSync() {
+  const origExecSync = cp.execSync;
+  cp.execSync = (cmd) => {
+    if (execSyncBehavior.mode === 'throw') {
+      throw new Error(execSyncBehavior.message || 'tasklist is not recognized');
+    }
+    if (execSyncBehavior.mode === 'pid-not-found') {
+      // tasklist's real (English) message when nothing matches the
+      // filter; deliberately does NOT contain any PID number, which is
+      // exactly what _checkPidIsRunning relies on.
+      return 'INFO: No tasks are running which match the specified criteria.\r\n';
+    }
+    // 'pid-found' (default): echo back whichever PID was actually
+    // requested, parsed out of the command string, rather than a fixed
+    // value — so launch() calls in OTHER tests (which trigger this check
+    // as a side effect with their own PIDs) don't spuriously see "not
+    // found" just because this fake doesn't recognize their PID.
+    const match = /PID eq (\d+)/.exec(cmd);
+    const pid = match ? match[1] : '0';
+    return `"TextractorCLI.exe","${pid}","Console","1","10,000 K"\r\n`;
+  };
+  return () => { cp.execSync = origExecSync; };
+}
+
 // v3.13.29: validatePath() now rejects on any process.platform !== 'win32'
 // (see Fase 5 of the plan) — correct behavior on this dev machine
 // (Linux/WSL), but this whole bench exists specifically to simulate a
@@ -135,6 +166,7 @@ function installFakeWin32Platform() {
 // Install fakes BEFORE requiring the module under test.
 const restoreFs = installFakeFs();
 const restoreSpawn = installFakeSpawn();
+const restoreExecSync = installFakeExecSync();
 const restorePlatform = installFakeWin32Platform();
 const TextractorLauncher = require('../src/services/textractor-launcher');
 
@@ -208,6 +240,33 @@ function withSilencedConsole(fn) {
   const savedLog = console.log, savedWarn = console.warn;
   console.log = () => {}; console.warn = () => {};
   try { return fn(); } finally { console.log = savedLog; console.warn = savedWarn; }
+}
+
+// ─── Test: PID liveness check (Fase "diagnosticar sin GUI", v3.13.31) ──
+// _checkPidIsRunning is a thin wrapper around a faked `tasklist` call —
+// exercises all three return values (true/false/null) via
+// execSyncBehavior, synchronous, no clock needed.
+
+function testPidLivenessCheck() {
+  const launcher = new TextractorLauncher();
+  const results = [];
+
+  execSyncBehavior = { mode: 'pid-found' };
+  results.push({ id: 'pid-check-found', pass: launcher._checkPidIsRunning(11860) === true });
+
+  execSyncBehavior = { mode: 'pid-not-found' };
+  results.push({ id: 'pid-check-not-found', pass: launcher._checkPidIsRunning(99999) === false });
+
+  execSyncBehavior = { mode: 'throw' };
+  const undetermined = withSilencedConsole(() => launcher._checkPidIsRunning(11860));
+  results.push({ id: 'pid-check-error-undetermined', pass: undetermined === null });
+
+  // Reset to the default used by the other tests in this file (their
+  // launch() calls trigger the same PID check as a side effect and
+  // shouldn't see a stale 'throw' mode bleed in from this test).
+  execSyncBehavior = { mode: 'pid-found' };
+
+  return results;
 }
 
 // ─── Test 1: timer cleanup after kill() — synchronous, no fake clock ────
@@ -436,6 +495,7 @@ function run() {
   const all = [];
 
   if (!args.only || 'windows-only-guard'.includes(args.only)) all.push(testWindowsOnlyGuard());
+  if (!args.only || 'pid-check'.includes(args.only) || 'pid-liveness'.includes(args.only)) all.push(...testPidLivenessCheck());
   if (!args.only || 'timer-cleanup-after-kill'.includes(args.only)) all.push(testTimerCleanupAfterKill());
   if (!args.only || 'arch-relaunch-timer-cancelable'.includes(args.only)) all.push(testArchRelaunchTimerCancelable());
   if (!args.only || 'diagnostic'.includes(args.only) || 'tick'.includes(args.only)) all.push(...testDiagnosticScenarios());
@@ -455,6 +515,7 @@ function run() {
   console.log(`\n${C.bold}Overall${C.reset}  ${passed === all.length ? C.green : C.red}${passed}/${all.length}${C.reset}`);
 
   restoreSpawn();
+  restoreExecSync();
   restoreFs();
   restorePlatform();
 

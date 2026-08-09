@@ -145,6 +145,14 @@ app.whenReady().then(() => {
     windowManager.sendToMainWindow('textractor-cli-arch-fallback', { from, to, reason });
   });
 
+  // v3.13.31: same pattern as 'arch-fallback' above — log clearly so a
+  // stale/wrong PID isn't mistaken for an architecture mismatch during
+  // diagnosis (attach fails exactly as silently either way).
+  textractorLauncher.on('pid-warning', ({ pid, message }) => {
+    log.warn(`[TextractorLauncher] PID warning: ${message}`);
+    windowManager.sendToMainWindow('textractor-cli-pid-warning', { pid, message });
+  });
+
   textractorLauncher.on('error', (err) => {
     // v3.8.23: err is now a structured object with { message, code, severity, hint, stderr, stdout }
     // If it's an old-style Error object, convert it

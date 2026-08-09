@@ -399,6 +399,38 @@ class TextractorLauncher extends EventEmitter {
     return true;
   }
 
+  /**
+   * v3.13.31: best-effort check that `pid` corresponds to a currently
+   * running process, using `tasklist` (built into Windows, no new
+   * dependency — `execSync` is already imported at the top of this file).
+   * Diagnostic only — the caller only ever WARNS on a `false` result,
+   * never blocks the launch, since a failure of this check itself
+   * (locale quirks, WMI hiccups, `tasklist` unavailable in some
+   * locked-down environment) shouldn't stop an otherwise-valid attach
+   * attempt. Exists because a stale/wrong PID fails `attach` exactly as
+   * silently as a genuine x64/x86 architecture mismatch does — confirmed
+   * as a real point of confusion during the v3.13.30 investigation, where
+   * the same PID persisted unverified across multiple test sessions
+   * spanning ~20 minutes with no way to tell whether it was still the
+   * live game process.
+   *
+   * Returns `true` (PID found), `false` (PID not found), or `null`
+   * (couldn't determine — the check itself failed).
+   */
+  _checkPidIsRunning(pid) {
+    try {
+      const output = execSync(`tasklist /FI "PID eq ${pid}" /FO CSV /NH`, { encoding: 'utf8', windowsHide: true, timeout: 3000 });
+      // A real match is a quoted CSV row containing the PID as a field;
+      // the "no tasks found" message (localized, varies by Windows
+      // display language) never contains the PID number itself — this
+      // avoids needing to match any specific locale's wording.
+      return output.includes(`"${pid}"`);
+    } catch (e) {
+      console.warn(`[TextractorLauncher] PID liveness check failed (non-fatal): ${e.message}`);
+      return null;
+    }
+  }
+
   validatePath(cliPath) {
     // v3.13.24: every `message` below now has a companion `messageKey`
     // (+ `messageParams` where dynamic) for the renderer to translate —
@@ -1879,6 +1911,14 @@ class TextractorLauncher extends EventEmitter {
 
     this._gamePid = gamePid;
     this._launchTime = Date.now();
+
+    // v3.13.31: best-effort warning if this PID doesn't correspond to a
+    // running process — see _checkPidIsRunning's doc for why this exists.
+    const pidRunning = this._checkPidIsRunning(gamePid);
+    if (pidRunning === false) {
+      console.warn(`[TextractorLauncher] WARNING: PID ${gamePid} does not appear to be a running process — attach will fail exactly as silently as an architecture mismatch. Verify the PID in Task Manager before assuming this is x64/x86.`);
+      this.emit('pid-warning', { pid: gamePid, message: `PID ${gamePid} does not appear to be running.` });
+    }
 
     try {
       // === SPAWN WITH NO ARGUMENTS ===
