@@ -204,6 +204,23 @@ function detectLanguageSimple(text) {
   return null;
 }
 
+// v3.13.23: Used when detectLanguageSimple() can't positively identify a script
+// (returns null) to decide the fallback default. Same Unicode ranges as the
+// hiragana/katakana/kanji/cyrillic/hangul counters above — if none of those
+// appear anywhere in the text, it's pure Latin/ASCII and defaulting to 'ja'
+// (the historical fallback for VN/game text) is actively wrong.
+function hasNonLatinScript(text) {
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    if (code >= 0x3040 && code <= 0x309F) return true; // Hiragana
+    if (code >= 0x30A0 && code <= 0x30FF) return true; // Katakana
+    if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF)) return true; // CJK
+    if ((code >= 0x0400 && code <= 0x04FF) || (code >= 0x0500 && code <= 0x052F)) return true; // Cyrillic
+    if ((code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF)) return true; // Hangul
+  }
+  return false;
+}
+
 // Fallback chain: if primary engine fails, try these in order
 const FALLBACK_CHAIN = {
   'google-free': ['bing'],
@@ -398,12 +415,23 @@ class TranslationPipeline extends EventEmitter {
         console.log(`[Pipeline] Auto-detected source language: ${detectedSourceLang} (${getLanguageName(detectedSourceLang)})`);
         // v3.13.04: Use detected language for ALL engines, not just LLM.
         effectiveSrcLang = detectedSourceLang;
-      } else {
-        // v3.13.07: When detectLanguageSimple() returns null (can't determine),
-        // don't pass 'auto' to translation engines — most don't support it well.
+      } else if (hasNonLatinScript(text)) {
+        // v3.13.07: When detectLanguageSimple() returns null (can't determine)
+        // but the text does contain some non-Latin script (ambiguous/mixed
+        // text that still didn't hit a positive branch above), don't pass
+        // 'auto' to translation engines — most don't support it well.
         // Default to 'ja' since this tool is primarily used for Japanese VNs/games.
         console.log(`[Pipeline] Could not auto-detect language, defaulting to Japanese`);
         effectiveSrcLang = 'ja';
+      } else {
+        // v3.13.23: Pure Latin/ASCII text with no CJK/Cyrillic/Hangul at all —
+        // defaulting to 'ja' here was objectively wrong (confirmed in real
+        // Textractor+KiriKiriZ testing: DeepL rescued the wrong hint
+        // server-side, but the hint itself was still incorrect, which is
+        // inefficient and risks worse results on engines that don't tolerate
+        // a wrong source-language hint as well as DeepL does).
+        console.log(`[Pipeline] Could not auto-detect language, no CJK/Cyrillic/Hangul found — defaulting to English`);
+        effectiveSrcLang = 'en';
       }
     } else {
       // v3.13.10: Normalize source language code (e.g., 'KR' → 'ko', 'jpn' → 'ja')

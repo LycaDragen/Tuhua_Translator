@@ -78,6 +78,15 @@ class TextractorLauncher extends EventEmitter {
     this._maxHexDumps = 10;
     this._dataEventCount = 0;
 
+    // === ARCHITECTURE FALLBACK STATE (v3.13.23) ===
+    // Whether an x64<->x86 fallback has already been tried for the current
+    // user-initiated launch — reset at the start of every launch() call that
+    // isn't itself a fallback retry, so each fresh attempt gets one retry.
+    this._archFallbackAttempted = false;
+    // The fully-resolved exe path from the most recent launch() call, used
+    // to compute the sibling-architecture candidate if this attempt fails.
+    this._lastResolvedPath = null;
+
     // === ERROR CAPTURE STATE (v3.8.23) ===
     this._stderrLines = [];       // All stderr lines captured during this session
     this._stdoutTail = [];        // Last 20 stdout lines for error context
@@ -178,6 +187,66 @@ class TextractorLauncher extends EventEmitter {
     // Nothing found — return original path (validation will show proper error)
     console.warn(`[TextractorLauncher] Could not auto-resolve "${resolved}" — no Textractor.exe/TextractorCLI.exe found in x64/x86 subdirs`);
     return resolved;
+  }
+
+  /**
+   * v3.13.23: Given a resolved exe path that sits inside an x64/x86 (or
+   * X64/X86) subfolder, return the equivalent path in the OTHER
+   * architecture's subfolder — but only if that file actually exists on
+   * disk. Returns null if resolvedPath isn't inside one of those subfolders
+   * at all (e.g. the user pointed straight at a flat-layout .exe, or a
+   * folder with no arch split) — that's deliberate: it means the user's
+   * path gives no alternative architecture to fall back to, whether
+   * because they made an explicit choice outside the x64/x86 convention or
+   * because there simply isn't a sibling arch build available, and either
+   * way there's nothing safe to retry.
+   */
+  _getArchFallbackPath(resolvedPath) {
+    if (!resolvedPath) return null;
+    const pairs = [['x64', 'x86'], ['X64', 'X86'], ['x86', 'x64'], ['X86', 'X64']];
+    for (const [from, to] of pairs) {
+      const marker = path.sep + from + path.sep;
+      const idx = resolvedPath.indexOf(marker);
+      if (idx === -1) continue;
+      const candidate = resolvedPath.slice(0, idx) + path.sep + to + path.sep + resolvedPath.slice(idx + marker.length);
+      try {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return { path: candidate, from, to };
+      } catch (e) { /* skip */ }
+    }
+    return null;
+  }
+
+  /**
+   * v3.13.23: Try relaunching with the sibling architecture (x64<->x86) once
+   * per user-initiated launch attempt. Triggered from the three points where
+   * a wrong-architecture attach is already detectable today but previously
+   * only logged: immediate spawn error (ENOENT etc.), a quick post-spawn
+   * exit, and the 10s "no hooks found" diagnostic (attach can silently
+   * "succeed" against a mismatched-bitness process and just never produce
+   * any hook). `reason` is one of 'spawn-error' | 'quick-exit' | 'no-hooks'.
+   * Returns true if a fallback attempt was launched (caller should skip its
+   * own error reporting for this attempt), false if there's nothing to fall
+   * back to or a fallback was already tried for this launch.
+   */
+  _attemptArchFallback(reason) {
+    if (this._archFallbackAttempted) return false;
+    const fallback = this._getArchFallbackPath(this._lastResolvedPath);
+    if (!fallback) return false;
+
+    this._archFallbackAttempted = true;
+    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s' }[reason] || reason;
+    console.warn(`[TextractorLauncher] ${fallback.from}: ${reasonLabel} -> probando ${fallback.to}...`);
+    this.emit('arch-fallback', { from: fallback.from, to: fallback.to, reason });
+
+    const gamePid = this._gamePid;
+    if (this.isRunning) this.kill();
+    // Small delay so the previous process's taskkill/exit settles before
+    // spawning the replacement — mirrors the pattern already used elsewhere
+    // in this file (e.g. the 1.5s delayed stdin-attach backup).
+    setTimeout(() => {
+      this.launch(gamePid, { cliPath: fallback.path, pid: gamePid, _isArchFallbackRetry: true });
+    }, 300);
+    return true;
   }
 
   validatePath(cliPath) {
@@ -637,6 +706,62 @@ class TextractorLauncher extends EventEmitter {
    * STABILITY: Once a hook has been auto-selected with a decent score,
    * we only switch if another hook has a significantly higher score (+200).
    */
+  /**
+   * v3.13.23: Extracted from the inline scoring logic that used to be
+   * duplicated verbatim inside _autoSelectBestHook (once for the candidate
+   * hook, once for the previously-selected hook it compares against) — same
+   * formula, no behavior change. Having a single scoring function also lets
+   * _emitHookDiscovery attach each hook's score to the UI payload, so the
+   * hook selector can show *why* a hook was auto-picked instead of that only
+   * being visible in the log.
+   */
+  _scoreHook(hook) {
+    let score = 0;
+
+    // CJK text is a very strong signal
+    if (hook.hasCJK) score += 1000;
+
+    // v3.8.24: CLEAN PROSE BONUS
+    // Check if lastText looks like clean narrative English prose
+    // (lowercase letters + spaces + punctuation = actual game dialogue)
+    const cleanPreview = this._cleanGameText(hook.lastText || '');
+    if (cleanPreview.length >= 10) {
+      const lowerRatio = (cleanPreview.match(/[a-z]/g) || []).length / cleanPreview.length;
+      const spaceRatio = (cleanPreview.match(/ /g) || []).length / cleanPreview.length;
+      const punctRatio = (cleanPreview.match(/[.,!?;:'"-]/g) || []).length / cleanPreview.length;
+
+      // Clean prose has: ~30-60% lowercase, ~10-25% spaces, some punctuation
+      if (lowerRatio > 0.2 && spaceRatio > 0.08 && spaceRatio < 0.4) {
+        score += 400; // Strong bonus for looking like prose
+        if (punctRatio > 0.01) score += 100; // Extra bonus for punctuation
+      }
+    }
+
+    // Text count (more active = more likely the main text hook)
+    score += Math.min(hook.textCount, 50) * 10;
+
+    // Average text length (longer = more likely game text)
+    const avgLen = hook.textCount > 0 ? hook.totalTextLength / hook.textCount : 0;
+    score += Math.min(avgLen, 100);
+
+    // Deprioritize system hooks (Console/Clipboard/Portapapeles/Consola)
+    const nameLower = hook.name.toLowerCase();
+    if (nameLower === 'console' || nameLower === 'clipboard' ||
+        nameLower === 'consola' || nameLower === 'portapapeles' ||
+        hook.isSystemHook) {
+      score -= 500;
+    }
+
+    // Penalize very short average text (likely noise)
+    if (avgLen < 3) score -= 200;
+
+    // TEXT QUALITY PENALTY:
+    // Penalize hooks that produce doubled chars, encoded text, menu text, etc.
+    score -= hook.qualityPenalty;
+
+    return score;
+  }
+
   _autoSelectBestHook() {
     if (this._selectedHookKey) return; // User manually selected, don't auto-switch
 
@@ -645,50 +770,7 @@ class TextractorLauncher extends EventEmitter {
 
     for (const [key, hook] of this._hooks) {
       if (hook.textCount === 0) continue;
-
-      let score = 0;
-
-      // CJK text is a very strong signal
-      if (hook.hasCJK) score += 1000;
-
-      // v3.8.24: CLEAN PROSE BONUS
-      // Check if lastText looks like clean narrative English prose
-      // (lowercase letters + spaces + punctuation = actual game dialogue)
-      const cleanPreview = this._cleanGameText(hook.lastText || '');
-      if (cleanPreview.length >= 10) {
-        const lowerRatio = (cleanPreview.match(/[a-z]/g) || []).length / cleanPreview.length;
-        const spaceRatio = (cleanPreview.match(/ /g) || []).length / cleanPreview.length;
-        const punctRatio = (cleanPreview.match(/[.,!?;:'"-]/g) || []).length / cleanPreview.length;
-
-        // Clean prose has: ~30-60% lowercase, ~10-25% spaces, some punctuation
-        if (lowerRatio > 0.2 && spaceRatio > 0.08 && spaceRatio < 0.4) {
-          score += 400; // Strong bonus for looking like prose
-          if (punctRatio > 0.01) score += 100; // Extra bonus for punctuation
-        }
-      }
-
-      // Text count (more active = more likely the main text hook)
-      score += Math.min(hook.textCount, 50) * 10;
-
-      // Average text length (longer = more likely game text)
-      const avgLen = hook.textCount > 0 ? hook.totalTextLength / hook.textCount : 0;
-      score += Math.min(avgLen, 100);
-
-      // Deprioritize system hooks (Console/Clipboard/Portapapeles/Consola)
-      const nameLower = hook.name.toLowerCase();
-      if (nameLower === 'console' || nameLower === 'clipboard' ||
-          nameLower === 'consola' || nameLower === 'portapapeles' ||
-          hook.isSystemHook) {
-        score -= 500;
-      }
-
-      // Penalize very short average text (likely noise)
-      if (avgLen < 3) score -= 200;
-
-      // TEXT QUALITY PENALTY:
-      // Penalize hooks that produce doubled chars, encoded text, menu text, etc.
-      score -= hook.qualityPenalty;
-
+      const score = this._scoreHook(hook);
       if (score > bestScore) {
         bestScore = score;
         bestHook = hook;
@@ -702,30 +784,7 @@ class TextractorLauncher extends EventEmitter {
       if (prevAuto && prevAuto !== bestHook.key) {
         const prevHook = this._hooks.get(prevAuto);
         if (prevHook) {
-          // Calculate previous hook's current score
-          let prevScore = 0;
-          if (prevHook.hasCJK) prevScore += 1000;
-          const prevCleanPreview = this._cleanGameText(prevHook.lastText || '');
-          if (prevCleanPreview.length >= 10) {
-            const prevLowerRatio = (prevCleanPreview.match(/[a-z]/g) || []).length / prevCleanPreview.length;
-            const prevSpaceRatio = (prevCleanPreview.match(/ /g) || []).length / prevCleanPreview.length;
-            const prevPunctRatio = (prevCleanPreview.match(/[.,!?;:'"-]/g) || []).length / prevCleanPreview.length;
-            if (prevLowerRatio > 0.2 && prevSpaceRatio > 0.08 && prevSpaceRatio < 0.4) {
-              prevScore += 400;
-              if (prevPunctRatio > 0.01) prevScore += 100;
-            }
-          }
-          prevScore += Math.min(prevHook.textCount, 50) * 10;
-          const prevAvgLen = prevHook.textCount > 0 ? prevHook.totalTextLength / prevHook.textCount : 0;
-          prevScore += Math.min(prevAvgLen, 100);
-          const prevNameLower = prevHook.name.toLowerCase();
-          if (prevNameLower === 'console' || prevNameLower === 'clipboard' ||
-              prevNameLower === 'consola' || prevNameLower === 'portapapeles' ||
-              prevHook.isSystemHook) {
-            prevScore -= 500;
-          }
-          if (prevAvgLen < 3) prevScore -= 200;
-          prevScore -= prevHook.qualityPenalty;
+          const prevScore = this._scoreHook(prevHook);
 
           // Only switch if new hook is significantly better (+200 threshold)
           if (bestScore <= prevScore + 200) {
@@ -778,7 +837,10 @@ class TextractorLauncher extends EventEmitter {
         textCount: hook.textCount,
         hasCJK: hook.hasCJK,
         avgLength: hook.textCount > 0 ? Math.round(hook.totalTextLength / hook.textCount) : 0,
-        qualityPenalty: hook.qualityPenalty || 0
+        qualityPenalty: hook.qualityPenalty || 0,
+        // v3.13.23: exposes _autoSelectBestHook's scoring so the UI can show
+        // *why* a hook was picked, not just log it.
+        score: hook.textCount > 0 ? this._scoreHook(hook) : null
       });
     }
 
@@ -859,7 +921,10 @@ class TextractorLauncher extends EventEmitter {
         textCount: hook.textCount,
         hasCJK: hook.hasCJK,
         avgLength: hook.textCount > 0 ? Math.round(hook.totalTextLength / hook.textCount) : 0,
-        qualityPenalty: hook.qualityPenalty || 0
+        qualityPenalty: hook.qualityPenalty || 0,
+        // v3.13.23: exposes _autoSelectBestHook's scoring so the UI can show
+        // *why* a hook was picked, not just log it.
+        score: hook.textCount > 0 ? this._scoreHook(hook) : null
       });
     }
     return hooks;
@@ -1153,6 +1218,13 @@ class TextractorLauncher extends EventEmitter {
    * Launch TextractorCLI.
    */
   launch(pid, options = {}) {
+    // v3.13.23: A fresh, user-initiated launch gets one arch-fallback retry.
+    // An internal fallback retry (options._isArchFallbackRetry) must NOT
+    // reset this, or a bad path in both architectures would relaunch forever.
+    if (!options._isArchFallbackRetry) {
+      this._archFallbackAttempted = false;
+    }
+
     const cliPath = options.cliPath || this.cliPath;
     if (!cliPath) {
       const err = this._buildError('TextractorCLI path not configured', undefined, { hint: 'Configura la ruta a TextractorCLI.exe en la sección de Textractor.' });
@@ -1173,6 +1245,7 @@ class TextractorLauncher extends EventEmitter {
 
     // Use the auto-resolved path from validation (folder -> x64/Textractor.exe)
     const resolvedPath = validation.resolved;
+    this._lastResolvedPath = resolvedPath;
 
     const gamePid = options.pid || pid;
     if (!gamePid || isNaN(gamePid)) {
@@ -1264,6 +1337,11 @@ class TextractorLauncher extends EventEmitter {
           console.warn(`[TextractorLauncher]     2. TextractorCLI didn't receive the attach command`);
           console.warn(`[TextractorLauncher]     3. Game is not producing text through hookable APIs`);
           console.warn(`[TextractorLauncher]   Try: Run TextractorCLI.exe manually in a terminal and type "attach -P${gamePid}"`);
+          // v3.13.23: zero hooks after 10s can also mean the process attached
+          // to a PID whose bitness doesn't match this TextractorCLI build —
+          // attach doesn't always fail loudly in that case, it just never
+          // hooks anything. Try the sibling architecture once before giving up.
+          this._attemptArchFallback('no-hooks');
         }
       }, 10000);
 
@@ -1310,6 +1388,16 @@ class TextractorLauncher extends EventEmitter {
         if (runTime < 2 && code !== 0) {
           console.warn(`[TextractorLauncher] Process exited quickly with code=${code} — attach likely failed`);
 
+          // v3.13.23: a quick non-zero exit is one of the classic symptoms
+          // of an architecture mismatch (see the 'bit'/'architecture'/'x86'
+          // stderr check right below) — try the sibling arch once before
+          // reporting this as a hard error to the user.
+          if (this._attemptArchFallback('quick-exit')) {
+            this.emit('status', 'exited');
+            this.emit('exited', { code, signal });
+            return;
+          }
+
           // Build detailed error info
           let hint = '';
           const stderrText = this._stderrLines.join('\n').trim();
@@ -1349,6 +1437,13 @@ class TextractorLauncher extends EventEmitter {
         this._stdoutBuffer = '';
         this._clearTimers();
         console.error(`[TextractorLauncher] Spawn error:`, err.message);
+
+        // v3.13.23: try the sibling architecture once before reporting a
+        // hard error — a bad/stale path pointing at an x64 build that no
+        // longer exists (or similar) surfaces here as ENOENT.
+        if (this._attemptArchFallback('spawn-error')) {
+          return;
+        }
 
         let hint = '';
         if (err.code === 'ENOENT') {

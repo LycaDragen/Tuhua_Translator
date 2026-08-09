@@ -441,7 +441,7 @@
                     <!-- TextractorCLI Path -->
                     <div>
                         <div class="flex justify-between items-center mb-1.5">
-                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="cli_path_label">TextractorCLI</label>
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="cli_path_label">Textractor</label>
                             <div class="flex gap-2 items-center">
                                 <button onclick="testTextractorCli()" id="btn-test-cli" class="text-[10px] text-blue-500 hover:text-blue-400 font-medium flex items-center gap-0.5">
                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -451,7 +451,7 @@
                             </div>
                         </div>
                         <div class="flex gap-2">
-                            <input type="text" id="textractor-cli-path" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[11px] font-mono" placeholder="C:\Textractor (carpeta) o C:\Textractor\x64\Textractor.exe" readonly>
+                            <input type="text" id="textractor-cli-path" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[11px] font-mono" data-i18n-placeholder="cli_path_placeholder" placeholder="C:\Textractor (carpeta) o C:\Textractor\x64\Textractor.exe" readonly>
                             <span id="cli-path-status" class="text-xs self-center"></span>
                         </div>
                         <p class="text-[9px] text-gray-400 mt-1" data-i18n="cli_path_help">Ruta a la carpeta de Textractor o al .exe. Se auto-detecta x64/x86.</p>
@@ -505,6 +505,7 @@
                         <div id="hook-preview" class="hidden p-2 rounded bg-white/50 dark:bg-dark-800/50 border border-emerald-200/50 dark:border-emerald-800/50">
                             <p class="text-[9px] text-gray-400 mb-1">Último texto:</p>
                             <p id="hook-preview-text" class="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed"></p>
+                            <p id="hook-preview-score" class="hidden text-[9px] text-gray-400 mt-1.5 pt-1.5 border-t border-emerald-200/50 dark:border-emerald-800/50"></p>
                         </div>
                         <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
                     </div>

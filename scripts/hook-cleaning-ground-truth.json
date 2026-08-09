@@ -190,6 +190,40 @@
       "hookPrefixed": true
     },
     {
+      "id": "G2_doubled_embedded_and",
+      "group": 2,
+      "input": "AAnndd you know it.",
+      "expected": "And you know it.",
+      "appliesTo": [
+        "unDoubleText"
+      ],
+      "note": "v3.13.20: real Textractor+KiriKiriZ artifact reported by Lyca. isDoubledText's 60%-of-pairs ratio was measured over the WHOLE string, so an artifact glued to the front of a real sentence diluted the ratio below threshold and nothing got cleaned — confirmed by direct execution before the fix (both routes left this completely untouched). Fixed by walking the message word-by-word and testing each word individually against the same threshold, localizing the fix to the leading doubled run instead of requiring the entire message to qualify.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G2_doubled_embedded_now_that",
+      "group": 2,
+      "input": "NNooww tthhaatt I understand.",
+      "expected": "Now that I understand.",
+      "appliesTo": [
+        "unDoubleText"
+      ],
+      "note": "Same class as G2_doubled_embedded_and but with the artifact spanning TWO doubled words before real text starts — guards that the word-by-word walk keeps consuming consecutive qualifying words (not just the first one) and stops cleanly at the first word that doesn't qualify on its own.",
+      "hookPrefixed": false
+    },
+    {
+      "id": "G3c_doubled_irregular_latin",
+      "group": 3,
+      "input": "TTThThiThisThis",
+      "expected": "TTThThiThisThis",
+      "appliesTo": [
+        "unDoubleText",
+        "unresolved-gap"
+      ],
+      "note": "Third real artifact reported by Lyca alongside G2_doubled_embedded_and, deliberately left as a documented non-fix. Doesn't match isDoubledText's pair-ratio shape (verified: 1/7 pairs match) NOR detectGrowingPrefix's exact triangular-length shape even in isolation (verified by direct execution: reconstruction doesn't match byte-for-byte) — it's some other, more irregular artifact shape. Expected == input on purpose: no algorithm should claim to fix this from a single example. Needs more real hook captures from Lyca before designing anything, same exact-verification standard already used for #10-12 in Group 1.",
+      "hookPrefixed": false
+    },
+    {
       "id": "G3a_doubled_latin",
       "group": 3,
       "input": "NNooww tthhaatt",

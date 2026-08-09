@@ -137,6 +137,14 @@ app.whenReady().then(() => {
     windowManager.sendToMainWindow('textractor-cli-status-changed', status);
   });
 
+  // v3.13.23: x64<->x86 auto-fallback — log it clearly (not just a silent
+  // retry) and let the renderer show a toast, same pattern as the existing
+  // 'ocr-engine-fallback' notification.
+  textractorLauncher.on('arch-fallback', ({ from, to, reason }) => {
+    log.info(`[TextractorLauncher] Arch fallback: ${from} -> ${to} (reason: ${reason})`);
+    windowManager.sendToMainWindow('textractor-cli-arch-fallback', { from, to, reason });
+  });
+
   textractorLauncher.on('error', (err) => {
     // v3.8.23: err is now a structured object with { message, code, severity, hint, stderr, stdout }
     // If it's an old-style Error object, convert it

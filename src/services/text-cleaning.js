@@ -238,6 +238,37 @@ function unDoubleText(text) {
   return result;
 }
 
+// v3.13.23: isDoubledText's 60%-of-pairs ratio is measured over the WHOLE
+// string, so it only fires when the artifact IS the entire message. In
+// production the artifact is almost always glued to the front of a real
+// sentence ("AAnndd you know it." — confirmed real KiriKiriZ/Textractor
+// output), which dilutes the ratio below threshold and leaves the whole
+// thing untouched. This walks the message word-by-word (split on
+// whitespace) from the start and tests EACH WORD INDIVIDUALLY against the
+// existing isDoubledText check, stopping at the first word that doesn't
+// qualify on its own. Per-word (not cumulative-concatenation) matters: a
+// short innocent word right after the artifact can dilute a cumulative
+// ratio back above 60% by coincidence and get pulled into the window —
+// confirmed by hand-tracing "AAnndd you know it." — while judging each
+// word independently against the same threshold already validated by the
+// bench can't do that. Returns the end index (exclusive) of the leading
+// doubled-word run, or 0 if even the first word doesn't qualify — which
+// reproduces the old whole-string behavior exactly for both directions:
+// an already-fully-doubled message still gets a window spanning the whole
+// string (every word qualifies), and a message with no doubling at the
+// front is left alone (window stays 0, same as isDoubledText(text) being
+// false before).
+function _findDoubledPrefixEnd(text) {
+  const wordRegex = /\S+/g;
+  let match;
+  let end = 0;
+  while ((match = wordRegex.exec(text)) !== null) {
+    if (!isDoubledText(match[0])) break;
+    end = match.index + match[0].length;
+  }
+  return end;
+}
+
 // ─── Strategy 4: digit-delimiter segment dedup ──────────────────────────────
 // Single consolidated copy — this used to be duplicated near-verbatim as
 // IpcHandlers._deduplicateText's "Strategy 4" and
@@ -360,10 +391,13 @@ function cleanHookText(text, options = {}) {
     }
   }
 
-  if (options.enableUndouble !== false && isDoubledText(result)) {
-    const unDoubled = unDoubleText(result);
-    if (unDoubled && unDoubled.length > 0) {
-      result = unDoubled;
+  if (options.enableUndouble !== false) {
+    const prefixEnd = _findDoubledPrefixEnd(result);
+    if (prefixEnd > 0) {
+      const unDoubledPrefix = unDoubleText(result.substring(0, prefixEnd));
+      if (unDoubledPrefix && unDoubledPrefix.length > 0) {
+        result = unDoubledPrefix + result.substring(prefixEnd);
+      }
     }
   }
 

@@ -187,6 +187,15 @@
             api.onTextractorCliStatusChanged((status) => updateCliStatus(status));
             api.onTextractorCliOutput((text) => appendCliOutput(text));
             api.onTextractorCliError((errorData) => showCliError(errorData));
+            // v3.13.23: x64<->x86 auto-fallback — same "toast + status text"
+            // pattern already used for onOcrEngineFallback below.
+            api.onTextractorCliArchFallback(({ from, to, reason }) => {
+                const t = translations[currentLang] || translations['en'];
+                const template = t.textractor_arch_fallback_toast || '{from} sin resultado, probando {to}...';
+                showToast(template.replace('{from}', from).replace('{to}', to));
+                const text = document.getElementById('cli-status-text');
+                if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + template.replace('{from}', from).replace('{to}', to) + '</span>';
+            });
             api.onHooksDiscovered((data) => updateHookSelector(data));
             api.onOcrStatus((status) => updateOcrStatus(status));
 
@@ -321,6 +330,15 @@
             document.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.getAttribute('data-i18n');
                 if (t[key]) el.innerText = t[key];
+            });
+
+            // v3.13.23: Same pattern as [data-i18n], but for the placeholder
+            // attribute of inputs — needed because placeholder text isn't
+            // covered by innerText and was previously stuck hardcoded in
+            // whatever language was typed into the HTML.
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                const key = el.getAttribute('data-i18n-placeholder');
+                if (t[key]) el.placeholder = t[key];
             });
 
             // Update language selector options (native name + translated name)
@@ -2130,12 +2148,28 @@
             }
         }
 
-        function updateHookPreview(hook) {
+        function updateHookPreview(hook, isAutoMode) {
             const previewDiv = document.getElementById('hook-preview');
             const previewText = document.getElementById('hook-preview-text');
+            const scoreEl = document.getElementById('hook-preview-score');
             if (hook && hook.lastText) {
                 previewDiv.classList.remove('hidden');
                 previewText.textContent = hook.lastText;
+                // v3.13.23: show _autoSelectBestHook's score so the user can
+                // see why this hook was picked instead of only finding out
+                // from the log — only makes sense in Auto mode, since a
+                // manually-selected hook wasn't scored to reach that state.
+                if (isAutoMode && scoreEl && hook.score !== null && hook.score !== undefined) {
+                    const t = translations[currentLang] || translations['en'];
+                    const label = t.hook_auto_score_label || 'Auto-seleccionado — puntaje';
+                    let detail = `🎯 ${label}: ${hook.score}`;
+                    if (hook.hasCJK) detail += ' · CJK';
+                    if (hook.qualityPenalty > 0) detail += ` · -${hook.qualityPenalty} ${t.hook_quality_penalty_label || 'calidad'}`;
+                    scoreEl.textContent = detail;
+                    scoreEl.classList.remove('hidden');
+                } else if (scoreEl) {
+                    scoreEl.classList.add('hidden');
+                }
             } else {
                 previewDiv.classList.add('hidden');
             }
@@ -2210,7 +2244,7 @@
             // Update preview for active hook
             const activeHook = _discoveredHooks.find(h => h.key === data.activeHookKey);
             if (activeHook) {
-                updateHookPreview(activeHook);
+                updateHookPreview(activeHook, !data.selectedHookKey);
             }
         }
 
