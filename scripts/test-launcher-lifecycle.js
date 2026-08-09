@@ -330,18 +330,34 @@ function testDiagnosticScenarios() {
     });
   }));
 
+  // Scenario D: only a SYSTEM hook (Console/Clipboard) ever registers —
+  // no real hook of any kind, the whole 60s window. v3.13.30 regression
+  // guard, added after a real Windows session log showed exactly this:
+  // `_hooks.size` is 1 (the system hook) from the very first tick, so the
+  // old code's `_hooks.size === 0` fast-path never matched, and
+  // `hasRealHookWithText` never matched either (a system hook doesn't
+  // count) — the diagnostic ran all 11 ticks with ZERO fallback attempts
+  // and just gave up. The fix's last-resort branch should fire exactly
+  // once, on the final (60s) tick, with reason 'no-real-hook'.
+  results.push(runDiagnosticScenario('D-only-system-hooks-forever', (launcher) => {
+    launcher._hooks.set('1:0:0', {
+      key: '1:0:0', name: 'Portapapeles', isSystemHook: true,
+      textCount: 1, hookCode: 'HB0@0', hasCJK: false, totalTextLength: 5, qualityPenalty: 0
+    });
+  }));
+
   const expectations = {
-    'A-no-hooks-ever': { ticks: 11, reason: 'no-hooks', callsEqualTicks: true },
-    'B-all-generic': { ticks: 11, reason: 'no-clean-hook', callsEqualTicks: true },
-    'C-real-hook-clean': { ticks: 1, reason: null, callsEqualTicks: false, callsExpected: 0 }
+    'A-no-hooks-ever': { ticks: 11, expectedReasons: Array(11).fill('no-hooks') },
+    'B-all-generic': { ticks: 11, expectedReasons: Array(11).fill('no-clean-hook') },
+    'C-real-hook-clean': { ticks: 1, expectedReasons: [] },
+    'D-only-system-hooks-forever': { ticks: 11, expectedReasons: ['no-real-hook'] }
   };
 
   const checked = results.map(r => {
     const exp = expectations[r.label];
     const ticksOk = r.diagnosticTicks === exp.ticks;
-    const callsOk = exp.callsEqualTicks
-      ? (r.fallbackCalls.length === exp.ticks && r.fallbackCalls.every(x => x === exp.reason))
-      : (r.fallbackCalls.length === exp.callsExpected);
+    const callsOk = r.fallbackCalls.length === exp.expectedReasons.length
+      && r.fallbackCalls.every((x, i) => x === exp.expectedReasons[i]);
     const pendingOk = r.pendingAtEnd === 0;
     return { ...r, pass: ticksOk && callsOk && pendingOk, ticksOk, callsOk, pendingOk, expected: exp };
   });

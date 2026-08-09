@@ -365,7 +365,9 @@ class TextractorLauncher extends EventEmitter {
    * TextractorCLI's generic auto-engine can hook the right function with
    * the wrong hook-code type on a game where x86's own engine gets it
    * right immediately). `reason` is one of 'spawn-error' | 'quick-exit' |
-   * 'no-hooks' | 'no-clean-hook'. Returns true if a fallback attempt was
+   * 'no-hooks' | 'no-clean-hook' | 'no-real-hook' (v3.13.30 — see the
+   * diagnostic's last-resort branch for why this is distinct from
+   * 'no-hooks'). Returns true if a fallback attempt was
    * launched (caller should skip its own error reporting for this
    * attempt), false if there's nothing to fall back to or a fallback was
    * already tried for this launch.
@@ -376,7 +378,7 @@ class TextractorLauncher extends EventEmitter {
     if (!fallback) return false;
 
     this._archFallbackAttempted = true;
-    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s', 'no-clean-hook': 'hooks encontrados pero todos con ruido' }[reason] || reason;
+    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s', 'no-clean-hook': 'hooks encontrados pero todos con ruido', 'no-real-hook': `nunca apareció un hook real tras ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s (solo hooks de sistema)` }[reason] || reason;
     console.warn(`[TextractorLauncher] ${fallback.from}: ${reasonLabel} -> probando ${fallback.to}...`);
     this.emit('arch-fallback', { from: fallback.from, to: fallback.to, reason });
 
@@ -1988,6 +1990,10 @@ class TextractorLauncher extends EventEmitter {
         // both, so it can't tell them apart on its own.
         const hasRealHookWithText = Array.from(this._hooks.values())
           .some(h => !h.isSystemHook && h.textCount > 0);
+        // v3.13.30: distinct from `_hooks.size === 0` below — see the
+        // last-resort branch at the bottom of this function for why this
+        // is needed at all.
+        const hasAnyRealHook = Array.from(this._hooks.values()).some(h => !h.isSystemHook);
 
         if (this._hooks.size === 0) {
           console.warn(`[TextractorLauncher]   *** NO HOOKS FOUND! ***`);
@@ -2024,6 +2030,38 @@ class TextractorLauncher extends EventEmitter {
         const nextElapsed = elapsedMs + ARCH_FALLBACK_CHECK_INTERVAL_MS;
         if (nextElapsed <= ARCH_FALLBACK_CHECK_MAX_MS) {
           this._diagnosticTimer = setTimeout(() => runArchFallbackCheck(nextElapsed), ARCH_FALLBACK_CHECK_INTERVAL_MS);
+        } else if (!hasAnyRealHook && this._hooks.size > 0) {
+          // v3.13.30: last-resort fallback attempt for the gap the
+          // `_hooks.size === 0` branch above can't see — confirmed
+          // necessary by a real Windows session log (Nekopara Vol.1 /
+          // KiriKiriZ, x64): TextractorCLI's system Console/Clipboard
+          // hooks register almost instantly on ANY attach attempt,
+          // successful or not, so `_hooks.size` was already 1 (just the
+          // system hook) by the very first 10s check in that session.
+          // "Only system hooks, forever" then matched NONE of the three
+          // branches above (size !== 0, and hasRealHookWithText stays
+          // false since a system hook never counts as one), so the
+          // diagnostic just quietly ran out the clock to the 60s cap and
+          // gave up — never trying the sibling architecture at all.
+          // That's exactly the case a user had to work around by manually
+          // opening Textractor's own GUI and attaching there (a
+          // successful GUI attach injects the hook into the game process,
+          // which then broadcasts to any listener — including Tuhua's
+          // already-running TextractorCLI — which is why that "fixed" it
+          // with no logged connection between the two events, and why
+          // re-running Tuhua fully elevated as Administrator changed
+          // nothing: this was never a privilege issue).
+          //
+          // Gated on `_hooks.size > 0` (not just `!hasAnyRealHook`)
+          // deliberately: the `_hooks.size === 0` branch above already
+          // retries every tick on its own (it never sets
+          // _archFallbackAttempted when there's no sibling arch to fall
+          // back to, so nothing ever stops it) — without this guard, a
+          // session with literally zero hooks the entire time would hit
+          // BOTH that branch AND this one on the final tick, logging a
+          // redundant second attempt right after the 11th "no hooks" one.
+          console.warn(`[TextractorLauncher]   *** NO REAL HOOK EVER APPEARED after ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s (only system hooks) ***`);
+          this._attemptArchFallback('no-real-hook');
         }
       };
       this._diagnosticTimer = setTimeout(() => runArchFallbackCheck(10000), 10000);
