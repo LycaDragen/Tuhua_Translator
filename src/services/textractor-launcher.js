@@ -26,6 +26,7 @@
  *   - Stdin-only attach (no CLI arguments)
  */
 const { spawn, execSync } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 const EventEmitter = require('events');
 const path = require('path');
 const fs = require('fs');
@@ -116,6 +117,41 @@ const KNOWN_GOOD_HOOK_CODES = [
 const ARCH_FALLBACK_CHECK_INTERVAL_MS = 5000;
 const ARCH_FALLBACK_CHECK_MAX_MS = 60000;
 
+// v3.13.29: minimum raw bytes to accumulate before deciding stdout's
+// encoding. The old decoder decided on the first chunk with >= 4 bytes,
+// which a real 1- or 3-byte first chunk defeats: that chunk decodes with
+// the wrong default AND drops its trailing odd byte (the old carry-over
+// only ran once encoding was already known to be utf16le), desyncing
+// every later chunk — including the one the detector finally samples, so
+// the whole session locks to the wrong encoding. Confirmed by direct
+// reproduction against scripts/test-stdout-decoding.js's 'tiny' mode.
+// 16 bytes = 8 UTF-16LE code units, enough for a meaningful heuristic and
+// small enough to never delay the first line perceptibly against a real
+// TextractorCLI process (its banner alone exceeds this on the first
+// write). A decisive BOM short-circuits the wait regardless of size.
+const ENCODING_SNIFF_MIN_BYTES = 16;
+
+// v3.13.29: default byte budget for the raw-wire hex dump gated behind
+// TUHUA_STDOUT_RAWDUMP — see _maybeDumpRawBytes.
+const RAW_DUMP_DEFAULT_BUDGET = 512;
+
+// v3.13.29: hook auto-selection hysteresis — see _autoSelectBestHook.
+// The +200 switch threshold is fixed, but the incumbent hook's claim on it
+// decays the longer it goes without producing new text. A menu hook that
+// stops the moment the user leaves the menu goes silent almost
+// immediately; a dialogue hook keeps producing. Without this, a menu hook
+// with zero quality penalty can sit at a score a real dialogue hook needs
+// ~20 lines (textCount contributes +10/line, capped at 50) to catch up to
+// — confirmed as the mechanism behind an observed ~20-28s delay before the
+// selector let go of a menu hook on a real KiriKiriZ session. No discount
+// for the first STALE_HOOK_GRACE_MS of silence (a hook that JUST stopped
+// producing shouldn't lose its claim to one bad tick), decaying linearly
+// to zero — any better-scoring candidate wins outright — by
+// STALE_HOOK_FULL_DECAY_MS.
+const HOOK_SWITCH_THRESHOLD = 200;
+const STALE_HOOK_GRACE_MS = 3000;
+const STALE_HOOK_FULL_DECAY_MS = 15000;
+
 class TextractorLauncher extends EventEmitter {
   constructor(hookCleaningSettings) {
     super();
@@ -129,15 +165,34 @@ class TextractorLauncher extends EventEmitter {
     this.isRunning = false;
     this._outputBuffer = [];
     this._maxBufferLines = 200;
-    this._stdoutBuffer = '';
     this._stdinTimer = null;
     this._stdinSent = false;
     this._gamePid = null;
     this._launchTime = null;
     this._diagnosticTimer = null;
-    this._hexDumpCount = 0;
+    // v3.13.29: previously bare, uncancelable setTimeout calls — see
+    // _clearTimers() and their respective call sites for what leaking
+    // them broke.
+    this._hookDiscoveryPhaseTimer = null;
+    this._archRelaunchTimer = null;
     this._maxHexDumps = 10;
-    this._dataEventCount = 0;
+
+    // v3.13.29: raw wire-byte dump budget, off by default. Set
+    // TUHUA_STDOUT_RAWDUMP=1 (or =N for an N-byte budget) to enable — see
+    // _maybeDumpRawBytes. Read once here rather than per-chunk since
+    // process.env doesn't change mid-session.
+    const rawDumpEnv = process.env.TUHUA_STDOUT_RAWDUMP;
+    const rawDumpParsed = rawDumpEnv ? Number.parseInt(rawDumpEnv, 10) : 0;
+    this._rawDumpBudget = rawDumpEnv
+      ? (Number.isFinite(rawDumpParsed) && rawDumpParsed > 1 ? rawDumpParsed : RAW_DUMP_DEFAULT_BUDGET)
+      : 0;
+
+    // v3.13.29: all stdout-decoding state lives in one place, set up here
+    // and torn down/rebuilt by _resetStreamState() — see its doc for why a
+    // single source of truth mattered (close/error/kill used to reset only
+    // _stdoutBuffer, leaving _detectedEncoding and the byte carry-over
+    // stuck from the previous session in those paths).
+    this._resetStreamState();
 
     // === ARCHITECTURE FALLBACK STATE (v3.13.23) ===
     // Whether an x64<->x86 fallback has already been tried for the current
@@ -168,10 +223,29 @@ class TextractorLauncher extends EventEmitter {
     // Lines processed (for diagnostics)
     this._totalLinesProcessed = 0;
     this._hookLinesProcessed = 0;
-    // v3.8.24: Detected encoding for TextractorCLI stdout
-    this._detectedEncoding = null; // null = not yet detected, 'utf16le' or 'utf8'
-    // v3.13.24: raw byte left over from a chunk that ended mid-character
-    this._rawByteCarry = null;
+  }
+
+  /**
+   * Reset all per-session stdout-decoding state. Single source of truth for
+   * "a new stdout stream starts now" — v3.13.29: previously this was
+   * scattered (launch() reset _stdoutBuffer/_lastTextHash/_dataEventCount/
+   * _hexDumpCount/_detectedEncoding/_rawByteCarry inline, while the close/
+   * error/kill handlers only ever reset _stdoutBuffer, leaving the rest —
+   * notably _detectedEncoding — stuck from the previous session in those
+   * paths). Also used by scripts/test-stdout-decoding.js to reset between
+   * fuzz cases without spawning a process.
+   */
+  _resetStreamState() {
+    this._stdoutBuffer = '';
+    this._stdoutDecoder = null;           // StringDecoder, created once the encoding is known
+    this._detectedEncoding = null;        // null = still sniffing, else 'utf16le' | 'utf8'
+    this._encodingSniffChunks = [];       // raw bytes held while still sniffing
+    this._encodingSniffBytes = 0;
+    this._rawBytesSeen = 0;               // absolute byte offset this session (diagnostic only)
+    this._lastTextHash = '';
+    this._dataEventCount = 0;
+    this._hexDumpCount = 0;
+    this._rawDumpBytesRemaining = this._rawDumpBudget;
   }
 
   configure(cliPath) {
@@ -311,7 +385,13 @@ class TextractorLauncher extends EventEmitter {
     // Small delay so the previous process's taskkill/exit settles before
     // spawning the replacement — mirrors the pattern already used elsewhere
     // in this file (e.g. the 1.5s delayed stdin-attach backup).
-    setTimeout(() => {
+    // v3.13.29: handle now saved (was a bare, uncancelable setTimeout) and
+    // cleared by _clearTimers() — a real leak, not defensive-only: if
+    // kill() or another _attemptArchFallback() call happened within this
+    // 300ms window, the old code still fired this relaunch afterward and
+    // resurrected a process the caller had just asked to stop.
+    this._archRelaunchTimer = setTimeout(() => {
+      this._archRelaunchTimer = null;
       this.launch(gamePid, { cliPath: fallback.path, pid: gamePid, _isArchFallbackRetry: true });
     }, 300);
     return true;
@@ -321,6 +401,19 @@ class TextractorLauncher extends EventEmitter {
     // v3.13.24: every `message` below now has a companion `messageKey`
     // (+ `messageParams` where dynamic) for the renderer to translate —
     // `message` itself is now always English, used as the fallback.
+    // v3.13.29: TextractorCLI/Textractor.exe are Windows-only executables.
+    // Before this guard, a macOS/Linux user pointing at ANY path (real or
+    // not) fell through to the ext/basename checks below and, if they
+    // somehow had a same-named file, would eventually hit spawn()'s
+    // ENOENT/EACCES handler — surfacing as "File not found. Verify the
+    // path to TextractorCLI.exe.", a message that sends a non-Windows user
+    // to double-check a path instead of telling them the actual problem:
+    // this feature has no solution on their OS. Checked first, before
+    // even the "no path" case, since it's true regardless of what path
+    // (or lack of one) was given.
+    if (process.platform !== 'win32') {
+      return { valid: false, messageKey: 'val_windows_only', message: 'Textractor and TextractorCLI are Windows-only executables and cannot run on this operating system.' };
+    }
     if (!cliPath) return { valid: false, messageKey: 'val_no_path', message: 'No path specified' };
     try {
       const cleanPath = cliPath.replace(/^"+|"+$/g, '');
@@ -440,6 +533,64 @@ class TextractorLauncher extends EventEmitter {
       ascii.push(bytes[i] >= 32 && bytes[i] < 127 ? String.fromCharCode(bytes[i]) : '.');
     }
     return hex.join(' ') + '  |' + ascii.join('') + '|';
+  }
+
+  /**
+   * v3.13.29: dump the RAW wire bytes of a chunk, before any decoding —
+   * unlike _hexDump above, which only ever sees the already-decoded and
+   * already-sanitized string, so it was useless for diagnosing an
+   * encoding bug from the actual bytes TextractorCLI sent (every previous
+   * debugging pass on the corruption this fixes had to work from that
+   * decoded view, which is a large part of why it took multiple sessions
+   * to pin down). Off by default (TUHUA_STDOUT_RAWDUMP unset ->
+   * _rawDumpBudget is 0) since it's verbose; set TUHUA_STDOUT_RAWDUMP=1
+   * for a 512-byte-per-session budget, or =N for N bytes.
+   *   Windows cmd:  set TUHUA_STDOUT_RAWDUMP=1 && npm start
+   *   PowerShell:   $env:TUHUA_STDOUT_RAWDUMP=1; npm start
+   *   macOS/Linux:  TUHUA_STDOUT_RAWDUMP=1 npm start
+   * The absolute session byte offset is the actual diagnostic value here:
+   * for utf16le, a chunk starting at an ODD offset is exactly the
+   * condition that used to desync the old decoder, and that's invisible
+   * in a dump that only shows each chunk's own bytes without its position
+   * in the stream.
+   */
+  _maybeDumpRawBytes(buf) {
+    const startOffset = this._rawBytesSeen;
+    this._rawBytesSeen += buf.length;
+    if (this._rawDumpBytesRemaining <= 0) return;
+    const take = Math.min(buf.length, this._rawDumpBytesRemaining);
+    this._rawDumpBytesRemaining -= take;
+    const parity = (startOffset % 2 === 1) ? ' ODD-OFFSET' : '';
+    console.log(
+      `[TextractorLauncher] RAW #${this._dataEventCount} @${startOffset}${parity} ` +
+      `${buf.length}B (showing ${take}B, ${this._rawDumpBytesRemaining}B budget left)\n` +
+      this._formatHexDump(buf.subarray(0, take), startOffset)
+    );
+  }
+
+  /**
+   * Canonical 16-bytes-per-row hex dump with absolute offsets, used by
+   * _maybeDumpRawBytes. Kept separate from _hexDump (which formats an
+   * already-decoded string for a single-line inline log) since this one
+   * formats raw multi-row Buffer content with a real base offset.
+   */
+  _formatHexDump(buf, baseOffset = 0, bytesPerRow = 16) {
+    const rows = [];
+    for (let off = 0; off < buf.length; off += bytesPerRow) {
+      const slice = buf.subarray(off, off + bytesPerRow);
+      const hex = [];
+      let ascii = '';
+      for (let i = 0; i < bytesPerRow; i++) {
+        if (i < slice.length) {
+          hex.push(slice[i].toString(16).padStart(2, '0'));
+          ascii += (slice[i] >= 0x20 && slice[i] < 0x7F) ? String.fromCharCode(slice[i]) : '.';
+        } else {
+          hex.push('  ');
+        }
+      }
+      rows.push(`  ${(baseOffset + off).toString(16).padStart(8, '0')}  ${hex.slice(0, 8).join(' ')}  ${hex.slice(8).join(' ')}  |${ascii}|`);
+    }
+    return rows.join('\n');
   }
 
   /**
@@ -789,7 +940,8 @@ class TextractorLauncher extends EventEmitter {
         hasCJK: false,
         totalTextLength: 0,
         qualityPenalty: 0,
-        discoveredAt: Date.now()
+        discoveredAt: Date.now(),
+        lastTextAt: 0 // v3.13.29: set on first text below, used by the hysteresis age discount
       };
       this._hooks.set(hookKey, hook);
       console.log(`[TextractorLauncher] NEW HOOK: ${fullName} → ${displayName} (total: ${this._hooks.size})`);
@@ -800,6 +952,7 @@ class TextractorLauncher extends EventEmitter {
       hook.lastText = text;
       hook.textCount++;
       hook.totalTextLength += text.length;
+      hook.lastTextAt = Date.now(); // v3.13.29: see _autoSelectBestHook's hysteresis
       if (this._hasCJK(text)) {
         hook.hasCJK = true;
       }
@@ -934,8 +1087,11 @@ class TextractorLauncher extends EventEmitter {
     // _autoSelectedHookKey unset means _processHookLine's `activeHookKey ===
     // hookKey` gate never matches, so no 'text' event fires at all — no
     // more informative than before from the translation pane alone, which
-    // is why _emitNoRealHookWarning (called from the 10s diagnostic) exists
-    // to surface this state explicitly instead of failing silently.
+    // is why _emitHookDiscovery computes and emits `noRealHookFound`
+    // explicitly (v3.13.29: this comment used to name a function,
+    // _emitNoRealHookWarning, that doesn't exist in this file — corrected
+    // to point at the mechanism that actually does this job) instead of
+    // failing silently.
     if (!hasRealCandidate) {
       if (this._autoSelectedHookKey !== null) {
         console.log(`[TextractorLauncher] Only system hooks seen so far — clearing auto-selection instead of picking one`);
@@ -947,17 +1103,27 @@ class TextractorLauncher extends EventEmitter {
     if (bestHook) {
       const prevAuto = this._autoSelectedHookKey;
 
-      // STABILITY: Don't switch unless the new hook is significantly better
+      // STABILITY: Don't switch unless the new hook is significantly
+      // better — but the incumbent's required margin decays with how long
+      // it's been since it last produced text (see HOOK_SWITCH_THRESHOLD's
+      // comment). A hook that's actively producing keeps its full +200
+      // claim; one that's gone quiet for STALE_HOOK_FULL_DECAY_MS or more
+      // loses it entirely.
       if (prevAuto && prevAuto !== bestHook.key) {
         const prevHook = this._hooks.get(prevAuto);
         if (prevHook) {
           const prevScore = this._scoreHook(prevHook);
+          const silentMs = Date.now() - (prevHook.lastTextAt || 0);
+          let threshold = HOOK_SWITCH_THRESHOLD;
+          if (silentMs > STALE_HOOK_GRACE_MS) {
+            const decayProgress = Math.min(1, (silentMs - STALE_HOOK_GRACE_MS) / (STALE_HOOK_FULL_DECAY_MS - STALE_HOOK_GRACE_MS));
+            threshold = HOOK_SWITCH_THRESHOLD * (1 - decayProgress);
+          }
 
-          // Only switch if new hook is significantly better (+200 threshold)
-          if (bestScore <= prevScore + 200) {
+          if (bestScore <= prevScore + threshold) {
             return;
           }
-          console.log(`[TextractorLauncher] Hook switch: ${prevHook.displayName} (${prevScore}) → ${bestHook.displayName} (${bestScore}) — significant improvement`);
+          console.log(`[TextractorLauncher] Hook switch: ${prevHook.displayName} (${prevScore}) → ${bestHook.displayName} (${bestScore}) — significant improvement (threshold ${Math.round(threshold)}, incumbent silent ${Math.round(silentMs / 1000)}s)`);
         }
       }
 
@@ -1120,8 +1286,15 @@ class TextractorLauncher extends EventEmitter {
   /**
    * Auto-detect if a Buffer is UTF-16LE encoded.
    * Checks for the pattern: ASCII char followed by 0x00 byte repeatedly.
-   * Returns true if >60% of even-indexed bytes are printable ASCII and
-   * >60% of odd-indexed bytes are 0x00.
+   * Returns true if >50% of even-indexed bytes are printable ASCII and
+   * >50% of odd-indexed bytes are 0x00 (the JSDoc used to say ">60%" —
+   * corrected in v3.13.29 to match what the code actually compares
+   * against; behavior itself is unchanged, this method is not touched by
+   * the v3.13.29 decoding fix beyond this comment). Blind to CJK-heavy
+   * streams with no ASCII header: Japanese in UTF-16LE has high bytes in
+   * 0x30/0x4E-0x9F, never 0x00, so this returns false on pure-Japanese
+   * input — see _detectEncodingFromBytes's plausibility tiebreaker, which
+   * exists specifically to catch what this heuristic misses.
    */
   _isUtf16Le(buf) {
     if (buf.length < 4) return false;
@@ -1137,6 +1310,133 @@ class TextractorLauncher extends EventEmitter {
     }
     if (pairs < 2) return false;
     return (printableEven / pairs > 0.5 && nullOdd / pairs > 0.5);
+  }
+
+  /**
+   * Mirror of _isUtf16Le for UTF-16BE: ASCII bytes are 00 XX instead of
+   * XX 00, so null bytes fall on EVEN indices and printable ASCII on ODD
+   * indices — the reverse of _isUtf16Le's check.
+   *
+   * Textractor never emits UTF-16BE in practice — Node has no built-in BE
+   * decoder, and there is no known code path that would produce it. A
+   * positive result here is therefore treated as a SYMPTOM of something
+   * else being wrong upstream (corrupted pipe, wrong process attached,
+   * stream crossed with another source), not as a variant to support: see
+   * _detectEncodingFromBytes, which surfaces it via an 'encoding-warning'
+   * event instead of silently misdecoding.
+   */
+  _isUtf16Be(buf) {
+    if (buf.length < 4) return false;
+    const checkLen = Math.min(buf.length, 40);
+    let printableOdd = 0;
+    let nullEven = 0;
+    const pairs = Math.floor(checkLen / 2);
+    for (let i = 0; i < pairs; i++) {
+      const hi = buf[i * 2];
+      const lo = buf[i * 2 + 1];
+      if (lo >= 0x20 && lo < 0x7F) printableOdd++;
+      if (hi === 0x00) nullEven++;
+    }
+    if (pairs < 2) return false;
+    return (printableOdd / pairs > 0.5 && nullEven / pairs > 0.5);
+  }
+
+  /**
+   * BOM-based encoding detection — authoritative when present, checked
+   * before any heuristic. Requires 4 bytes before honoring an FF FE prefix
+   * as UTF-16LE so a UTF-32LE BOM (FF FE 00 00) isn't mistaken for it —
+   * TextractorCLI never emits UTF-32, but the check is free and this is
+   * the one place where being wrong would be permanent for the session.
+   * Returns 'utf16le' | 'utf8' | 'utf16be' | null (no BOM, or not enough
+   * bytes yet to tell — callers should keep accumulating in that case).
+   */
+  _detectBom(buf) {
+    if (buf.length >= 3 && buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) return 'utf8';
+    if (buf.length >= 4 && buf[0] === 0xFF && buf[1] === 0xFE) {
+      if (buf[2] === 0x00 && buf[3] === 0x00) return null; // UTF-32LE — unsupported, fall through to heuristics
+      return 'utf16le';
+    }
+    if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) return 'utf16be';
+    return null;
+  }
+
+  /**
+   * Fraction of "plausible game-text" characters in a decoded sample, in
+   * [0, 1]. Weighted heavily against U+FFFD and the PUA ranges because
+   * those are the exact fingerprint of the misdecode this whole change
+   * exists to fix: a 1-byte-misaligned UTF-16LE read of a kanji followed
+   * by a katakana character (e.g. 止 U+6B62 + モ U+30E2 -> LE bytes
+   * 62 6b e2 30 -> reading "6b e2" as one code unit gives U+E26B) lands
+   * in the Private Use Area — confirmed by direct reproduction, not
+   * guessed. Used only as a tiebreaker when neither a BOM nor
+   * _isUtf16Le's fast path can decide (see _detectEncodingFromBytes).
+   */
+  _scoreTextPlausibility(str) {
+    if (!str || !str.length) return 0;
+    let good = 0;
+    let bad = 0;
+    for (const ch of str) {
+      const cp = ch.codePointAt(0);
+      if (cp === 0x09 || cp === 0x0A || cp === 0x0D) { good++; continue; }
+      if (cp === 0xFFFD) { bad += 3; continue; }               // replacement char
+      if (cp >= 0xE000 && cp <= 0xF8FF) { bad += 3; continue; } // PUA (BMP)
+      if (cp >= 0xF0000) { bad += 3; continue; }                // PUA (planes 15-16)
+      if (cp < 0x20) { bad += 2; continue; }                    // other C0 controls / NUL
+      if (cp < 0x7F) { good++; continue; }                      // ASCII printable
+      if ((cp >= 0x3000 && cp <= 0x30FF) ||                     // CJK punctuation + kana
+          (cp >= 0x4E00 && cp <= 0x9FFF) ||                     // CJK ideographs
+          (cp >= 0xFF00 && cp <= 0xFF60) ||                     // fullwidth forms
+          (cp >= 0xAC00 && cp <= 0xD7AF) ||                     // hangul syllables
+          (cp >= 0x00A0 && cp <= 0x024F)) { good++; continue; } // latin-1 supp / extended
+      bad += 1;
+    }
+    return good / (good + bad);
+  }
+
+  /**
+   * Decide stdout's encoding from an accumulated raw byte sample. Order:
+   *   1. BOM — authoritative.
+   *   2. _isUtf16Le's fast path, unchanged — the common case, since
+   *      TextractorCLI's banner and hook headers are ASCII.
+   *   3. _isUtf16Be's mirror check — equally strong a structural signal as
+   *      #2, so it runs BEFORE the plausibility tiebreaker, not after.
+   *      Verified this ordering matters, not just symmetric for its own
+   *      sake: a BE-encoded sample with CJK content can score >0.5
+   *      "plausible" if misread as LE (byte-swapped kanji sometimes still
+   *      land in a CJK Unicode range by coincidence — measured s16=0.54 on
+   *      a real BE test line), which would beat the plausibility
+   *      tiebreaker's margin and misdetect BE as LE. The structural
+   *      null-byte-position check has no such coincidence risk.
+   *   4. Plausibility tiebreaker — decode the sample both ways and keep
+   *      whichever produces less PUA/replacement-char garbage. Needed
+   *      because _isUtf16Le returns false for a sample that is pure
+   *      Japanese in UTF-16LE (its high bytes are 0x30/0x4E-0x9F, never
+   *      the 0x00 the heuristic counts — verified directly). A 0.05
+   *      margin favors utf8 on a near-tie, so an inconclusive sample keeps
+   *      today's default instead of flipping on noise.
+   * Returns { encoding, reason, warn? } — `warn`, when present, is an
+   * encoding name the caller should surface via 'encoding-warning'. BE is
+   * never decoded as BE itself (Node has no BE decoder) — it's always
+   * reported as a warning and treated as utf8 for the (already wrong,
+   * already flagged) fallback decode.
+   */
+  _detectEncodingFromBytes(buf) {
+    const bom = this._detectBom(buf);
+    if (bom === 'utf16le' || bom === 'utf8') return { encoding: bom, reason: 'bom' };
+    if (bom === 'utf16be') {
+      return { encoding: 'utf8', reason: 'bom-utf16be', warn: 'utf16be' };
+    }
+
+    if (this._isUtf16Le(buf)) return { encoding: 'utf16le', reason: 'heuristic-ascii-null' };
+    if (this._isUtf16Be(buf)) return { encoding: 'utf8', reason: 'heuristic-utf16be-mirror', warn: 'utf16be' };
+
+    const even = (buf.length % 2 === 0) ? buf : buf.subarray(0, buf.length - 1);
+    const s16 = this._scoreTextPlausibility(even.toString('utf16le'));
+    const s8 = this._scoreTextPlausibility(buf.toString('utf8'));
+    if (s16 > s8 + 0.05) {
+      return { encoding: 'utf16le', reason: `plausibility utf16le=${s16.toFixed(2)} > utf8=${s8.toFixed(2)}` };
+    }
+    return { encoding: 'utf8', reason: `plausibility utf8=${s8.toFixed(2)} >= utf16le=${s16.toFixed(2)}` };
   }
 
   /**
@@ -1194,58 +1494,113 @@ class TextractorLauncher extends EventEmitter {
     return cleaned.trim();
   }
   /**
-   * Process stdout data — with UTF-16LE auto-detection, BOM stripping, hex dump diagnostics.
-   * v3.8.24: Auto-detects UTF-16LE encoding from TextractorCLI on Windows.
+   * Process stdout data.
+   *
+   * v3.13.29: replaces a hand-rolled incremental decoder (a manual byte
+   * carry-over + parity check, tuned for utf16le only) that had three
+   * confirmed holes, all reproduced directly against
+   * scripts/test-stdout-decoding.js's baseline run against this method
+   * before this rewrite:
+   *   1. A first chunk shorter than 4 bytes skipped encoding detection
+   *      entirely (the old `data.length >= 4` gate), decoded with the
+   *      'utf8' default, and DROPPED its trailing odd byte — the old
+   *      carry only ever ran once encoding was already known to be
+   *      utf16le. Every later chunk then started at an odd byte offset,
+   *      including the one the detector finally sampled — so the
+   *      heuristic itself saw misaligned data and the session locked to
+   *      utf8 permanently. A first chunk of 1 or 3 bytes reproduces this
+   *      exactly.
+   *   2. The carry was a `Buffer#subarray` VIEW into the stream's own
+   *      chunk, not a copy — safe only as long as nothing reuses that
+   *      memory before the next 'data' event. Measured 0 such reuses on
+   *      Node 20/Linux, but the pattern was unsafe regardless of whether
+   *      it had fired yet (a buffer-reuse simulation makes every odd
+   *      split offset fail).
+   *   3. A stream delivered one byte at a time could never satisfy
+   *      `data.length >= 4`, so it was corrupted from the first
+   *      character.
+   * `StringDecoder` (Node core) is stateful and incremental by design,
+   * copies partial code units into its own storage instead of holding a
+   * view, and handles multi-byte UTF-8 sequences too (the old carry was
+   * utf16le-only — a UTF-8 stream split mid-character also corrupted
+   * under the old code, an additional bug this fixes as a side effect).
+   *
+   * Bytes that arrive before the encoding is known are held RAW in
+   * _encodingSniffChunks — nothing is ever decoded with a guessed
+   * encoding before the decision is made, which is what makes the bug
+   * above permanent rather than transient in the old code.
    */
   _processStdoutData(data) {
-    // v3.8.24: Auto-detect encoding on first data event
-    if (this._detectedEncoding === null && data.length >= 4) {
-      if (this._isUtf16Le(data)) {
-        this._detectedEncoding = 'utf16le';
-        console.log(`[TextractorLauncher] Detected UTF-16LE encoding from TextractorCLI`);
-      } else {
-        this._detectedEncoding = 'utf8';
-        console.log(`[TextractorLauncher] Detected UTF-8 encoding from TextractorCLI`);
-      }
-    }
-
-    const encoding = this._detectedEncoding || 'utf8';
-
-    // v3.13.24: prepend any raw byte carried over from a previous chunk that
-    // ended mid-character. Confirmed real bug, not hypothetical: each
-    // process.stdout 'data' event used to be decoded independently
-    // (`data.toString(encoding)`), so a chunk boundary landing mid-UTF-16
-    // code unit shifted every subsequent 2-byte pairing in that chunk by
-    // one byte. Hiragana/Katakana (U+3040-30FF) have a fixed high byte of
-    // 0x30 in UTF-16LE — 0x30 is also the ASCII digit '0' — so a misaligned
-    // decode of real Japanese hook text surfaces as a mangled glyph
-    // followed by a literal '0' after nearly every character, which is
-    // exactly the pattern seen in a real KiriKiriZ/Nekopara hook capture
-    // ("´¥ò0´¢í0´¢ñ0..."). Only utf16le needs this: it's the only encoding
-    // here with a fixed, cheap-to-check code-unit width (2 bytes) — utf8's
-    // variable-width sequences would need a different check, and there's no
-    // evidence (no BOM-less detection path even reaches 'utf8' against
-    // TextractorCLI on Windows) that this project hits that case in
-    // practice.
-    let fullData = data;
-    if (this._rawByteCarry && this._rawByteCarry.length > 0) {
-      fullData = Buffer.concat([this._rawByteCarry, data]);
-      this._rawByteCarry = null;
-    }
-
-    let decodable = fullData;
-    if (encoding === 'utf16le' && fullData.length % 2 !== 0) {
-      decodable = fullData.subarray(0, fullData.length - 1);
-      this._rawByteCarry = fullData.subarray(fullData.length - 1);
-    }
-
-    const chunk = decodable.toString(encoding);
-    this._stdoutBuffer += chunk;
     this._dataEventCount++;
+    this._maybeDumpRawBytes(data);
 
-    // Split lines — for UTF-16LE, newlines may have been decoded already
+    let chunk;
+    if (this._stdoutDecoder) {
+      chunk = this._stdoutDecoder.write(data);
+    } else {
+      // Still sniffing: hold the raw bytes and wait for either a decisive
+      // BOM or ENCODING_SNIFF_MIN_BYTES total, whichever comes first.
+      // Buffer.from(data) — NOT data itself — deliberately: `data` is
+      // caller-owned and this array can outlive the current call (when
+      // the sniff isn't done yet, execution returns below and the array
+      // is read again on the NEXT 'data' event). Retaining `data` by
+      // reference here is exactly the class of bug this whole rewrite
+      // exists to eliminate (see this method's doc, point 2) — confirmed
+      // by scripts/test-stdout-decoding.js's 'hostile' mode, which caught
+      // this directly during development: it failed at every stream whose
+      // first chunk was small enough to still be sniffing.
+      this._encodingSniffChunks.push(Buffer.from(data));
+      this._encodingSniffBytes += data.length;
+      const sniff = Buffer.concat(this._encodingSniffChunks, this._encodingSniffBytes);
+      if (this._encodingSniffBytes < ENCODING_SNIFF_MIN_BYTES && this._detectBom(sniff) === null) {
+        return;
+      }
+      chunk = this._openStdoutDecoder(sniff);
+    }
+
+    if (chunk) this._stdoutBuffer += chunk;
+    this._drainStdoutLines(false);
+  }
+
+  /**
+   * Decide the encoding from the accumulated sniff buffer, create the
+   * StringDecoder, and feed it the ENTIRE sniff buffer as its first
+   * write — so the bytes that arrived before the decision was made are
+   * decoded WITH the decision, not before it. Also used by _flushStdout
+   * when the stream ends before a decision was ever reached.
+   */
+  _openStdoutDecoder(sniffBuf) {
+    const det = this._detectEncodingFromBytes(sniffBuf);
+    this._detectedEncoding = det.encoding;
+    this._encodingSniffChunks = [];
+    this._encodingSniffBytes = 0;
+    this._stdoutDecoder = new StringDecoder(det.encoding);
+    console.log(`[TextractorLauncher] stdout encoding: ${det.encoding} (${det.reason}, ${sniffBuf.length}B sample)`);
+    // v3.13.29: mainly observability (a UI could show this; the bench
+    // uses it too, since _flushStdout resets _detectedEncoding back to
+    // null as its last step, so reading the field after a flush-driven
+    // decision can't observe what was decided).
+    this.emit('encoding-detected', { encoding: det.encoding, reason: det.reason, sampleBytes: sniffBuf.length });
+    if (det.warn) {
+      const warning = { encoding: det.warn, hint: 'Textractor does not use UTF-16BE; check pipe configuration' };
+      console.warn(`[TextractorLauncher] ENCODING WARNING: ${JSON.stringify(warning)}`);
+      this.emit('encoding-warning', warning);
+    }
+    return this._stdoutDecoder.write(sniffBuf);
+  }
+
+  /**
+   * Split the accumulated decoded buffer into lines and run each one
+   * through the existing sanitize/parse/emit pipeline — unchanged from
+   * before v3.13.29 (see the plan's "que NO tocar": _sanitizeLine and
+   * _parseHookLine are deliberately untouched by this decoding fix).
+   * `final=true` (only from _flushStdout) also consumes the trailing
+   * partial line instead of holding it back in _stdoutBuffer for the next
+   * chunk — used when the stream is ending and there won't be one.
+   */
+  _drainStdoutLines(final) {
     const lines = this._stdoutBuffer.split('\n');
-    this._stdoutBuffer = lines.pop() || '';
+    this._stdoutBuffer = final ? '' : (lines.pop() || '');
 
     for (const line of lines) {
       const sanitized = this._sanitizeLine(line);
@@ -1254,10 +1609,11 @@ class TextractorLauncher extends EventEmitter {
 
       this._totalLinesProcessed++;
 
-      // HEX DUMP first N lines for encoding diagnostics
+      // HEX DUMP (decoded string) first N lines for cleaning diagnostics —
+      // distinct from _maybeDumpRawBytes's wire-byte dump above.
       if (this._hexDumpCount < this._maxHexDumps) {
         this._hexDumpCount++;
-        console.log(`[TextractorLauncher] HEX #${this._hexDumpCount}: ${this._hexDump(trimmedLine)}`);
+        console.log(`[TextractorLauncher] HEX(decoded) #${this._hexDumpCount}: ${this._hexDump(trimmedLine)}`);
       }
 
       // Filter out our own echo noise (NOT hook types!)
@@ -1303,6 +1659,33 @@ class TextractorLauncher extends EventEmitter {
         }
       }
     }
+  }
+
+  /**
+   * v3.13.29: drain whatever is left when the stdout stream ends — two
+   * things the old code silently dropped at the `close` handler: the
+   * trailing partial line held in _stdoutBuffer, and (if the process
+   * exited before ENCODING_SNIFF_MIN_BYTES ever accumulated) the entire
+   * sniff buffer — a process that emits one short line and exits produced
+   * NO output at all under the old code. Called from the `close` handler;
+   * deliberately NOT called from kill() (the user stopped it on purpose,
+   * nothing to recover) — see kill()'s comment.
+   */
+  _flushStdout(reason) {
+    if (!this._stdoutDecoder && this._encodingSniffBytes > 0) {
+      const sniff = Buffer.concat(this._encodingSniffChunks, this._encodingSniffBytes);
+      const chunk = this._openStdoutDecoder(sniff);
+      if (chunk) this._stdoutBuffer += chunk;
+    }
+    if (this._stdoutDecoder) {
+      const tail = this._stdoutDecoder.end();
+      if (tail) this._stdoutBuffer += tail;
+    }
+    if (this._stdoutBuffer) {
+      console.log(`[TextractorLauncher] Flushing ${this._stdoutBuffer.length} trailing chars on ${reason}`);
+      this._drainStdoutLines(true);
+    }
+    this._resetStreamState();
   }
 
   /**
@@ -1515,11 +1898,11 @@ class TextractorLauncher extends EventEmitter {
 
       this.isRunning = true;
       this._outputBuffer = [];
-      this._stdoutBuffer = '';
-      this._lastTextHash = '';
+      // v3.13.29: replaces manual reset of _stdoutBuffer/_lastTextHash/
+      // _dataEventCount/_hexDumpCount/_detectedEncoding/_rawByteCarry —
+      // see _resetStreamState's doc.
+      this._resetStreamState();
       this._stdinSent = false;
-      this._dataEventCount = 0;
-      this._hexDumpCount = 0;
       this._totalLinesProcessed = 0;
       this._hookLinesProcessed = 0;
 
@@ -1533,16 +1916,14 @@ class TextractorLauncher extends EventEmitter {
       this._selectedHookKey = null;
       this._autoSelectedHookKey = null;
       this._hookDiscoveryPhase = false;
-      this._detectedEncoding = null; // v3.8.24: Reset encoding detection
-      this._rawByteCarry = null; // v3.13.24: Reset byte carry-over
-      if (this._hookDiscoveryTimer) {
-        clearTimeout(this._hookDiscoveryTimer);
-        this._hookDiscoveryTimer = null;
-      }
 
-      // Clean up timers
-      if (this._stdinTimer) { clearTimeout(this._stdinTimer); this._stdinTimer = null; }
-      if (this._diagnosticTimer) { clearTimeout(this._diagnosticTimer); this._diagnosticTimer = null; }
+      // Clean up any timers left over from a previous session — v3.13.29:
+      // now routed through the single _clearTimers() rather than repeating
+      // the same three clears inline (a fourth and fifth timer existed
+      // elsewhere in this file with NO clear at all until this version;
+      // duplicating the cleanup here instead of sharing it is exactly how
+      // those two got missed — see _clearTimers()).
+      this._clearTimers();
 
       // === SEND ATTACH VIA STDIN IMMEDIATELY ===
       this._sendStdinAttach(gamePid, 'immediate');
@@ -1559,8 +1940,19 @@ class TextractorLauncher extends EventEmitter {
       }, 1500);
 
       // === HOOK DISCOVERY PHASE ===
-      // After 3 seconds, finalize initial hook discovery
-      setTimeout(() => {
+      // After 3 seconds, finalize initial hook discovery.
+      // v3.13.29: handle now saved (was a bare, uncancelable setTimeout)
+      // and cleared by _clearTimers() — a real leak, not defensive-only:
+      // it used to survive kill() AND a relaunch via arch-fallback. On the
+      // 'quick-exit' path in particular (fallback fires before 2s), this
+      // timer from the ABANDONED attempt fired after the NEW launch()
+      // had already cleared this._hooks for the new session, emitting a
+      // spurious 'hooks-discovered' and marking _hookDiscoveryPhase=true
+      // prematurely for a session that had barely started — and each
+      // further relaunch added another one of these ticking in the
+      // background.
+      this._hookDiscoveryPhaseTimer = setTimeout(() => {
+        this._hookDiscoveryPhaseTimer = null;
         this._hookDiscoveryPhase = true;
         this._emitHookDiscovery();
         console.log(`[TextractorLauncher] Hook discovery phase complete. ${this._hooks.size} hooks found.`);
@@ -1670,7 +2062,17 @@ class TextractorLauncher extends EventEmitter {
         const runTime = this._launchTime ? Math.round((Date.now() - this._launchTime) / 1000) : 0;
         this.isRunning = false;
         this.process = null;
-        this._stdoutBuffer = '';
+        // v3.13.29: drain any trailing partial line (and, if the process
+        // died before the encoding sniffer ever accumulated
+        // ENCODING_SNIFF_MIN_BYTES, decide an encoding from whatever it
+        // has rather than losing the line entirely) instead of the old
+        // silent `_stdoutBuffer = ''`. Deliberately unconditional, not
+        // gated on code===0: dropping the last line of dialogue is worse
+        // than a possible extra 'text' emit a moment after the process
+        // already exited. Runs before the stats log below so hook/line
+        // counts include anything this flush processes. Resets stream
+        // state as its last step — see _flushStdout's doc.
+        this._flushStdout('close');
         this._clearTimers();
 
         console.log(`[TextractorLauncher] Process exited: code=${code}, signal=${signal}, ranFor=${runTime}s`);
@@ -1741,7 +2143,9 @@ class TextractorLauncher extends EventEmitter {
       this.process.on('error', (err) => {
         this.isRunning = false;
         this.process = null;
-        this._stdoutBuffer = '';
+        // v3.13.29: a spawn error means the process never produced usable
+        // stdout — reset rather than flush (nothing meaningful to drain).
+        this._resetStreamState();
         this._clearTimers();
         console.error(`[TextractorLauncher] Spawn error:`, err.message);
 
@@ -1883,6 +2287,11 @@ class TextractorLauncher extends EventEmitter {
     if (this._stdinTimer) { clearTimeout(this._stdinTimer); this._stdinTimer = null; }
     if (this._diagnosticTimer) { clearTimeout(this._diagnosticTimer); this._diagnosticTimer = null; }
     if (this._hookDiscoveryTimer) { clearTimeout(this._hookDiscoveryTimer); this._hookDiscoveryTimer = null; }
+    // v3.13.29: previously-orphaned timers (see their setTimeout call
+    // sites for what leaking them actually broke) — now covered by the
+    // same single cleanup path as the three above.
+    if (this._hookDiscoveryPhaseTimer) { clearTimeout(this._hookDiscoveryPhaseTimer); this._hookDiscoveryPhaseTimer = null; }
+    if (this._archRelaunchTimer) { clearTimeout(this._archRelaunchTimer); this._archRelaunchTimer = null; }
   }
 
   kill() {
@@ -1903,7 +2312,11 @@ class TextractorLauncher extends EventEmitter {
       }
       this.isRunning = false;
       this.process = null;
-      this._stdoutBuffer = '';
+      // v3.13.29: reset only, no flush — the user stopped this
+      // deliberately, so there's no "the process died mid-line, don't
+      // lose it" case to recover here the way there is in the `close`
+      // handler.
+      this._resetStreamState();
       this.emit('status', 'killed');
     }
   }

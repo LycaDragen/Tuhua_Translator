@@ -82,6 +82,7 @@ tests/screenshots/
 scripts/ocr-report.json
 scripts/context-report.json
 scripts/hook-cleaning-report.json
+scripts/stdout-decoding-report.json
 
 # ── Coverage ──
 coverage/
