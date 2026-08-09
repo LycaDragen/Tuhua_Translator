@@ -105,10 +105,16 @@ const KNOWN_GOOD_HOOK_CODES = [
 // v3.13.27: how often (and for how long) the arch-fallback diagnostic
 // re-checks hook state after the first look at 10s — see the comment on the
 // diagnostic scheduling in launch() for why a single one-shot check isn't
-// enough. 45s ceiling matches the documented KiriKiriZ worst-case warm-up
-// time elsewhere in this file.
+// enough. 60s ceiling gives some headroom over the documented KiriKiriZ
+// worst-case warm-up (~45s) elsewhere in this file. Deliberately still
+// bounded, not unbounded/minutes: this cap only matters for the "no real
+// hook yet" wait — the other case this diagnostic handles ("hooks exist but
+// all generic") doesn't self-correct with more time (confirmed with a real
+// 3.5min continuous session that stayed 100% HB0@0 throughout), so waiting
+// longer there would only delay the fallback that's already known to be
+// needed, not avoid it.
 const ARCH_FALLBACK_CHECK_INTERVAL_MS = 5000;
-const ARCH_FALLBACK_CHECK_MAX_MS = 45000;
+const ARCH_FALLBACK_CHECK_MAX_MS = 60000;
 
 class TextractorLauncher extends EventEmitter {
   constructor(hookCleaningSettings) {
@@ -501,7 +507,18 @@ class TextractorLauncher extends EventEmitter {
     // === FORMAT A: Full game hook ===
     // [index:PID:moduleAddr:funcAddr:split::hookCode:processName] text
     // Key feature: double colon (::) before hookCode
-    let match = line.match(/\[(\d+):(\d+):([0-9A-Fa-f]+):([0-9A-Fa-f]+):(\d+)::([^:]+):([^\]]+)\]\s*(.*)/);
+    // v3.13.27: hookIndex is [0-9A-Fa-f]+, not \d+ — TextractorCLI switches
+    // to hex digits (A, B, C, ...) once a session has more than 10 hooks.
+    // Confirmed real: a \d+-only capture here silently fails to match any
+    // hook whose index is a letter, falling through all the way to FORMAT D
+    // (generic bracket), which stores the *entire* raw bracket text as
+    // hookKey and leaves hookCode empty — not 'HB0@0', just ''. That empty
+    // string is exactly what let those hooks slip past
+    // _allRealHooksAreGenericType()'s `!== 'HB0@0'` check undetected, killing
+    // the arch-fallback trigger in every session that reached 10+ hooks
+    // (confirmed against real debug output: hooks #A/#B/#C showed
+    // `code=""` while every single-digit hook showed `code="HB0@0"`).
+    let match = line.match(/\[([0-9A-Fa-f]+):(\d+):([0-9A-Fa-f]+):([0-9A-Fa-f]+):(\d+)::([^:]+):([^\]]+)\]\s*(.*)/);
     if (match) {
       const hookIndex = match[1];
       const pid = match[2];
@@ -518,14 +535,15 @@ class TextractorLauncher extends EventEmitter {
 
       return {
         hookKey, hookName: processName, displayName, text, fullName,
-        hookCode, funcAddr, processName, hookIndex: parseInt(hookIndex), isSystemHook: false
+        hookCode, funcAddr, processName, hookIndex: parseInt(hookIndex, 16), isSystemHook: false
       };
     }
 
     // === FORMAT B: System hook (Console/Clipboard) ===
     // [index:PID:...:TypeName:hookCode] text
     // These have FFFFFFFFFFFFFFFF addresses and names like Consola/Portapapeles/Console/Clipboard
-    match = line.match(/\[(\d+):(\d+):([^\]]+)\]\s*(.*)/);
+    // v3.13.27: same hex-index fix as Format A above.
+    match = line.match(/\[([0-9A-Fa-f]+):(\d+):([^\]]+)\]\s*(.*)/);
     if (match) {
       const hookIndex = match[1];
       const pid = match[2];
@@ -558,7 +576,7 @@ class TextractorLauncher extends EventEmitter {
         const fullName = `[${bracketContent}]`;
         return {
           hookKey, hookName: hookTypeName || hookCode, displayName, text, fullName,
-          hookCode, funcAddr: '', processName: '', hookIndex: parseInt(hookIndex), isSystemHook: true
+          hookCode, funcAddr: '', processName: '', hookIndex: parseInt(hookIndex, 16), isSystemHook: true
         };
       }
     }
