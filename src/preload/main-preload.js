@@ -46,6 +46,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'textractor-cli-status',
   'textractor-cli-output',
   'textractor-select-hook',
+  'textractor-insert-hook-code',
   'textractor-test-cli',
   'get-debug-logs',
   'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
@@ -261,6 +262,10 @@ const api = {
   textractorCliStatus: () => secureInvoke('textractor-cli-status'),
   textractorCliOutput: () => secureInvoke('textractor-cli-output'),
   textractorSelectHook: (hookKey) => secureInvoke('textractor-select-hook', hookKey),
+  textractorInsertHookCode: (hookCode) => {
+    if (typeof hookCode !== 'string') throw new Error('Invalid hook code');
+    return secureInvoke('textractor-insert-hook-code', hookCode);
+  },
   textractorTestCli: (cliPath) => {
     if (typeof cliPath !== 'string') throw new Error('Invalid CLI path');
     return secureInvoke('textractor-test-cli', cliPath);

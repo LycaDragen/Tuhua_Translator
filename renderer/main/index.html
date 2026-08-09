@@ -499,6 +499,7 @@
                             <label class="block text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">🪝 Hook Activo</label>
                             <span id="hook-count-badge" class="text-[9px] font-mono text-emerald-500">0 hooks</span>
                         </div>
+                        <div id="hook-no-real-warning" class="hidden p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800 text-[10px] text-amber-700 dark:text-amber-400" data-i18n="hook_no_real_warning">⚠ No se encontró un hook real del juego todavía (solo Consola/Portapapeles). No se está traduciendo nada hasta que aparezca uno.</div>
                         <select id="hook-selector" onchange="onHookSelected(this.value)" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-emerald-200 dark:border-emerald-800 text-xs font-mono">
                             <option value="">🔄 Auto (seleccionar mejor hook)</option>
                         </select>
@@ -507,7 +508,15 @@
                             <p id="hook-preview-text" class="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed"></p>
                             <p id="hook-preview-score" class="hidden text-[9px] text-gray-400 mt-1.5 pt-1.5 border-t border-emerald-200/50 dark:border-emerald-800/50"></p>
                         </div>
-                        <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
+                        <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60" data-i18n="hook_selector_help">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
+                        <details class="group">
+                            <summary class="text-[9px] text-emerald-600 dark:text-emerald-400/60 cursor-pointer select-none" data-i18n="hook_insert_code_toggle">¿Encontraste un código de hook en Textractor GUI? Insertalo acá.</summary>
+                            <div class="flex gap-2 mt-1.5">
+                                <input type="text" id="hook-code-input" class="flex-1 p-2 rounded-md bg-white dark:bg-dark-900 border border-emerald-200 dark:border-emerald-800 text-[10px] font-mono" data-i18n-placeholder="hook_insert_code_placeholder" placeholder="HQ8@0:gdi32.dll:GetTextExtentPoint32W">
+                                <button onclick="insertHookCode()" class="px-3 py-2 text-[10px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded-md transition" data-i18n="hook_insert_code_btn">Insertar</button>
+                            </div>
+                            <p id="hook-insert-status" class="hidden text-[9px] mt-1"></p>
+                        </details>
                     </div>
 
                     <!-- TCP Port (Advanced) -->

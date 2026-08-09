@@ -472,9 +472,17 @@ class IpcHandlers {
       return { success: true, activeHookKey: this.textractorLauncher.getActiveHookKey() };
     });
 
+    // v3.13.24: manually insert a hook code (e.g. found via the full
+    // Textractor GUI's hook search) into Tuhua's own running CLI session.
+    ipcMain.handle('textractor-insert-hook-code', async (event, hookCode) => {
+      if (typeof hookCode !== 'string') return { success: false, error: 'Invalid hook code' };
+      console.log(`[Tuhua] Inserting manual hook code: ${hookCode}`);
+      return this.textractorLauncher.insertHookCode(hookCode);
+    });
+
     // ===== TextractorCLI Test (v3.8.23) =====
     ipcMain.handle('textractor-test-cli', async (event, cliPath) => {
-      if (typeof cliPath !== 'string') return { canStart: false, hint: 'Ruta inválida' };
+      if (typeof cliPath !== 'string') return { canStart: false, hintKey: 'hint_invalid_path', hint: 'Invalid path' };
       console.log(`[Tuhua] Testing TextractorCLI: ${cliPath}`);
       const result = await this.textractorLauncher.testLaunch(cliPath);
       console.log(`[Tuhua] Test result: canStart=${result.canStart}, hint="${result.hint}"`);
@@ -1959,7 +1967,7 @@ class IpcHandlers {
       'ocr-set-auto-capture', 'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-launch',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
-      'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
+      'textractor-select-hook', 'textractor-insert-hook-code', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
       'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game', 'xuat-set-port',
       'xuat-test-endpoint'

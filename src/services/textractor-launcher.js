@@ -36,24 +36,79 @@ const textCleaning = require('./text-cleaning');
  * Interpret Windows exit codes into human-readable messages.
  */
 function interpretExitCode(code) {
-  if (code === 0) return { severity: 'ok', hint: '' };
-  if (code === 1) return { severity: 'error', hint: 'Error general de TextractorCLI. Puede ser un PID inválido o error interno.' };
-  if (code === 2) return { severity: 'error', hint: 'Archivo no encontrado. Verifica que TextractorCLI.exe y sus DLLs existan.' };
-  if (code === 5) return { severity: 'error', hint: 'Acceso denegado. Intenta ejecutar como Administrador.' };
-  if (code === 0xC0000135) return { severity: 'critical', hint: 'DLL no encontrada. Instala Visual C++ Redistributable (x64 o x86 según tu Textractor).' };
-  if (code === 0xC0000005) return { severity: 'critical', hint: 'Violación de acceso (crash). TextractorCLI falló al iniciar — posible incompatibilidad o DLL incorrecta.' };
-  if (code === 0xC0000142) return { severity: 'critical', hint: 'Fallo de inicialización de DLL. Reinstala Visual C++ Redistributable.' };
-  if (code === 0xE0434352) return { severity: 'critical', hint: 'Excepción .NET no manejada. TextractorCLI tiene un error interno.' };
-  // Generic negative codes on Windows (signed interpretation of HRESULT)
+  // v3.13.24: every branch now returns hintKey (+ optional hintParams) so
+  // the renderer can show this translated instead of the hardcoded Spanish
+  // that used to ship straight from the backend regardless of UI language.
+  // `hint` stays as the English fallback (used if a key/translation is
+  // missing, and for log lines).
+  if (code === 0) return { severity: 'ok', hintKey: null, hint: '' };
+  if (code === 1) return { severity: 'error', hintKey: 'err_code_general', hint: 'General TextractorCLI error. Could be an invalid PID or an internal error.' };
+  if (code === 2) return { severity: 'error', hintKey: 'err_code_file_not_found', hint: 'File not found. Verify that TextractorCLI.exe and its DLLs exist.' };
+  if (code === 5) return { severity: 'error', hintKey: 'err_code_access_denied', hint: 'Access denied. Try running as Administrator.' };
+  if (code === 0xC0000135) return { severity: 'critical', hintKey: 'err_dll_missing', hint: 'DLL not found. Install Visual C++ Redistributable (x64 or x86 depending on your Textractor).' };
+  if (code === 0xC0000005) return { severity: 'critical', hintKey: 'err_access_violation', hint: 'Access violation (crash). TextractorCLI failed to start — possible incompatibility or wrong DLL.' };
+  if (code === 0xC0000142) return { severity: 'critical', hintKey: 'err_dll_init_failure', hint: 'DLL initialization failure. Reinstall Visual C++ Redistributable.' };
+  if (code === 0xE0434352) return { severity: 'critical', hintKey: 'err_dotnet_exception', hint: 'Unhandled .NET exception. TextractorCLI has an internal error.' };
+  // Generic negative codes on Windows (signed interpretation of HRESULT).
+  // Reuses the same keys as the direct-code checks above — same underlying
+  // cause, only reached via a different branch (HRESULT-style negative
+  // code vs. a small positive exit code).
   if (code < 0 && code >= -0xFFFF) {
     const unsigned = code >>> 0;
-    if (unsigned === 0xC0000135) return { severity: 'critical', hint: 'DLL no encontrada (0xC0000135). Instala Visual C++ Redistributable.' };
-    if (unsigned === 0xC0000005) return { severity: 'critical', hint: 'Violación de acceso (0xC0000005). TextractorCLI crasheó.' };
-    if (unsigned === 0xC0000142) return { severity: 'critical', hint: 'Fallo de inicialización DLL (0xC0000142). Reinstala VC++ Redist.' };
-    return { severity: 'error', hint: `Error de sistema Windows (0x${unsigned.toString(16).toUpperCase()}).` };
+    if (unsigned === 0xC0000135) return { severity: 'critical', hintKey: 'err_dll_missing', hint: 'DLL not found. Install Visual C++ Redistributable.' };
+    if (unsigned === 0xC0000005) return { severity: 'critical', hintKey: 'err_access_violation', hint: 'Access violation. TextractorCLI crashed.' };
+    if (unsigned === 0xC0000142) return { severity: 'critical', hintKey: 'err_dll_init_failure', hint: 'DLL initialization failure. Reinstall VC++ Redist.' };
+    return { severity: 'error', hintKey: 'err_windows_system', hintParams: { code: `0x${unsigned.toString(16).toUpperCase()}` }, hint: `Windows system error (0x${unsigned.toString(16).toUpperCase()}).` };
   }
-  return { severity: 'error', hint: `Código de salida: ${code}` };
+  return { severity: 'error', hintKey: 'err_exit_code', hintParams: { code: String(code) }, hint: `Exit code: ${code}` };
 }
+
+/**
+ * v3.13.24: known-good hook codes for common Win32 GDI/D3DX text functions,
+ * sent proactively alongside `attach` (not reactively after detecting bad
+ * text — see the comment on _sendKnownGoodHooks for why).
+ *
+ * Confirmed real-world case, not guessed: TextractorCLI's own generic
+ * auto-engine (used as a fallback when a game's specific VN engine isn't
+ * recognized — happened here for a KiriKiriZ-based game) blanket-hooks a
+ * long list of standard Win32 text-drawing APIs with a generic hook-code
+ * type. For some of those functions that generic type misreads the string
+ * parameters and produces garbled text — confirmed with Nekopara Vol.1: the
+ * auto-inserted hook for `GetTextExtentPoint32W` used type `HB0@0` and
+ * produced garbage, while the CORRECT type for this function (its `int
+ * cbString` parameter gives an explicit length, which needs a
+ * length-aware hook type, not the generic one) is `HQ8@0` — found by the
+ * user via the Textractor GUI's manual hook search, at the exact same
+ * memory address as the broken auto-inserted hook.
+ *
+ * Deliberately NOT a large table: every entry here must be verified
+ * against a real game before being added, the same standard already used
+ * for the HOOK-cleaning algorithms in text-cleaning.js — a wrong hook code
+ * sent to TextractorCLI wastes the user's time same as a wrong text-
+ * cleaning heuristic would. Extend this list only from confirmed reports.
+ *
+ * v3.13.25 note, also confirmed real: on this same game, x86 TextractorCLI
+ * hooked GetTextExtentPoint32W with the CORRECT code automatically, with no
+ * manual insertion needed at all — x64's auto-engine was specifically the
+ * one that got it wrong. So this table's proactive insertion is a
+ * second-line fallback; _attemptArchFallback (see textractor-launcher's
+ * arch-fallback logic) trying x86 first is the higher-leverage fix for
+ * this exact failure mode and is why its trigger condition was extended
+ * to cover "hooks exist but none are clean," not just "zero hooks."
+ */
+const KNOWN_GOOD_HOOK_CODES = [
+  // Confirmed against Nekopara Vol.1 (KiriKiriZ, generic-engine fallback
+  // path) — see the comment above.
+  'HQ8@0:gdi32.dll:GetTextExtentPoint32W'
+];
+
+// v3.13.27: how often (and for how long) the arch-fallback diagnostic
+// re-checks hook state after the first look at 10s — see the comment on the
+// diagnostic scheduling in launch() for why a single one-shot check isn't
+// enough. 45s ceiling matches the documented KiriKiriZ worst-case warm-up
+// time elsewhere in this file.
+const ARCH_FALLBACK_CHECK_INTERVAL_MS = 5000;
+const ARCH_FALLBACK_CHECK_MAX_MS = 45000;
 
 class TextractorLauncher extends EventEmitter {
   constructor(hookCleaningSettings) {
@@ -109,6 +164,8 @@ class TextractorLauncher extends EventEmitter {
     this._hookLinesProcessed = 0;
     // v3.8.24: Detected encoding for TextractorCLI stdout
     this._detectedEncoding = null; // null = not yet detected, 'utf16le' or 'utf8'
+    // v3.13.24: raw byte left over from a chunk that ended mid-character
+    this._rawByteCarry = null;
   }
 
   configure(cliPath) {
@@ -218,15 +275,20 @@ class TextractorLauncher extends EventEmitter {
 
   /**
    * v3.13.23: Try relaunching with the sibling architecture (x64<->x86) once
-   * per user-initiated launch attempt. Triggered from the three points where
-   * a wrong-architecture attach is already detectable today but previously
-   * only logged: immediate spawn error (ENOENT etc.), a quick post-spawn
-   * exit, and the 10s "no hooks found" diagnostic (attach can silently
-   * "succeed" against a mismatched-bitness process and just never produce
-   * any hook). `reason` is one of 'spawn-error' | 'quick-exit' | 'no-hooks'.
-   * Returns true if a fallback attempt was launched (caller should skip its
-   * own error reporting for this attempt), false if there's nothing to fall
-   * back to or a fallback was already tried for this launch.
+   * per user-initiated launch attempt. Triggered from four points where a
+   * wrong-architecture attach or a wrong-engine-detection result is already
+   * detectable today but previously only logged: immediate spawn error
+   * (ENOENT etc.), a quick post-spawn exit, the 10s "no hooks found"
+   * diagnostic (attach can silently "succeed" against a mismatched-bitness
+   * process and just never produce any hook), and — v3.13.25 — the 10s
+   * "hooks exist but all are garbled" case (confirmed real: x64
+   * TextractorCLI's generic auto-engine can hook the right function with
+   * the wrong hook-code type on a game where x86's own engine gets it
+   * right immediately). `reason` is one of 'spawn-error' | 'quick-exit' |
+   * 'no-hooks' | 'no-clean-hook'. Returns true if a fallback attempt was
+   * launched (caller should skip its own error reporting for this
+   * attempt), false if there's nothing to fall back to or a fallback was
+   * already tried for this launch.
    */
   _attemptArchFallback(reason) {
     if (this._archFallbackAttempted) return false;
@@ -234,7 +296,7 @@ class TextractorLauncher extends EventEmitter {
     if (!fallback) return false;
 
     this._archFallbackAttempted = true;
-    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s' }[reason] || reason;
+    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s', 'no-clean-hook': 'hooks encontrados pero todos con ruido' }[reason] || reason;
     console.warn(`[TextractorLauncher] ${fallback.from}: ${reasonLabel} -> probando ${fallback.to}...`);
     this.emit('arch-fallback', { from: fallback.from, to: fallback.to, reason });
 
@@ -250,7 +312,10 @@ class TextractorLauncher extends EventEmitter {
   }
 
   validatePath(cliPath) {
-    if (!cliPath) return { valid: false, message: 'No path specified' };
+    // v3.13.24: every `message` below now has a companion `messageKey`
+    // (+ `messageParams` where dynamic) for the renderer to translate —
+    // `message` itself is now always English, used as the fallback.
+    if (!cliPath) return { valid: false, messageKey: 'val_no_path', message: 'No path specified' };
     try {
       const cleanPath = cliPath.replace(/^"+|"+$/g, '');
 
@@ -279,25 +344,27 @@ class TextractorLauncher extends EventEmitter {
             for (const exeName of exeNames) {
               searchedPaths.push(path.join(resolved, exeName));
             }
+            const searchedList = searchedPaths.map(p => '  • ' + p).join('\n');
             return {
               valid: false,
-              message: `Se esperaba un .exe, se recibió una carpeta. No se encontró Textractor.exe ni TextractorCLI.exe en:\n` +
-                searchedPaths.map(p => '  • ' + p).join('\n')
+              messageKey: 'val_folder_no_exe',
+              messageParams: { paths: searchedList },
+              message: `Expected a .exe, got a folder. Could not find Textractor.exe or TextractorCLI.exe in:\n${searchedList}`
             };
           }
         }
       } else {
-        return { valid: false, message: 'Ruta no encontrada: ' + resolved };
+        return { valid: false, messageKey: 'val_path_not_found', messageParams: { path: resolved }, message: 'Path not found: ' + resolved };
       }
 
       // Now `resolved` should point to a .exe file
       const ext = path.extname(resolved).toLowerCase();
       if (ext !== '.exe') {
-        return { valid: false, message: 'Expected .exe file, got: ' + ext };
+        return { valid: false, messageKey: 'val_expected_exe', messageParams: { ext }, message: 'Expected .exe file, got: ' + ext };
       }
       const basename = path.basename(resolved).toLowerCase();
       if (!basename.includes('textractor')) {
-        return { valid: false, message: 'File does not appear to be TextractorCLI: ' + basename };
+        return { valid: false, messageKey: 'val_not_textractor', messageParams: { basename }, message: 'File does not appear to be TextractorCLI: ' + basename };
       }
 
       // v3.8.23: Check if required DLLs might be missing
@@ -329,12 +396,16 @@ class TextractorLauncher extends EventEmitter {
       }
 
       let message = 'Valid TextractorCLI executable' + archWarning;
+      let messageKey = 'val_valid_exe';
+      let messageParams = { arch: archWarning };
       if (autoResolved) {
-        message = 'Auto-detectado: ' + resolved + archWarning;
+        message = 'Auto-detected: ' + resolved + archWarning;
+        messageKey = 'val_auto_detected';
+        messageParams = { path: resolved, arch: archWarning };
       }
-      return { valid: true, message, resolved, arch: archWarning, autoResolved };
+      return { valid: true, messageKey, messageParams, message, resolved, arch: archWarning, autoResolved };
     } catch (err) {
-      return { valid: false, message: err.message };
+      return { valid: false, messageKey: null, message: err.message };
     }
   }
 
@@ -592,6 +663,21 @@ class TextractorLauncher extends EventEmitter {
       penalty += 600;
     }
 
+    // 2b. v3.13.24: Windows single-letter menu accelerators, e.g. "(&F)",
+    // "&S)", "&L)" — the actual real-world convention for localized menu
+    // resource strings ("ファイル(&F)"), not caught by the full-word check
+    // above. Confirmed against a real false-positive: a Nekopara/KiriKiriZ
+    // hook whose captured text was garbled by a wrong-parameter hook (see
+    // the encoding investigation) happened to fall in the CJK Unicode
+    // range, winning _scoreHook's +1000 CJK bonus outright despite being
+    // an obvious menu string, not dialogue. Requires 2+ occurrences (a
+    // real menu has several items; a single stray "&X)" is near-impossible
+    // in real dialogue but this keeps the bar conservative regardless).
+    const acceleratorMatches = text.match(/&[A-Za-z]\)/g);
+    if (acceleratorMatches && acceleratorMatches.length >= 2) {
+      penalty += 600;
+    }
+
     // 3. Pure whitespace
     if (/^\s+$/.test(text)) {
       penalty += 900;
@@ -617,6 +703,46 @@ class TextractorLauncher extends EventEmitter {
     }
 
     return penalty;
+  }
+
+  /**
+   * v3.13.26: true when at least one real (non-system) hook has produced
+   * text AND every single one has hookCode exactly `HB0@0` — the generic
+   * placeholder TextractorCLI's blanket auto-engine uses when it can't
+   * identify a specific typed hook for a function. Replaces an earlier
+   * (v3.13.25) content-quality-based version that checked
+   * `_textQualityPenalty` instead — that one turned out unreliable: proven
+   * with a real side-by-side comparison, some HB0@0-typed hooks on x64
+   * produce text that happens not to match ANY of the quality-penalty
+   * patterns (no menu accelerators, no doubled chars) by coincidence, so
+   * they scored as "clean" despite being the exact same broken generic
+   * hook type, and the fallback never triggered.
+   *
+   * hookCode is a much stronger, purely structural signal, confirmed
+   * against two full real sessions on the same game: x64 (broken) —
+   * EVERY real hook was `HB0@0`, zero exceptions across ~15 discovered
+   * hooks over 90+ seconds. x86 (working, after the user pointed Tuhua
+   * straight at the x86 folder) — ZERO hooks were `HB0@0`; every one had
+   * a specific type (`HQ18@0`, `HQ8@0`, `HW8@0`, KiriKiriZ's own
+   * `HW-8*14:-8*0@...`). When a game-specific engine (or a correctly
+   * resolved individual API hook) is actually identified, TextractorCLI
+   * assigns it a specific code — `HB0@0` alone means "no idea, generic
+   * fallback" for every function it's attached to, not just some.
+   *
+   * Deliberately excludes the "no real hook yet at all" case (only
+   * Console/Clipboard so far) — some engines take up to ~45s to insert
+   * their real hook (confirmed with KiriKiriZ), so treating "no real hook
+   * yet" the same as "only generic real hooks" would cut that off
+   * prematurely.
+   */
+  _allRealHooksAreGenericType() {
+    let hasRealHook = false;
+    for (const hook of this._hooks.values()) {
+      if (hook.isSystemHook || hook.textCount === 0) continue;
+      hasRealHook = true;
+      if (hook.hookCode !== 'HB0@0') return false;
+    }
+    return hasRealHook;
   }
 
   /**
@@ -767,14 +893,37 @@ class TextractorLauncher extends EventEmitter {
 
     let bestHook = null;
     let bestScore = -Infinity;
+    let hasRealCandidate = false;
 
     for (const [key, hook] of this._hooks) {
       if (hook.textCount === 0) continue;
+      if (!hook.isSystemHook) hasRealCandidate = true;
       const score = this._scoreHook(hook);
       if (score > bestScore) {
         bestScore = score;
         bestHook = hook;
       }
+    }
+
+    // v3.13.24: if every candidate with text so far is a system hook
+    // (Console/Clipboard), there's no real hook into the game yet — refuse
+    // to auto-select one. Without this guard, the scorer still picks
+    // *something* (even a heavily-penalized system hook, if it's the only
+    // option), and Tuhua silently translates whatever's in the Windows
+    // clipboard or Textractor's own console output as if it were game
+    // dialogue — confirmed as the actual cause of a real "wrong game
+    // detected" bug report, not a hypothetical. Leaving
+    // _autoSelectedHookKey unset means _processHookLine's `activeHookKey ===
+    // hookKey` gate never matches, so no 'text' event fires at all — no
+    // more informative than before from the translation pane alone, which
+    // is why _emitNoRealHookWarning (called from the 10s diagnostic) exists
+    // to surface this state explicitly instead of failing silently.
+    if (!hasRealCandidate) {
+      if (this._autoSelectedHookKey !== null) {
+        console.log(`[TextractorLauncher] Only system hooks seen so far — clearing auto-selection instead of picking one`);
+        this._autoSelectedHookKey = null;
+      }
+      return;
     }
 
     if (bestHook) {
@@ -859,12 +1008,25 @@ class TextractorLauncher extends EventEmitter {
 
     const activeHookKey = this._selectedHookKey || this._autoSelectedHookKey;
 
+    // v3.13.24: true when hooks exist but none of them are a real game hook
+    // (only Console/Clipboard) AND the user hasn't manually picked one —
+    // exactly the state _autoSelectBestHook's guard above refuses to
+    // auto-select from, so the UI can show a clear "no real hook yet"
+    // message instead of the panel just looking idle while nothing
+    // translates. Recomputed on every discovery update (debounced every
+    // 500ms), so it clears itself automatically once a real hook engages —
+    // some engines (KiriKiriZ observed taking ~45s) are slow to insert, so
+    // this is NOT the same signal as the 10s "no hooks at all" diagnostic.
+    const noRealHookFound = !this._selectedHookKey && hooks.length > 0 &&
+      hooks.every(h => h.isSystemHook);
+
     this.emit('hooks-discovered', {
       hooks,
       selectedHookKey: this._selectedHookKey,
       autoSelectedHookKey: this._autoSelectedHookKey,
       activeHookKey,
-      totalHooks: hooks.length
+      totalHooks: hooks.length,
+      noRealHookFound
     });
   }
 
@@ -1029,9 +1191,37 @@ class TextractorLauncher extends EventEmitter {
       }
     }
 
-    // Decode using detected encoding (fallback to utf8)
     const encoding = this._detectedEncoding || 'utf8';
-    const chunk = data.toString(encoding);
+
+    // v3.13.24: prepend any raw byte carried over from a previous chunk that
+    // ended mid-character. Confirmed real bug, not hypothetical: each
+    // process.stdout 'data' event used to be decoded independently
+    // (`data.toString(encoding)`), so a chunk boundary landing mid-UTF-16
+    // code unit shifted every subsequent 2-byte pairing in that chunk by
+    // one byte. Hiragana/Katakana (U+3040-30FF) have a fixed high byte of
+    // 0x30 in UTF-16LE — 0x30 is also the ASCII digit '0' — so a misaligned
+    // decode of real Japanese hook text surfaces as a mangled glyph
+    // followed by a literal '0' after nearly every character, which is
+    // exactly the pattern seen in a real KiriKiriZ/Nekopara hook capture
+    // ("´¥ò0´¢í0´¢ñ0..."). Only utf16le needs this: it's the only encoding
+    // here with a fixed, cheap-to-check code-unit width (2 bytes) — utf8's
+    // variable-width sequences would need a different check, and there's no
+    // evidence (no BOM-less detection path even reaches 'utf8' against
+    // TextractorCLI on Windows) that this project hits that case in
+    // practice.
+    let fullData = data;
+    if (this._rawByteCarry && this._rawByteCarry.length > 0) {
+      fullData = Buffer.concat([this._rawByteCarry, data]);
+      this._rawByteCarry = null;
+    }
+
+    let decodable = fullData;
+    if (encoding === 'utf16le' && fullData.length % 2 !== 0) {
+      decodable = fullData.subarray(0, fullData.length - 1);
+      this._rawByteCarry = fullData.subarray(fullData.length - 1);
+    }
+
+    const chunk = decodable.toString(encoding);
     this._stdoutBuffer += chunk;
     this._dataEventCount++;
 
@@ -1103,14 +1293,19 @@ class TextractorLauncher extends EventEmitter {
    * Returns { canStart, exitCode, stderr, stdout, hint }
    */
   async testLaunch(cliPath) {
+    // v3.13.24: every result now carries hintKey/hintParams alongside the
+    // English-fallback `hint` string, same pattern as _buildError/
+    // validatePath — this is the exact function behind the "TextractorCLI
+    // inició correctamente" message that showed up in Spanish regardless
+    // of UI language.
     const testPath = cliPath || this.cliPath;
     if (!testPath) {
-      return { canStart: false, exitCode: -1, stderr: '', stdout: '', hint: 'Ruta a TextractorCLI no configurada' };
+      return { canStart: false, exitCode: -1, stderr: '', stdout: '', hintKey: 'hint_no_path_configured', hint: 'TextractorCLI path not configured' };
     }
 
     const validation = this.validatePath(testPath);
     if (!validation.valid) {
-      return { canStart: false, exitCode: -1, stderr: '', stdout: '', hint: validation.message };
+      return { canStart: false, exitCode: -1, stderr: '', stdout: '', hintKey: validation.messageKey, hintParams: validation.messageParams, hint: validation.message };
     }
 
     // Use the auto-resolved path from validation (folder -> x64/Textractor.exe)
@@ -1121,10 +1316,10 @@ class TextractorLauncher extends EventEmitter {
       let testStderr = '';
       let settled = false;
 
-      const finish = (canStart, exitCode, hint) => {
+      const finish = (canStart, exitCode, hint, hintKey, hintParams) => {
         if (settled) return;
         settled = true;
-        resolve({ canStart, exitCode, stderr: testStderr.trim(), stdout: testStdout.trim(), hint, resolvedPath });
+        resolve({ canStart, exitCode, stderr: testStderr.trim(), stdout: testStdout.trim(), hint, hintKey: hintKey || null, hintParams: hintParams || null, resolvedPath });
       };
 
       try {
@@ -1143,7 +1338,7 @@ class TextractorLauncher extends EventEmitter {
         // Timeout — if it runs for 3 seconds without crashing, it started OK
         const timeout = setTimeout(() => {
           try { testProc.kill(); } catch (e) { /* ignore */ }
-          finish(true, 0, 'TextractorCLI inició correctamente');
+          finish(true, 0, 'TextractorCLI started successfully', 'hint_cli_started_ok');
         }, 3000);
 
         testProc.stdout.on('data', (data) => {
@@ -1158,30 +1353,46 @@ class TextractorLauncher extends EventEmitter {
           clearTimeout(timeout);
           if (code === 0 || testStdout.length > 0) {
             // Exited with code 0 or produced output = it can start
-            finish(true, code || 0, 'TextractorCLI inició correctamente (código: ' + code + ')');
+            finish(true, code || 0, `TextractorCLI started successfully (code: ${code})`, 'hint_cli_started_ok_code', { code: String(code) });
           } else {
             const interpreted = interpretExitCode(code);
-            let hintMsg = interpreted.hint || 'No se pudo iniciar TextractorCLI';
+            let hintMsg = interpreted.hint || 'Could not start TextractorCLI';
+            let hintKey = interpreted.hintKey || 'hint_could_not_start';
+            let hintParams = interpreted.hintParams || null;
             if (testStderr.includes('DLL') || testStderr.includes('dll')) {
-              hintMsg = 'DLL faltante. Instala Visual C++ Redistributable 2015-2022.';
+              hintKey = 'hint_dll_missing_test';
+              hintParams = null;
+              hintMsg = 'Missing DLL. Install Visual C++ Redistributable 2015-2022.';
             }
             if (testStderr.includes('bit') || testStderr.includes('architecture')) {
-              hintMsg = 'Arquitectura incorrecta. Usa TextractorCLI de 64 bits para juegos de 64 bits.';
+              hintKey = 'hint_wrong_architecture_test';
+              hintParams = null;
+              hintMsg = 'Wrong architecture. Use 64-bit TextractorCLI for 64-bit games.';
             }
-            finish(false, code, hintMsg);
+            finish(false, code, hintMsg, hintKey, hintParams);
           }
         });
 
         testProc.on('error', (err) => {
           clearTimeout(timeout);
-          let hintMsg = 'No se pudo ejecutar TextractorCLI';
-          if (err.code === 'ENOENT') hintMsg = 'Archivo no encontrado: ' + resolvedPath;
-          else if (err.code === 'EACCES') hintMsg = 'Permiso denegado. Ejecuta como Administrador.';
-          else if (err.code === 'EPERM') hintMsg = 'Permiso denegado por el sistema. Antivirus bloqueando?';
-          finish(false, -1, hintMsg);
+          let hintMsg = 'Could not run TextractorCLI';
+          let hintKey = 'hint_could_not_run';
+          let hintParams = null;
+          if (err.code === 'ENOENT') {
+            hintKey = 'hint_file_not_found_at';
+            hintParams = { path: resolvedPath };
+            hintMsg = 'File not found: ' + resolvedPath;
+          } else if (err.code === 'EACCES') {
+            hintKey = 'hint_permission_denied_admin';
+            hintMsg = 'Permission denied. Run as Administrator.';
+          } else if (err.code === 'EPERM') {
+            hintKey = 'hint_permission_denied_av';
+            hintMsg = 'Permission denied by the system. Antivirus blocking it?';
+          }
+          finish(false, -1, hintMsg, hintKey, hintParams);
         });
       } catch (err) {
-        finish(false, -1, 'Error al lanzar: ' + err.message);
+        finish(false, -1, 'Error launching: ' + err.message, 'hint_launch_error', { message: err.message });
       }
     });
   }
@@ -1198,12 +1409,18 @@ class TextractorLauncher extends EventEmitter {
    * Build a structured error object with all diagnostic information.
    */
   _buildError(message, code, extra = {}) {
-    const interpreted = code !== undefined ? interpretExitCode(code) : { severity: 'error', hint: '' };
+    const interpreted = code !== undefined ? interpretExitCode(code) : { severity: 'error', hintKey: null, hint: '' };
+    // v3.13.24: hintKey/hintParams let the renderer translate this instead
+    // of displaying the hardcoded (English-fallback) `hint` string as-is.
     const error = {
       message,
+      messageKey: extra.messageKey || null,
+      messageParams: extra.messageParams || null,
       code: code !== undefined ? code : null,
       severity: interpreted.severity,
       hint: interpreted.hint || extra.hint || '',
+      hintKey: interpreted.hintKey || extra.hintKey || null,
+      hintParams: interpreted.hintParams || extra.hintParams || null,
       stderr: this._stderrLines.join('\n').trim(),
       stdout: this._stdoutTail.join('\n').trim(),
       gamePid: this._gamePid,
@@ -1227,7 +1444,7 @@ class TextractorLauncher extends EventEmitter {
 
     const cliPath = options.cliPath || this.cliPath;
     if (!cliPath) {
-      const err = this._buildError('TextractorCLI path not configured', undefined, { hint: 'Configura la ruta a TextractorCLI.exe en la sección de Textractor.' });
+      const err = this._buildError('TextractorCLI path not configured', undefined, { hintKey: 'hint_configure_path', hint: 'Configure the path to TextractorCLI.exe in the Textractor section.' });
       this.emit('error', err);
       return false;
     }
@@ -1238,7 +1455,10 @@ class TextractorLauncher extends EventEmitter {
 
     const validation = this.validatePath(cliPath);
     if (!validation.valid) {
-      const err = this._buildError(validation.message, undefined, { hint: 'Verifica que la ruta a TextractorCLI.exe o la carpeta de Textractor sea correcta.' });
+      const err = this._buildError(validation.message, undefined, {
+        messageKey: validation.messageKey, messageParams: validation.messageParams,
+        hintKey: 'hint_verify_path', hint: 'Verify that the path to TextractorCLI.exe or the Textractor folder is correct.'
+      });
       this.emit('error', err);
       return false;
     }
@@ -1249,7 +1469,7 @@ class TextractorLauncher extends EventEmitter {
 
     const gamePid = options.pid || pid;
     if (!gamePid || isNaN(gamePid)) {
-      const err = this._buildError('Invalid game PID', undefined, { hint: 'Ingresa un PID válido del juego (número positivo). Encuéntralo en el Administrador de Tareas → Detalles.' });
+      const err = this._buildError('Invalid game PID', undefined, { hintKey: 'hint_invalid_pid', hint: 'Enter a valid game PID (positive number). Find it in Task Manager → Details.' });
       this.emit('error', err);
       return false;
     }
@@ -1296,6 +1516,7 @@ class TextractorLauncher extends EventEmitter {
       this._autoSelectedHookKey = null;
       this._hookDiscoveryPhase = false;
       this._detectedEncoding = null; // v3.8.24: Reset encoding detection
+      this._rawByteCarry = null; // v3.13.24: Reset byte carry-over
       if (this._hookDiscoveryTimer) {
         clearTimeout(this._hookDiscoveryTimer);
         this._hookDiscoveryTimer = null;
@@ -1312,6 +1533,11 @@ class TextractorLauncher extends EventEmitter {
       this._stdinTimer = setTimeout(() => {
         this._stdinTimer = null;
         this._sendStdinAttach(gamePid, 'delayed-1.5s');
+        // v3.13.24: proactively insert known-good hooks for common Win32
+        // text functions once attach has had a chance to settle — see
+        // KNOWN_GOOD_HOOK_CODES's comment for why this is proactive, not
+        // reactive.
+        this._sendKnownGoodHooks('delayed-1.5s');
       }, 1500);
 
       // === HOOK DISCOVERY PHASE ===
@@ -1322,14 +1548,37 @@ class TextractorLauncher extends EventEmitter {
         console.log(`[TextractorLauncher] Hook discovery phase complete. ${this._hooks.size} hooks found.`);
       }, 3000);
 
-      // === 10-SECOND DIAGNOSTIC CHECK ===
-      this._diagnosticTimer = setTimeout(() => {
+      // === ARCH-FALLBACK DIAGNOSTIC CHECK ===
+      // v3.13.27: used to be a single check at 10s. Confirmed too fragile
+      // with a real ~3.5min session on Nekopara Vol.1 (KiriKiriZ): the first
+      // real (non-system) hook didn't show up until ~13.7s — just past the
+      // one-shot window. At the 10s mark only system hooks existed yet, so
+      // the check correctly deferred (per the "some engines take up to ~45s"
+      // reasoning below) — but a one-shot timer never got a second look, so
+      // the HB0@0-only hooks that arrived a few seconds later were never
+      // evaluated and the fallback that should have fired simply never got
+      // a chance to. That session ran to completion entirely on garbled x64
+      // hooks. Fix: re-run the same check every
+      // ARCH_FALLBACK_CHECK_INTERVAL_MS until either a fallback fires, a
+      // non-generic real hook shows up, or ARCH_FALLBACK_CHECK_MAX_MS is
+      // reached.
+      const runArchFallbackCheck = (elapsedMs) => {
         this._diagnosticTimer = null;
         const activeHook = this.getActiveHookKey();
-        console.warn(`[TextractorLauncher] 10s DIAGNOSTIC:`);
+        const elapsedLabel = `${Math.round(elapsedMs / 1000)}s`;
+        console.warn(`[TextractorLauncher] ${elapsedLabel} DIAGNOSTIC:`);
         console.warn(`[TextractorLauncher]   Total hooks: ${this._hooks.size}`);
         console.warn(`[TextractorLauncher]   Active hook: ${activeHook || 'none'}`);
         console.warn(`[TextractorLauncher]   Lines processed: ${this._totalLinesProcessed} (hook lines: ${this._hookLinesProcessed})`);
+
+        // Distinguish "no real hook has produced text yet" (keep waiting —
+        // some engines, e.g. KiriKiriZ, take up to ~45s) from "a real hook
+        // exists and isn't stuck on the generic type" (nothing to fix, stop
+        // polling) — _allRealHooksAreGenericType() alone returns false for
+        // both, so it can't tell them apart on its own.
+        const hasRealHookWithText = Array.from(this._hooks.values())
+          .some(h => !h.isSystemHook && h.textCount > 0);
+
         if (this._hooks.size === 0) {
           console.warn(`[TextractorLauncher]   *** NO HOOKS FOUND! ***`);
           console.warn(`[TextractorLauncher]   Possible causes:`);
@@ -1337,13 +1586,37 @@ class TextractorLauncher extends EventEmitter {
           console.warn(`[TextractorLauncher]     2. TextractorCLI didn't receive the attach command`);
           console.warn(`[TextractorLauncher]     3. Game is not producing text through hookable APIs`);
           console.warn(`[TextractorLauncher]   Try: Run TextractorCLI.exe manually in a terminal and type "attach -P${gamePid}"`);
-          // v3.13.23: zero hooks after 10s can also mean the process attached
-          // to a PID whose bitness doesn't match this TextractorCLI build —
-          // attach doesn't always fail loudly in that case, it just never
-          // hooks anything. Try the sibling architecture once before giving up.
-          this._attemptArchFallback('no-hooks');
+          // v3.13.23: zero hooks can also mean the process attached to a PID
+          // whose bitness doesn't match this TextractorCLI build — attach
+          // doesn't always fail loudly in that case, it just never hooks
+          // anything. Try the sibling architecture once before giving up.
+          if (this._attemptArchFallback('no-hooks')) return;
+        } else if (hasRealHookWithText && this._allRealHooksAreGenericType()) {
+          // v3.13.26: hooks DO exist, but every real (non-system) one has
+          // the generic HB0@0 code — a different failure mode than "zero
+          // hooks", and one the size===0 check above can't see. Confirmed
+          // real with a side-by-side comparison on Nekopara Vol.1: x64
+          // TextractorCLI's own auto-engine consistently produced only
+          // HB0@0 hooks across an entire multi-minute session (the generic
+          // hooks themselves don't self-correct with more time), while x86
+          // TextractorCLI auto-detected specifically-typed hooks (HQ18@0,
+          // HQ8@0, HW8@0, KiriKiriZ's own code) immediately on attach, no
+          // manual intervention needed.
+          console.warn(`[TextractorLauncher]   *** ALL REAL HOOKS ARE GENERIC TYPE (HB0@0) ***`);
+          console.warn(`[TextractorLauncher]   The auto-engine couldn't identify a specific hook type for this process — the sibling architecture may do better.`);
+          if (this._attemptArchFallback('no-clean-hook')) return;
+        } else if (hasRealHookWithText) {
+          // A real hook exists and isn't stuck on the generic type —
+          // nothing to fall back from. Stop polling.
+          return;
         }
-      }, 10000);
+
+        const nextElapsed = elapsedMs + ARCH_FALLBACK_CHECK_INTERVAL_MS;
+        if (nextElapsed <= ARCH_FALLBACK_CHECK_MAX_MS) {
+          this._diagnosticTimer = setTimeout(() => runArchFallbackCheck(nextElapsed), ARCH_FALLBACK_CHECK_INTERVAL_MS);
+        }
+      };
+      this._diagnosticTimer = setTimeout(() => runArchFallbackCheck(10000), 10000);
 
       this.emit('status', 'launched');
       this.emit('launched', { pid: gamePid, cliPath: resolvedPath });
@@ -1399,29 +1672,45 @@ class TextractorLauncher extends EventEmitter {
           }
 
           // Build detailed error info
+          // v3.13.24: hintKey/hintParams alongside each English hint fallback.
           let hint = '';
+          let hintKey = null;
+          let hintParams = null;
           const stderrText = this._stderrLines.join('\n').trim();
 
           // Common error patterns
           if (stderrText.includes('DLL') || stderrText.includes('dll') || stderrText.includes('VCRUNTIME')) {
-            hint = 'DLL faltante. Instala Visual C++ Redistributable 2015-2022 (x64 para Textractor de 64 bits).';
+            hintKey = 'hint_dll_missing_2015_2022';
+            hint = 'Missing DLL. Install Visual C++ Redistributable 2015-2022 (x64 for 64-bit Textractor).';
           } else if (stderrText.includes('bit') || stderrText.includes('architecture') || stderrText.includes('x86')) {
-            hint = 'Arquitectura incorrecta. Usa TextractorCLI de 64 bits para juegos de 64 bits, y 32 bits para juegos de 32 bits.';
+            hintKey = 'hint_wrong_architecture';
+            hint = 'Wrong architecture. Use 64-bit TextractorCLI for 64-bit games, and 32-bit for 32-bit games.';
           } else if (code === 1 && this._totalLinesProcessed === 0) {
-            hint = 'TextractorCLI no pudo iniciar. Verifica que el archivo no esté corrupto y que las DLLs estén presentes.';
+            hintKey = 'hint_cli_failed_to_start';
+            hint = 'TextractorCLI failed to start. Verify the file isn\'t corrupted and the DLLs are present.';
           } else if (code === 1 && this._totalLinesProcessed > 0) {
-            hint = 'El attach al PID ' + gamePid + ' falló. Verifica que el PID sea correcto y que el proceso sea accesible.';
+            hintKey = 'hint_attach_failed';
+            hintParams = { pid: String(gamePid) };
+            hint = 'Attach to PID ' + gamePid + ' failed. Verify the PID is correct and the process is accessible.';
           } else if (code === 5) {
-            hint = 'Acceso denegado. Intenta ejecutar Tuhua Translator como Administrador.';
+            hintKey = 'hint_access_denied_admin';
+            hint = 'Access denied. Try running Tuhua Translator as Administrator.';
           } else {
             const interpreted = interpretExitCode(code);
-            hint = interpreted.hint || 'Verifica que el PID sea correcto y que TextractorCLI funcione manualmente.';
+            if (interpreted.hint) {
+              hintKey = interpreted.hintKey;
+              hintParams = interpreted.hintParams;
+              hint = interpreted.hint;
+            } else {
+              hintKey = 'hint_verify_pid_manual';
+              hint = 'Verify the PID is correct and that TextractorCLI works manually.';
+            }
           }
 
           const error = this._buildError(
-            `TextractorCLI salió con código ${code} tras ${runTime}s`,
+            `TextractorCLI exited with code ${code} after ${runTime}s`,
             code,
-            { hint }
+            { hint, hintKey, hintParams, messageKey: 'err_exited_with_code', messageParams: { code: String(code), runTime: String(runTime) } }
           );
           this.emit('error', error);
         }
@@ -1446,18 +1735,22 @@ class TextractorLauncher extends EventEmitter {
         }
 
         let hint = '';
+        let hintKey = null;
         if (err.code === 'ENOENT') {
-          hint = 'Archivo no encontrado. Verifica la ruta a TextractorCLI.exe.';
+          hintKey = 'hint_file_not_found_path';
+          hint = 'File not found. Verify the path to TextractorCLI.exe.';
         } else if (err.code === 'EACCES' || err.code === 'EPERM') {
-          hint = 'Permiso denegado. Ejecuta Tuhua Translator como Administrador.';
+          hintKey = 'hint_permission_denied_admin';
+          hint = 'Permission denied. Run Tuhua Translator as Administrator.';
         } else if (err.code === 'EINVAL') {
-          hint = 'Ruta inválida. Verifica que la ruta no contenga caracteres especiales.';
+          hintKey = 'hint_invalid_path_chars';
+          hint = 'Invalid path. Verify the path doesn\'t contain special characters.';
         }
 
         const error = this._buildError(
-          'No se pudo iniciar TextractorCLI: ' + err.message,
+          'Could not start TextractorCLI: ' + err.message,
           undefined,
-          { hint }
+          { hint, hintKey, messageKey: 'err_could_not_start_cli', messageParams: { message: err.message } }
         );
         this.emit('error', error);
         this.emit('status', 'error');
@@ -1469,6 +1762,54 @@ class TextractorLauncher extends EventEmitter {
       this.emit('error', error);
       this.emit('status', 'error');
       return false;
+    }
+  }
+
+  /**
+   * v3.13.24: Manually insert a hook by code via TextractorCLI's stdin
+   * console. v3.13.25 fix: the real command syntax, confirmed by running
+   * TextractorCLI.exe directly and typing `hook` with no arguments, is
+   * `{'attach'|'detach'|hookcode} -Pprocessid` — the THIRD alternative is
+   * the literal hookcode string itself, with NO leading "hook" keyword.
+   * The truncated banner previously seen in logs ("Usage: {'attach'|
+   * 'detach'|hook") was just "hookcode" cut off mid-word by a small stdout
+   * chunk, not a subcommand named "hook" — a wrong reading that made the
+   * original version of this method prepend a bogus "hook " prefix,
+   * silently no-opping every call (confirmed: zero non-HB0@0 hooks ever
+   * appeared in a real session despite this method reporting success).
+   *
+   * Exists because the generic auto-engine can hook the RIGHT function
+   * with the WRONG hook-code type — confirmed with a real case:
+   * TextractorCLI's own auto-engine hooked `GetTextExtentPoint32W` with the
+   * generic `HB0@0` code and produced garbled text, while the correct code
+   * for that exact function is `HQ8@0:gdi32.dll:GetTextExtentPoint32W`.
+   * Since Tuhua doesn't do its own hooking (it only launches TextractorCLI
+   * and reads whatever it inserts), the only way to apply a hook code
+   * found elsewhere (the GUI, a community hook-code list, etc.) is to send
+   * it to this same running process — this lets that happen without
+   * needing the separate GUI open. Returns { success, error } — doesn't
+   * wait for TextractorCLI's response (the resulting hook, if any,
+   * surfaces the normal way through _processHookLine/_emitHookDiscovery).
+   */
+  insertHookCode(hookCode) {
+    if (!hookCode || typeof hookCode !== 'string' || !hookCode.trim()) {
+      return { success: false, error: 'Empty hook code' };
+    }
+    if (!this.process || !this.process.stdin || this.process.stdin.destroyed || !this.isRunning) {
+      return { success: false, error: 'TextractorCLI is not running' };
+    }
+    if (!this._gamePid) {
+      return { success: false, error: 'No game PID attached' };
+    }
+    const cleanCode = hookCode.trim();
+    const cmd = `${cleanCode} -P${this._gamePid}\n`;
+    console.log(`[TextractorLauncher] Sending stdin (manual hook insert): "${cmd.trim()}"`);
+    try {
+      this.process.stdin.write(cmd);
+      return { success: true };
+    } catch (err) {
+      console.error(`[TextractorLauncher] stdin write failed (manual hook insert):`, err.message);
+      return { success: false, error: err.message };
     }
   }
 
@@ -1487,6 +1828,33 @@ class TextractorLauncher extends EventEmitter {
       }
     } else {
       console.warn(`[TextractorLauncher] Cannot send stdin (${label}) — process not available`);
+    }
+  }
+
+  /**
+   * v3.13.24: proactively insert KNOWN_GOOD_HOOK_CODES alongside the normal
+   * attach — deliberately NOT reactive (i.e. not "wait for a hook to look
+   * garbled, then retry it"). Reactive retry would need to correlate a
+   * garbled hook's runtime address back to a WinAPI function name to know
+   * which known-good code applies, but TextractorCLI announces
+   * "insertando hook: X" for its whole blanket-hook batch upfront, well
+   * before any of those hooks actually fire — by the time a hook fires,
+   * many announcements have already gone by with no reliable way to tell
+   * which one it corresponds to. Firing proactively sidesteps that
+   * entirely: if the target game's generic auto-hook for this exact
+   * function is also broken, both hooks end up as separate candidates in
+   * `_hooks` (different hook codes), and _scoreHook's existing garbage
+   * penalty naturally prefers whichever one actually decodes cleanly — no
+   * detection or correlation needed. Harmless no-op if the function is
+   * never called by this particular game.
+   */
+  _sendKnownGoodHooks(label) {
+    if (KNOWN_GOOD_HOOK_CODES.length === 0) return;
+    for (const code of KNOWN_GOOD_HOOK_CODES) {
+      const result = this.insertHookCode(code);
+      if (!result.success) {
+        console.warn(`[TextractorLauncher] Known-good hook (${label}) "${code}" not sent: ${result.error}`);
+      }
     }
   }
 

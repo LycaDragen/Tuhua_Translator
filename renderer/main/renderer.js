@@ -1860,7 +1860,8 @@
 
             if (result.valid) {
                 if (result.autoResolved) {
-                    status.innerHTML = '<span class="text-blue-500">✓ Auto-detectado</span>';
+                    const t = translations[currentLang] || translations['en'];
+                    status.innerHTML = '<span class="text-blue-500">✓ ' + (t.cli_auto_detected || 'Auto-detected') + '</span>';
                 } else {
                     status.innerHTML = '<span class="text-emerald-500">✓</span>';
                 }
@@ -1892,8 +1893,9 @@
             if (!gamePid || gamePid <= 0) {
                 const status = document.getElementById('cli-status-bar');
                 const text = document.getElementById('cli-status-text');
+                const t = translations[currentLang] || translations['en'];
                 status.classList.remove('hidden');
-                text.innerHTML = '<span class="text-red-500">⚠ PID requerido</span>';
+                text.innerHTML = '<span class="text-red-500">⚠ ' + (t.cli_pid_required || 'PID required') + '</span>';
                 setTimeout(() => status.classList.add('hidden'), 3000);
                 return;
             }
@@ -1910,8 +1912,9 @@
             status.classList.remove('hidden');
 
             if (result.success) {
+                const t = translations[currentLang] || translations['en'];
                 cliRunning = true;
-                text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: Ejecutándose</span> (PID: ' + gamePid + ')';
+                text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span> (PID: ' + gamePid + ')';
                 document.getElementById('cli-pid-text').innerText = 'CLI PID: ...';
                 // Update CLI process PID after a short delay
                 setTimeout(async () => {
@@ -1921,7 +1924,8 @@
                     }
                 }, 1000);
             } else {
-                text.innerHTML = '<span class="text-red-500">✗ Error: ' + (result.error || 'Desconocido') + '</span>';
+                const t = translations[currentLang] || translations['en'];
+                text.innerHTML = '<span class="text-red-500">✗ Error: ' + (result.error || t.cli_unknown_error || 'Unknown') + '</span>';
                 document.getElementById('btn-launch-cli').classList.remove('hidden');
                 document.getElementById('btn-kill-cli').classList.add('hidden');
                 setTimeout(() => status.classList.add('hidden'), 5000);
@@ -1936,7 +1940,8 @@
 
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
-            text.innerHTML = '<span class="text-gray-400">TextractorCLI: Detenido</span>';
+            const t = translations[currentLang] || translations['en'];
+            text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
             document.getElementById('cli-pid-text').innerText = '';
             setTimeout(() => status.classList.add('hidden'), 2000);
         }
@@ -1945,12 +1950,13 @@
             const text = document.getElementById('cli-status-text');
             const statusBar = document.getElementById('cli-status-bar');
             const errorDetail = document.getElementById('cli-error-detail');
+            const t = translations[currentLang] || translations['en'];
             statusBar.classList.remove('hidden');
 
             switch (status) {
                 case 'launched':
                     cliRunning = true;
-                    text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: Ejecutándose</span>';
+                    text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span>';
                     errorDetail.classList.add('hidden');
                     document.getElementById('btn-launch-cli').classList.add('hidden');
                     document.getElementById('btn-kill-cli').classList.remove('hidden');
@@ -1958,7 +1964,7 @@
                 case 'exited':
                 case 'killed':
                     cliRunning = false;
-                    text.innerHTML = '<span class="text-gray-400">TextractorCLI: Detenido</span>';
+                    text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
                     document.getElementById('btn-launch-cli').classList.remove('hidden');
                     document.getElementById('btn-kill-cli').classList.add('hidden');
                     setTimeout(() => {
@@ -1970,13 +1976,13 @@
                     break;
                 case 'error':
                     cliRunning = false;
-                    text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: Error</span>';
+                    text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: ' + (t.cli_error_status || 'Error') + '</span>';
                     document.getElementById('btn-launch-cli').classList.remove('hidden');
                     document.getElementById('btn-kill-cli').classList.add('hidden');
                     break;
                 case 'extracting':
                     cliRunning = true;
-                    text.innerHTML = '<span class="text-emerald-500 pulse-dot">● TextractorCLI: Extrayendo texto</span>';
+                    text.innerHTML = '<span class="text-emerald-500 pulse-dot">● TextractorCLI: ' + (t.cli_extracting_status || 'Extracting text') + '</span>';
                     errorDetail.classList.add('hidden');
                     break;
                 default:
@@ -1985,8 +1991,28 @@
         }
 
         /**
+         * v3.13.24: textractor-launcher.js's hint/message strings used to
+         * ship hardcoded in Spanish regardless of UI language. The backend
+         * now sends a stable `xKey` (+ optional `xParams` for dynamic bits
+         * like a PID or path) alongside the English-fallback string —
+         * this looks the key up in the current language's dictionary and
+         * substitutes `{param}` placeholders, falling back to the raw
+         * string from the backend if the key is missing or untranslated.
+         */
+        function translateHintKey(key, params, fallback) {
+            const t = translations[currentLang] || translations['en'];
+            let text = (key && t[key]) || fallback || '';
+            if (params) {
+                for (const [k, v] of Object.entries(params)) {
+                    text = text.split('{' + k + '}').join(v);
+                }
+            }
+            return text;
+        }
+
+        /**
          * Show detailed CLI error information (v3.8.23)
-         * errorData = { message, code, severity, hint, stderr, stdout, gamePid, cliPath, timestamp }
+         * errorData = { message, messageKey, messageParams, code, severity, hint, hintKey, hintParams, stderr, stdout, gamePid, cliPath, timestamp }
          */
         function showCliError(errorData) {
             const errorDetail = document.getElementById('cli-error-detail');
@@ -1999,11 +2025,12 @@
             errorDetail.classList.remove('hidden');
 
             // Main error message
-            errorMessage.textContent = errorData.message || 'Error desconocido';
+            errorMessage.textContent = translateHintKey(errorData.messageKey, errorData.messageParams, errorData.message) || 'Unknown error';
 
             // Helpful hint
-            if (errorData.hint) {
-                errorHint.textContent = '💡 ' + errorData.hint;
+            const hintText = translateHintKey(errorData.hintKey, errorData.hintParams, errorData.hint);
+            if (hintText) {
+                errorHint.textContent = '💡 ' + hintText;
                 errorHint.classList.remove('hidden');
             } else {
                 errorHint.classList.add('hidden');
@@ -2054,19 +2081,21 @@
             const errorDetail = document.getElementById('cli-error-detail');
 
             // Show testing state
+            const t = translations[currentLang] || translations['en'];
             btn.disabled = true;
             btn.innerHTML = '<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Test...</span>';
             statusBar.classList.remove('hidden');
-            statusText.innerHTML = '<span class="text-blue-500">⏳ Probando TextractorCLI...</span>';
+            statusText.innerHTML = '<span class="text-blue-500">⏳ ' + (t.cli_testing_status || 'Testing TextractorCLI...') + '</span>';
             errorDetail.classList.add('hidden');
 
             try {
                 const result = await api.textractorTestCli(cliPath);
 
                 if (result.canStart) {
-                    statusText.innerHTML = '<span class="text-emerald-500">✓ TextractorCLI funciona correctamente</span>';
-                    if (result.hint) {
-                        statusText.innerHTML += '<span class="text-[9px] text-gray-400 ml-1">(' + result.hint + ')</span>';
+                    statusText.innerHTML = '<span class="text-emerald-500">✓ ' + (t.cli_works_correctly || 'TextractorCLI works correctly') + '</span>';
+                    const okHint = translateHintKey(result.hintKey, result.hintParams, result.hint);
+                    if (okHint) {
+                        statusText.innerHTML += '<span class="text-[9px] text-gray-400 ml-1">(' + okHint + ')</span>';
                     }
                     // Save the resolved path on successful test (folder -> x64/Textractor.exe)
                     const pathToSave = result.resolvedPath || cliPath;
@@ -2076,19 +2105,22 @@
                         if (!cliRunning) statusBar.classList.add('hidden');
                     }, 3000);
                 } else {
-                    statusText.innerHTML = '<span class="text-red-500">✗ TextractorCLI no pudo iniciar</span>';
+                    statusText.innerHTML = '<span class="text-red-500">✗ ' + (t.cli_failed_to_start_status || 'TextractorCLI failed to start') + '</span>';
                     // Show detailed error
                     showCliError({
-                        message: 'TextractorCLI no pudo iniciar',
+                        message: 'TextractorCLI failed to start',
+                        messageKey: 'hint_cli_failed_to_start',
                         code: result.exitCode,
                         severity: 'error',
-                        hint: result.hint || 'Verifica que el archivo exista y las DLLs estén presentes.',
+                        hintKey: result.hintKey,
+                        hintParams: result.hintParams,
+                        hint: result.hint || 'Verify the file exists and the DLLs are present.',
                         stderr: result.stderr || '',
                         stdout: result.stdout || ''
                     });
                 }
             } catch (err) {
-                statusText.innerHTML = '<span class="text-red-500">✗ Error al probar: ' + (err.message || 'Desconocido') + '</span>';
+                statusText.innerHTML = '<span class="text-red-500">✗ ' + (t.cli_test_error_prefix || 'Error testing') + ': ' + (err.message || t.cli_unknown_error || 'Unknown') + '</span>';
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span>Test</span>';
@@ -2148,6 +2180,44 @@
             }
         }
 
+        /**
+         * v3.13.24: send a hook code (e.g. found via the full Textractor
+         * GUI's manual hook search) to Tuhua's own running TextractorCLI
+         * session, so a working hook doesn't require keeping the separate
+         * GUI open. Confirmed real use case: the auto-inserted generic
+         * engine hook can target the right function with the wrong H-code
+         * type (e.g. HB0@0 vs the correct HQ8@0 for the same
+         * GetTextExtentPoint32W address), producing garbled text — this
+         * lets a user-supplied correct code be applied directly.
+         */
+        async function insertHookCode() {
+            const input = document.getElementById('hook-code-input');
+            const statusEl = document.getElementById('hook-insert-status');
+            const code = input.value.trim();
+            const t = translations[currentLang] || translations['en'];
+            if (!code) return;
+
+            statusEl.classList.remove('hidden');
+            statusEl.className = 'text-[9px] mt-1 text-gray-400';
+            statusEl.textContent = t.hook_insert_code_sending || 'Sending...';
+
+            try {
+                const result = await api.textractorInsertHookCode(code);
+                if (result.success) {
+                    statusEl.className = 'text-[9px] mt-1 text-emerald-500';
+                    statusEl.textContent = '✓ ' + (t.hook_insert_code_sent || 'Sent — watch the hook list above for a new entry.');
+                    input.value = '';
+                } else {
+                    statusEl.className = 'text-[9px] mt-1 text-red-500';
+                    statusEl.textContent = '✗ ' + (result.error || t.cli_unknown_error || 'Unknown error');
+                }
+            } catch (err) {
+                statusEl.className = 'text-[9px] mt-1 text-red-500';
+                statusEl.textContent = '✗ ' + (err.message || t.cli_unknown_error || 'Unknown error');
+            }
+            setTimeout(() => statusEl.classList.add('hidden'), 6000);
+        }
+
         function updateHookPreview(hook, isAutoMode) {
             const previewDiv = document.getElementById('hook-preview');
             const previewText = document.getElementById('hook-preview-text');
@@ -2176,15 +2246,24 @@
         }
 
         function updateHookSelector(data) {
-            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks }
+            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks, noRealHookFound }
             _discoveredHooks = data.hooks || [];
             const section = document.getElementById('hook-selector-section');
             const selector = document.getElementById('hook-selector');
             const countBadge = document.getElementById('hook-count-badge');
+            const noRealWarning = document.getElementById('hook-no-real-warning');
 
             // Show section if there are hooks
             if (_discoveredHooks.length > 0) {
                 section.classList.remove('hidden');
+            }
+
+            // v3.13.24: only Console/Clipboard seen so far — Tuhua isn't
+            // silently translating that as if it were game text (see
+            // _autoSelectBestHook's guard), so make that visible instead of
+            // the panel just looking idle with no explanation.
+            if (noRealWarning) {
+                noRealWarning.classList.toggle('hidden', !data.noRealHookFound);
             }
 
             countBadge.textContent = _discoveredHooks.length + ' hook' + (_discoveredHooks.length !== 1 ? 's' : '');
