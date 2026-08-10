@@ -79,6 +79,11 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'textractor-cli-output',
   'textractor-cli-error',
   'textractor-cli-arch-fallback',
+  // v3.13.32: was emitted by TextractorLauncher (src/main/index.js) since
+  // v3.13.31 but missing here — secureOn silently rejects any channel not
+  // in this Set, so the renderer's listener could never actually fire.
+  'textractor-cli-pid-warning',
+  'textractor-cli-arch-resolved',
   'hooks-discovered',
   'translation-result',
   'translation-error',
@@ -277,6 +282,8 @@ const api = {
   onTextractorCliOutput: (callback) => secureOn('textractor-cli-output', callback),
   onTextractorCliError: (callback) => secureOn('textractor-cli-error', callback),
   onTextractorCliArchFallback: (callback) => secureOn('textractor-cli-arch-fallback', callback),
+  onTextractorCliPidWarning: (callback) => secureOn('textractor-cli-pid-warning', callback),
+  onTextractorCliArchResolved: (callback) => secureOn('textractor-cli-arch-resolved', callback),
   onHooksDiscovered: (callback) => secureOn('hooks-discovered', callback),
   onTranslationResult: (callback) => secureOn('translation-result', callback),
   onTranslationError: (callback) => secureOn('translation-error', callback),

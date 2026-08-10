@@ -153,6 +153,26 @@ app.whenReady().then(() => {
     windowManager.sendToMainWindow('textractor-cli-pid-warning', { pid, message });
   });
 
+  // v3.13.32: a fallback just discovered which architecture actually
+  // works for this Textractor install — see TextractorLauncher's
+  // _markArchSuccess doc for why nothing persisted this before. Only
+  // rewrite the saved path when this came FROM a fallback (viaFallback) —
+  // launch() itself already prefers the resolved arch in-session without
+  // needing settings touched, so this is specifically about surviving a
+  // Tuhua restart — and only within the SAME install the user already had
+  // configured, so an explicit choice of a different Textractor folder is
+  // never silently overwritten.
+  textractorLauncher.on('arch-resolved', ({ cliPath, installKey, viaFallback }) => {
+    if (!viaFallback) return;
+    const stored = store.get('textractorCliPath', '');
+    const sameInstall = stored && textractorLauncher._archInstallKey(stored) === installKey;
+    if (!stored || sameInstall) {
+      store.set({ ...store.get(), textractorCliPath: cliPath });
+      log.info(`[TextractorLauncher] Persisted proven architecture: ${cliPath}`);
+    }
+    windowManager.sendToMainWindow('textractor-cli-arch-resolved', { cliPath });
+  });
+
   textractorLauncher.on('error', (err) => {
     // v3.8.23: err is now a structured object with { message, code, severity, hint, stderr, stdout }
     // If it's an old-style Error object, convert it

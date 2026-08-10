@@ -167,6 +167,21 @@ class TextractorLauncher extends EventEmitter {
     this._maxBufferLines = 200;
     this._stdinTimer = null;
     this._stdinSent = false;
+    // v3.13.32: how many times an attach/hook-code write actually
+    // succeeded this session — see _attachWasAcknowledged and
+    // getStats(). _stdinSent alone (above) can't tell 1 attach from 2.
+    this._attachSendCount = 0;
+    this._hookInsertCount = 0;
+    // v3.13.32: TUHUA_FORCE_DOUBLE_ATTACH=1 restores the old unconditional
+    // 1.5s backup attach — see _attachWasAcknowledged's doc for why the
+    // default became conditional, and why an escape hatch exists at all
+    // (every `attach` makes TextractorCLI inject texthook.dll and suspend
+    // the game's threads — the user-visible freeze a real bug report was
+    // about — so this is a real behavior change, not just a log toggle).
+    this._forceDoubleAttach = process.env.TUHUA_FORCE_DOUBLE_ATTACH === '1';
+    // v3.13.32: reset per-launch — see the diagnostic's 'no-clean-hook'
+    // branch, the new call site for _sendKnownGoodHooks.
+    this._knownGoodHooksSent = false;
     this._gamePid = null;
     this._launchTime = null;
     this._diagnosticTimer = null;
@@ -202,6 +217,53 @@ class TextractorLauncher extends EventEmitter {
     // The fully-resolved exe path from the most recent launch() call, used
     // to compute the sibling-architecture candidate if this attempt fails.
     this._lastResolvedPath = null;
+    // v3.13.32: (PID, install) -> { exhausted, exhaustedAt, triedPaths } —
+    // see _archAttemptKey/_concludeArchFallback. This is what
+    // _archFallbackAttempted alone couldn't provide: memory that survives
+    // a fresh manual Launch, which is the loop-breaker for a real reported
+    // "infinite intentando x86" bug. In-memory only, bounded FIFO — a
+    // Tuhua restart is the deliberate way to clear it.
+    this._archAttemptMemory = new Map();
+    this._maxArchMemoryEntries = 20;
+    // v3.13.32: install (_archInstallKey) -> the exe path PROVEN to
+    // produce real game text there — see _markArchSuccess. Reused by
+    // launch() so a fallback's discovery survives the user's next manual
+    // Launch instead of silently reverting to whatever path they last
+    // configured (5's own doc has the full story of why that mattered).
+    this._archPreference = new Map();
+    // v3.13.32: fires _markArchSuccess at most once per session — see its
+    // call site in _processHookLine. Reset per-launch below.
+    this._archSuccessMarked = false;
+
+    // v3.13.32: true from the moment _attemptArchFallback decides to kill
+    // the current process and respawn the sibling architecture, until the
+    // replacement either reports 'launched' or fails outright. Read by
+    // _emitStatus() to relabel the 'killed'/'exited' this deliberate kill
+    // produces as 'relaunching' instead — see _emitStatus's doc for why
+    // that distinction is load-bearing, not cosmetic.
+    this._relaunchInProgress = false;
+    // v3.13.32: identity of the CURRENT spawned process, incremented only
+    // immediately after a successful spawn() (see launch()). Every event
+    // handler attached to that child (stdout/stderr/close/error) captures
+    // the generation it was created with and ignores itself if a NEWER
+    // launch has since superseded it. Needed because kill() is
+    // asynchronous — taskkill is a separate child process on Windows,
+    // typically 50-400ms — so during an arch-fallback handover the dying
+    // process's 'close' (and any stdout it had buffered) routinely arrives
+    // AFTER the replacement process's own 'launched'. Without this, that
+    // late 'close' would run _clearTimers()/_emitStatus('exited') against
+    // session state that now belongs to the NEW process, undoing both the
+    // relaunch bookkeeping and the UI's 'relaunching' status. Confirmed via
+    // a dedicated bench case (relaunch-survives-late-close / stale-close-
+    // ignored in scripts/test-launcher-lifecycle.js), not hypothetical.
+    this._launchGeneration = 0;
+    // v3.13.32: set by kill({ _forArchRelaunch: true }) — the ONLY caller
+    // that passes it is _attemptArchFallback. Every other kill() call site
+    // (8 of them: tray, ipc-handlers x5, index.js shutdown, launch()'s own
+    // pre-relaunch kill) calls kill() with no arguments and gets the
+    // ordinary "user/caller stopped this" behavior: cancel any pending
+    // relaunch and clear ALL timers, not just this session's.
+    this._killedByUser = false;
 
     // === ERROR CAPTURE STATE (v3.8.23) ===
     this._stderrLines = [];       // All stderr lines captured during this session
@@ -248,6 +310,29 @@ class TextractorLauncher extends EventEmitter {
     this._rawDumpBytesRemaining = this._rawDumpBudget;
   }
 
+  /**
+   * v3.13.32: single choke point for every 'status' emit. During an arch
+   * fallback the process is killed and respawned ON PURPOSE, but the
+   * renderer's updateCliStatus() treats 'killed'/'exited' as "the user
+   * stopped it": it re-shows the Launch button and hides the whole status
+   * bar 2s later — which erased the amber "x64 sin resultado, probando
+   * x86..." notice and invited the click that restarted the whole 2x60s
+   * cycle from scratch (confirmed real user report: the UI sat on "Launch"
+   * while x86 was actually still running). Collapsing both into
+   * 'relaunching' keeps the renderer in one honest state for the entire
+   * handover, over the SAME 'textractor-cli-status-changed' channel — no
+   * new IPC surface, deliberately: 'textractor-cli-pid-warning' is emitted
+   * by this class but was missing from main-preload.js's
+   * ALLOWED_RECEIVE_CHANNELS and never reached the renderer at all, which
+   * this file is not going to repeat.
+   */
+  _emitStatus(status) {
+    if (this._relaunchInProgress && (status === 'killed' || status === 'exited')) {
+      status = 'relaunching';
+    }
+    this.emit('status', status);
+  }
+
   configure(cliPath) {
     if (cliPath && cliPath !== this.cliPath) {
       const cleanPath = cliPath.replace(/^"+|"+$/g, '');
@@ -255,7 +340,7 @@ class TextractorLauncher extends EventEmitter {
       const resolved = this._resolveExePath(cleanPath);
       this.cliPath = resolved;
       console.log(`[TextractorLauncher] Configured path: "${cleanPath}" -> "${resolved}"`);
-      this.emit('status', 'configured');
+      this._emitStatus('configured');
     }
   }
 
@@ -354,6 +439,121 @@ class TextractorLauncher extends EventEmitter {
   }
 
   /**
+   * v3.13.32: normalizes the arch segment out of a resolved exe path so
+   * that <root>/x64/TextractorCLI.exe and <root>/x86/TextractorCLI.exe map
+   * to ONE key — "already tried both architectures for this install" must
+   * survive whichever half the persisted setting happens to point at.
+   * Case-folded on win32 only (NTFS is case-insensitive; ext4/APFS aren't).
+   */
+  _archInstallKey(resolvedPath) {
+    let base = String(resolvedPath || '');
+    for (const arch of ['x64', 'X64', 'x86', 'X86']) {
+      const marker = path.sep + arch + path.sep;
+      const idx = base.indexOf(marker);
+      if (idx !== -1) {
+        base = base.slice(0, idx) + path.sep + '<arch>' + path.sep + base.slice(idx + marker.length);
+        break;
+      }
+    }
+    return process.platform === 'win32' ? base.toLowerCase() : base;
+  }
+
+  /**
+   * v3.13.32: memory key for "have we already burned both architectures'
+   * 60s windows on THIS game process without finding a real hook". Keyed
+   * by (PID, install) rather than install alone — a different game/PID
+   * deserves a fresh retry even against the same Textractor install.
+   */
+  _archAttemptKey(resolvedPath, gamePid) {
+    return `${gamePid}::${this._archInstallKey(resolvedPath)}`;
+  }
+
+  /**
+   * Store/update an entry in _archAttemptMemory with a bounded FIFO —
+   * long sessions that cycle through many game PIDs shouldn't grow this
+   * without limit. In-memory only, deliberately not persisted: restarting
+   * Tuhua is the explicit, cheap way for a user to get a clean slate.
+   */
+  _rememberArchAttempt(key, record) {
+    if (!this._archAttemptMemory.has(key) && this._archAttemptMemory.size >= this._maxArchMemoryEntries) {
+      const oldestKey = this._archAttemptMemory.keys().next().value;
+      this._archAttemptMemory.delete(oldestKey);
+    }
+    this._archAttemptMemory.set(key, record);
+  }
+
+  /**
+   * v3.13.32: called when the arch-fallback diagnostic's 60s window ends
+   * with no real hook and nothing left to retry — see
+   * runArchFallbackCheck's tail in launch() for the two ways it gets here
+   * (no sibling architecture at all, or the sibling was ALSO just tried
+   * and also failed). Before this, that case just silently stopped
+   * polling: the only signal the user had was the UI bouncing back to
+   * "Launch" (fixed separately by _emitStatus's 'relaunching' mapping),
+   * which is exactly the click that used to restart the whole 2x60s cycle
+   * — a real, reported infinite loop, not a hypothetical one. Marks this
+   * (install, PID) exhausted in _archAttemptMemory so _attemptArchFallback
+   * refuses to retry it automatically again, and reports a single
+   * terminal, actionable error instead.
+   */
+  _concludeArchFallback() {
+    const memKey = this._archAttemptKey(this._lastResolvedPath, this._gamePid);
+    const rec = this._archAttemptMemory.get(memKey) || { exhausted: false, triedPaths: new Set() };
+    if (rec.exhausted) return; // already reported once for this (install, PID)
+    rec.exhausted = true;
+    rec.exhaustedAt = Date.now();
+    if (this._lastResolvedPath) rec.triedPaths.add(this._lastResolvedPath);
+    this._rememberArchAttempt(memKey, rec);
+
+    const seconds = String(Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000));
+    const pid = String(this._gamePid);
+    console.warn(`[TextractorLauncher] Arch fallback exhausted for PID ${pid} — ${rec.triedPaths.size} path(s) tried, no real hook ever appeared. Reporting terminal error, will not auto-retry this (install, PID) again this session.`);
+    const err = this._buildError(
+      `No game hook appeared after ${seconds}s with either architecture for PID ${pid}`,
+      undefined,
+      { messageKey: 'err_arch_fallback_exhausted', messageParams: { seconds, pid }, hintKey: 'hint_arch_fallback_exhausted' }
+    );
+    this.emit('error', err);
+  }
+
+  /**
+   * v3.13.32: a real (non-system) hook just produced text, so THIS exe —
+   * specifically this architecture — is the one that works for this game.
+   * Before this, a successful x86 fallback left no trace anywhere:
+   * _attemptArchFallback relaunches with { cliPath: fallback.path } but
+   * never called configure(), so this.cliPath and the persisted
+   * store.textractorCliPath both stayed on x64, and the next manual Launch
+   * sent the x64 path straight back from the renderer's input field —
+   * every fallback's discovery was thrown away the moment the user tried
+   * again. Two effects, both idempotent (safe to call repeatedly, though
+   * the call site only does it once per session):
+   *   1. Clears this (install, PID)'s failure memory — it's now provably
+   *      wrong.
+   *   2. Records the winning path in _archPreference, keyed by INSTALL
+   *      ONLY (not PID) — the right architecture for a given Textractor
+   *      build doesn't depend on which game/PID happened to prove it.
+   *      launch() consults this to start future sessions on the proven
+   *      architecture instead of re-discovering it from scratch. Emits
+   *      'arch-resolved' only when the preference actually CHANGES, and
+   *      only the emit (not the memory update) — src/main/index.js uses
+   *      this to persist to settings and update the renderer's path
+   *      field; see its listener for why it also checks `viaFallback`.
+   */
+  _markArchSuccess() {
+    const resolved = this._lastResolvedPath;
+    if (!resolved) return;
+    this._archAttemptMemory.delete(this._archAttemptKey(resolved, this._gamePid));
+
+    const installKey = this._archInstallKey(resolved);
+    const changed = this._archPreference.get(installKey) !== resolved;
+    this._archPreference.set(installKey, resolved);
+    if (changed) {
+      console.log(`[TextractorLauncher] Arch preference resolved for this install: ${resolved}`);
+      this.emit('arch-resolved', { cliPath: resolved, installKey, viaFallback: this._archFallbackAttempted });
+    }
+  }
+
+  /**
    * v3.13.23: Try relaunching with the sibling architecture (x64<->x86) once
    * per user-initiated launch attempt. Triggered from four points where a
    * wrong-architecture attach or a wrong-engine-detection result is already
@@ -369,21 +569,69 @@ class TextractorLauncher extends EventEmitter {
    * diagnostic's last-resort branch for why this is distinct from
    * 'no-hooks'). Returns true if a fallback attempt was
    * launched (caller should skip its own error reporting for this
-   * attempt), false if there's nothing to fall back to or a fallback was
-   * already tried for this launch.
+   * attempt), false if there's nothing to fall back to, a fallback was
+   * already tried for this launch, or (v3.13.32) both architectures were
+   * already exhausted earlier this session for this exact (install, PID)
+   * — see _concludeArchFallback.
    */
   _attemptArchFallback(reason) {
     if (this._archFallbackAttempted) return false;
     const fallback = this._getArchFallbackPath(this._lastResolvedPath);
     if (!fallback) return false;
 
+    // v3.13.32: the loop-breaker. _archFallbackAttempted alone resets on
+    // EVERY non-retry launch() call (:1950-ish) — including the user's own
+    // manual Launch click, which arrives with no _isArchFallbackRetry flag
+    // at all. That reset is correct in isolation (a different game/PID
+    // deserves a fresh attempt), but with nothing remembering "we already
+    // burned both architectures' 60s windows on THIS PID", every click
+    // bought a brand new pair of 60s waits — confirmed the actual
+    // mechanism behind a real reported "infinite loop of intentando x86"
+    // once the v3.13.32 UI/timer fixes stopped it from just silently
+    // stalling instead.
+    const memKey = this._archAttemptKey(this._lastResolvedPath, this._gamePid);
+    const record = this._archAttemptMemory.get(memKey);
+    if (record && record.exhausted) {
+      console.warn(`[TextractorLauncher] Arch fallback suppressed — PID ${this._gamePid} already exhausted both architectures on this install this session.`);
+      return false;
+    }
+
     this._archFallbackAttempted = true;
     const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s', 'no-clean-hook': 'hooks encontrados pero todos con ruido', 'no-real-hook': `nunca apareció un hook real tras ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s (solo hooks de sistema)` }[reason] || reason;
     console.warn(`[TextractorLauncher] ${fallback.from}: ${reasonLabel} -> probando ${fallback.to}...`);
     this.emit('arch-fallback', { from: fallback.from, to: fallback.to, reason });
 
+    // v3.13.32: record both paths as tried for this (install, PID) BEFORE
+    // the relaunch fires — if it never produces a real hook either,
+    // _concludeArchFallback() (called from the diagnostic's tail once the
+    // NEW session's own 60s window also runs out) will find this and
+    // refuse to try a third time (there isn't a third architecture, but
+    // this also protects against re-attempting the SAME sibling if
+    // something odd re-triggers a fallback on it).
+    {
+      const rec = record || { exhausted: false, triedPaths: new Set() };
+      if (this._lastResolvedPath) rec.triedPaths.add(this._lastResolvedPath);
+      rec.triedPaths.add(fallback.path);
+      this._rememberArchAttempt(memKey, rec);
+    }
+
+    // v3.13.32: makes _emitStatus() relabel the 'killed'/'exited' the next
+    // line produces as 'relaunching' — see _emitStatus's doc. Set BEFORE
+    // the kill so there's no gap where a status emitted between kill() and
+    // here would slip through as a real stop.
+    this._relaunchInProgress = true;
     const gamePid = this._gamePid;
-    if (this.isRunning) this.kill();
+    // v3.13.32: passes _forArchRelaunch so kill() only clears THIS
+    // process's own timers (_clearSessionTimers) and leaves
+    // _archRelaunchTimer — armed a few lines below — alone. Before this,
+    // kill()'s unconditional _clearTimers() raced the dying process's own
+    // 'close' handler (which also called it): on Windows, taskkill is a
+    // separate child process (~50-400ms) and routinely lost that race,
+    // cancelling the relaunch this function is about to schedule and
+    // leaving nothing running at all — confirmed the actual mechanism
+    // behind a real "stuck on Launch, x86 never happens" report, not a
+    // hypothetical race.
+    if (this.isRunning) this.kill({ _forArchRelaunch: true });
     // Small delay so the previous process's taskkill/exit settles before
     // spawning the replacement — mirrors the pattern already used elsewhere
     // in this file (e.g. the 1.5s delayed stdin-attach backup).
@@ -394,7 +642,13 @@ class TextractorLauncher extends EventEmitter {
     // resurrected a process the caller had just asked to stop.
     this._archRelaunchTimer = setTimeout(() => {
       this._archRelaunchTimer = null;
-      this.launch(gamePid, { cliPath: fallback.path, pid: gamePid, _isArchFallbackRetry: true });
+      const relaunched = this.launch(gamePid, { cliPath: fallback.path, pid: gamePid, _isArchFallbackRetry: true });
+      // v3.13.32: launch() clears _relaunchInProgress itself right before
+      // reporting 'launched' on success — but if it returned false (bad
+      // path, invalid PID, whatever), nothing else ever will, and every
+      // status this instance emits from then on would be silently
+      // relabeled 'relaunching' forever.
+      if (!relaunched) this._relaunchInProgress = false;
     }, 300);
     return true;
   }
@@ -994,6 +1248,16 @@ class TextractorLauncher extends EventEmitter {
       const penalty = this._textQualityPenalty(text);
       if (penalty > hook.qualityPenalty) {
         hook.qualityPenalty = penalty;
+      }
+
+      // v3.13.32: the first time a REAL (non-system) hook produces text
+      // this session, this exe/architecture is proven to work for this
+      // game — see _markArchSuccess's doc for what that unlocks. Guarded
+      // to fire once per session (cheap; the work itself is also
+      // idempotent, this just avoids repeating it on every line).
+      if (!isSystemHook && !this._archSuccessMarked) {
+        this._archSuccessMarked = true;
+        this._markArchSuccess();
       }
     }
 
@@ -1876,6 +2140,12 @@ class TextractorLauncher extends EventEmitter {
     if (!options._isArchFallbackRetry) {
       this._archFallbackAttempted = false;
     }
+    // v3.13.32: every launch() call — retry or not — starts a fresh process
+    // lifecycle, so any 'killed-by-user' latch from a PREVIOUS session must
+    // not leak into this one's close handler. See kill()'s doc for what
+    // this flag guards (skipping the quick-exit arch-fallback branch after
+    // a deliberate stop).
+    this._killedByUser = false;
 
     const cliPath = options.cliPath || this.cliPath;
     if (!cliPath) {
@@ -1899,8 +2169,37 @@ class TextractorLauncher extends EventEmitter {
     }
 
     // Use the auto-resolved path from validation (folder -> x64/Textractor.exe)
-    const resolvedPath = validation.resolved;
+    // v3.13.32: `let`, not `const` — see the preference swap right below,
+    // which reassigns this SAME variable so every downstream use (spawn,
+    // its cwd, the log line, the 'launched' payload) picks up the swap
+    // too, rather than a separately-named variable only some of them read.
+    let resolvedPath = validation.resolved;
+
+    // v3.13.32: if an earlier session on this SAME Textractor install
+    // proved the OTHER architecture is the one that actually hooks games,
+    // start there instead of repeating the 60s discovery — see
+    // _markArchSuccess's doc. Only ever swaps BETWEEN the x64/x86 halves
+    // of the path the caller gave us (same _archInstallKey), so pointing
+    // at a genuinely different install always wins: an explicit user
+    // choice is never silently overridden. Skipped on a fallback retry
+    // itself (options._isArchFallbackRetry) — that call already carries
+    // the exact path _attemptArchFallback computed, which must not be
+    // second-guessed here.
+    if (!options._isArchFallbackRetry) {
+      const preferred = this._archPreference.get(this._archInstallKey(resolvedPath));
+      if (preferred && preferred !== resolvedPath) {
+        console.log(`[TextractorLauncher] Using previously proven architecture for this install: "${resolvedPath}" -> "${preferred}"`);
+        resolvedPath = preferred;
+      }
+    }
     this._lastResolvedPath = resolvedPath;
+    // Deliberately NOT this.configure(resolvedPath) — configure() emits
+    // 'status','configured', which _emitStatus has no special case for
+    // (falls into updateCliStatus's `default:` branch in the renderer)
+    // and would overwrite whatever this launch's own status is about to
+    // show. Plain assignment keeps getStats()/_buildError()'s embedded
+    // cliPath honest without that side effect.
+    this.cliPath = resolvedPath;
 
     const gamePid = options.pid || pid;
     if (!gamePid || isNaN(gamePid)) {
@@ -1937,6 +2236,13 @@ class TextractorLauncher extends EventEmitter {
       }
 
       this.process = spawn(resolvedPath, args, spawnOptions);
+      // v3.13.32: identifies THIS process to its own event handlers below —
+      // see the constructor's _launchGeneration doc for the late-'close'
+      // race this exists to close. Incremented only here, after a spawn
+      // that didn't throw — a spawn error must NOT consume a generation,
+      // or the 'error' handler's own generation check would immediately
+      // discard the very error it's meant to report.
+      const generation = ++this._launchGeneration;
 
       this.isRunning = true;
       this._outputBuffer = [];
@@ -1945,6 +2251,14 @@ class TextractorLauncher extends EventEmitter {
       // see _resetStreamState's doc.
       this._resetStreamState();
       this._stdinSent = false;
+      this._attachSendCount = 0;
+      this._hookInsertCount = 0;
+      // v3.13.32: whether _sendKnownGoodHooks has already run THIS
+      // session — see its new call site in the diagnostic's
+      // 'no-clean-hook' branch for why this needs a per-session guard now
+      // that it's no longer unconditional.
+      this._knownGoodHooksSent = false;
+      this._archSuccessMarked = false;
       this._totalLinesProcessed = 0;
       this._hookLinesProcessed = 0;
 
@@ -1970,15 +2284,17 @@ class TextractorLauncher extends EventEmitter {
       // === SEND ATTACH VIA STDIN IMMEDIATELY ===
       this._sendStdinAttach(gamePid, 'immediate');
 
-      // === ALSO SEND AFTER 1.5 SECONDS AS BACKUP ===
+      // === ALSO SEND AFTER 1.5 SECONDS, BUT ONLY IF NEEDED ===
+      // v3.13.32: conditional now — see _attachWasAcknowledged's doc for
+      // why an unconditional second attach here was a real contributor to
+      // the game freezing on every single launch, not just a redundant
+      // log line.
       this._stdinTimer = setTimeout(() => {
         this._stdinTimer = null;
-        this._sendStdinAttach(gamePid, 'delayed-1.5s');
-        // v3.13.24: proactively insert known-good hooks for common Win32
-        // text functions once attach has had a chance to settle — see
-        // KNOWN_GOOD_HOOK_CODES's comment for why this is proactive, not
-        // reactive.
-        this._sendKnownGoodHooks('delayed-1.5s');
+        const acked = this._attachWasAcknowledged();
+        const shouldResend = !acked || this._forceDoubleAttach;
+        console.log(`[TextractorLauncher] 1.5s backup attach check: acked=${acked} (hookLines=${this._hookLinesProcessed}, hooks=${this._hooks.size}, stdoutEvents=${this._dataEventCount}) -> ${shouldResend ? 'RESEND' : 'skip'}`);
+        if (shouldResend) this._sendStdinAttach(gamePid, 'delayed-1.5s');
       }, 1500);
 
       // === HOOK DISCOVERY PHASE ===
@@ -2059,8 +2375,33 @@ class TextractorLauncher extends EventEmitter {
           // HQ8@0, HW8@0, KiriKiriZ's own code) immediately on attach, no
           // manual intervention needed.
           console.warn(`[TextractorLauncher]   *** ALL REAL HOOKS ARE GENERIC TYPE (HB0@0) ***`);
-          console.warn(`[TextractorLauncher]   The auto-engine couldn't identify a specific hook type for this process — the sibling architecture may do better.`);
-          if (this._attemptArchFallback('no-clean-hook')) return;
+          if (!this._knownGoodHooksSent) {
+            // v3.13.32: try the CHEAP fix once before the expensive one.
+            // _sendKnownGoodHooks used to run unconditionally 1.5s into
+            // EVERY launch (see its own doc for why that was proactive by
+            // design) — but that meant one more DLL-injection freeze on
+            // every single healthy session too, for a hook code that in
+            // practice only ever helped this exact generic-hook failure
+            // mode. Doesn't contradict the "proactive, not reactive"
+            // reasoning documented there: that argument was about not
+            // being able to correlate a garbled hook's runtime ADDRESS
+            // back to a function name. The trigger here isn't a
+            // correlation — it's _allRealHooksAreGenericType(), the whole-
+            // session condition this diagnostic already computes. The
+            // insertion is still blind as to which function it helps;
+            // it's only deferred until there's evidence something is
+            // actually wrong, and it costs one injection instead of
+            // running on every launch regardless of need.
+            console.warn(`[TextractorLauncher]   Trying known-good hook codes before falling back to the sibling architecture...`);
+            this._sendKnownGoodHooks(`diagnostic-${elapsedLabel}`);
+            this._knownGoodHooksSent = true;
+            // Give it one polling interval to produce a non-generic hook
+            // before considering the arch fallback — fall through to the
+            // reschedule at the bottom rather than escalating this tick.
+          } else {
+            console.warn(`[TextractorLauncher]   The auto-engine couldn't identify a specific hook type for this process, and the known-good hook code didn't help either — the sibling architecture may do better.`);
+            if (this._attemptArchFallback('no-clean-hook')) return;
+          }
         } else if (hasRealHookWithText) {
           // A real hook exists and isn't stuck on the generic type —
           // nothing to fall back from. Stop polling.
@@ -2070,7 +2411,10 @@ class TextractorLauncher extends EventEmitter {
         const nextElapsed = elapsedMs + ARCH_FALLBACK_CHECK_INTERVAL_MS;
         if (nextElapsed <= ARCH_FALLBACK_CHECK_MAX_MS) {
           this._diagnosticTimer = setTimeout(() => runArchFallbackCheck(nextElapsed), ARCH_FALLBACK_CHECK_INTERVAL_MS);
-        } else if (!hasAnyRealHook && this._hooks.size > 0) {
+          return;
+        }
+
+        if (!hasAnyRealHook && this._hooks.size > 0) {
           // v3.13.30: last-resort fallback attempt for the gap the
           // `_hooks.size === 0` branch above can't see — confirmed
           // necessary by a real Windows session log (Nekopara Vol.1 /
@@ -2101,17 +2445,42 @@ class TextractorLauncher extends EventEmitter {
           // BOTH that branch AND this one on the final tick, logging a
           // redundant second attempt right after the 11th "no hooks" one.
           console.warn(`[TextractorLauncher]   *** NO REAL HOOK EVER APPEARED after ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s (only system hooks) ***`);
-          this._attemptArchFallback('no-real-hook');
+          if (this._attemptArchFallback('no-real-hook')) return;
+        }
+
+        if (!hasAnyRealHook) {
+          // v3.13.32: the window is over and no relaunch got launched —
+          // either both architectures have now been tried for this
+          // (install, PID) pair (the branch above returned false because
+          // _attemptArchFallback found the sibling already exhausted or
+          // nothing left to try), or this is the `_hooks.size === 0` case,
+          // which never even reaches the branch above (deliberately, per
+          // its own comment) and so was previously just as silent at the
+          // cap. Report it as terminal instead of returning without a
+          // trace — see _concludeArchFallback's doc for why the UI
+          // bouncing back to "Launch" with no explanation was mistaken for
+          // a hang rather than a real, actionable dead end.
+          this._concludeArchFallback();
         }
       };
       this._diagnosticTimer = setTimeout(() => runArchFallbackCheck(10000), 10000);
 
-      this.emit('status', 'launched');
+      // v3.13.32: only ever false if _relaunchInProgress leaked past a
+      // relaunch that already succeeded — clearing it here is what closes
+      // the handover window _emitStatus() opened in _attemptArchFallback,
+      // so THIS 'launched' is reported as an honest 'launched', not
+      // relabeled by a stale flag.
+      this._relaunchInProgress = false;
+      this._emitStatus('launched');
       this.emit('launched', { pid: gamePid, cliPath: resolvedPath });
       console.log(`[TextractorLauncher] Launched — stdin immediate + delayed, hook discovery ON`);
 
       // === CAPTURE STDOUT ===
       this.process.stdout.on('data', (data) => {
+        // v3.13.32: see the constructor's _launchGeneration doc — a NEWER
+        // launch has already superseded this process, so its stdout must
+        // not touch current-session state (hooks, buffers, hash dedup).
+        if (generation !== this._launchGeneration) return;
         const sizeKB = Math.round(data.length / 1024);
         if (this._dataEventCount < 10 || sizeKB > 0) {
           console.log(`[TextractorLauncher] stdout event #${this._dataEventCount + 1}: ${data.length} bytes${sizeKB > 0 ? ` (${sizeKB}KB)` : ''}`);
@@ -2121,6 +2490,7 @@ class TextractorLauncher extends EventEmitter {
 
       // === CAPTURE STDERR (v3.8.23: improved capture) ===
       this.process.stderr.on('data', (data) => {
+        if (generation !== this._launchGeneration) return;
         const text = data.toString().trim();
         if (text) {
           console.log(`[TextractorLauncher] stderr: "${text.substring(0, 200)}"`);
@@ -2137,6 +2507,18 @@ class TextractorLauncher extends EventEmitter {
 
       // === PROCESS EXIT (v3.8.23: detailed error reporting) ===
       this.process.on('close', (code, signal) => {
+        // v3.13.32: the single most important generation check in this
+        // file — see the constructor's doc. kill() is asynchronous
+        // (taskkill is a separate child process on Windows, ~50-400ms),
+        // so during an arch-fallback handover this 'close' from the DYING
+        // process routinely arrives after the REPLACEMENT process's own
+        // 'launched'. Without this guard, everything below (isRunning,
+        // this.process, the arch-fallback quick-exit check, _emitStatus)
+        // would run against — and corrupt — the new session's state.
+        if (generation !== this._launchGeneration) {
+          console.log(`[TextractorLauncher] Ignoring 'close' from superseded session #${generation} (current #${this._launchGeneration})`);
+          return;
+        }
         const runTime = this._launchTime ? Math.round((Date.now() - this._launchTime) / 1000) : 0;
         this.isRunning = false;
         this.process = null;
@@ -2151,12 +2533,21 @@ class TextractorLauncher extends EventEmitter {
         // counts include anything this flush processes. Resets stream
         // state as its last step — see _flushStdout's doc.
         this._flushStdout('close');
-        this._clearTimers();
+        // v3.13.32: _clearTimers() unconditionally here was the actual
+        // mechanism of the "x86 relaunch never happens" bug — see
+        // _clearSessionTimers()'s doc. During a fallback handover
+        // (_relaunchInProgress true), only clear THIS session's own
+        // timers and leave _archRelaunchTimer alone.
+        if (this._relaunchInProgress) {
+          this._clearSessionTimers();
+        } else {
+          this._clearTimers();
+        }
 
         console.log(`[TextractorLauncher] Process exited: code=${code}, signal=${signal}, ranFor=${runTime}s`);
         console.log(`[TextractorLauncher] Final stats: hooks=${this._hooks.size}, hookLines=${this._hookLinesProcessed}, totalLines=${this._totalLinesProcessed}`);
 
-        if (runTime < 2 && code !== 0) {
+        if (!this._killedByUser && runTime < 2 && code !== 0) {
           console.warn(`[TextractorLauncher] Process exited quickly with code=${code} — attach likely failed`);
 
           // v3.13.23: a quick non-zero exit is one of the classic symptoms
@@ -2164,7 +2555,7 @@ class TextractorLauncher extends EventEmitter {
           // stderr check right below) — try the sibling arch once before
           // reporting this as a hard error to the user.
           if (this._attemptArchFallback('quick-exit')) {
-            this.emit('status', 'exited');
+            this._emitStatus('exited');
             this.emit('exited', { code, signal });
             return;
           }
@@ -2213,18 +2604,31 @@ class TextractorLauncher extends EventEmitter {
           this.emit('error', error);
         }
 
-        this.emit('status', 'exited');
+        this._emitStatus('exited');
         this.emit('exited', { code, signal });
       });
 
       // === SPAWN ERROR (v3.8.23: better messages) ===
       this.process.on('error', (err) => {
+        // v3.13.32: same superseded-session guard as 'close' above.
+        if (generation !== this._launchGeneration) {
+          console.log(`[TextractorLauncher] Ignoring 'error' from superseded session #${generation} (current #${this._launchGeneration})`);
+          return;
+        }
         this.isRunning = false;
         this.process = null;
         // v3.13.29: a spawn error means the process never produced usable
         // stdout — reset rather than flush (nothing meaningful to drain).
         this._resetStreamState();
-        this._clearTimers();
+        // v3.13.32: same _relaunchInProgress-aware choice as 'close' —
+        // don't clear _archRelaunchTimer out from under a handover this
+        // same event is about to trigger (or that's already in flight from
+        // elsewhere) via _attemptArchFallback('spawn-error') below.
+        if (this._relaunchInProgress) {
+          this._clearSessionTimers();
+        } else {
+          this._clearTimers();
+        }
         console.error(`[TextractorLauncher] Spawn error:`, err.message);
 
         // v3.13.23: try the sibling architecture once before reporting a
@@ -2253,14 +2657,14 @@ class TextractorLauncher extends EventEmitter {
           { hint, hintKey, messageKey: 'err_could_not_start_cli', messageParams: { message: err.message } }
         );
         this.emit('error', error);
-        this.emit('status', 'error');
+        this._emitStatus('error');
       });
 
       return true;
     } catch (err) {
       const error = this._buildError('Error al lanzar: ' + err.message);
       this.emit('error', error);
-      this.emit('status', 'error');
+      this._emitStatus('error');
       return false;
     }
   }
@@ -2306,11 +2710,33 @@ class TextractorLauncher extends EventEmitter {
     console.log(`[TextractorLauncher] Sending stdin (manual hook insert): "${cmd.trim()}"`);
     try {
       this.process.stdin.write(cmd);
+      this._hookInsertCount++;
       return { success: true };
     } catch (err) {
       console.error(`[TextractorLauncher] stdin write failed (manual hook insert):`, err.message);
       return { success: false, error: err.message };
     }
+  }
+
+  /**
+   * v3.13.32: whether the immediate (t=0) attach was actually consumed by
+   * TextractorCLI — used to decide whether the 1.5s backup attach below is
+   * worth sending at all. The old code sent it unconditionally: TWO
+   * injections per launch, and every `attach` makes TextractorCLI inject
+   * texthook.dll and SUSPEND the game's threads — the user-visible freeze
+   * a real bug report was about. With an arch fallback that doubles to
+   * four injections per cycle, and with the loop Fase 2 fixed, it was
+   * unbounded. The backup exists for exactly one case — TextractorCLI not
+   * having started reading stdin yet by spawn time — and that case is
+   * directly observable: a consumed attach makes TextractorCLI emit hook
+   * traffic (its Console/Clipboard system hooks register almost instantly
+   * on any PROCESSED attach — see the v3.13.30 diagnostic comment).
+   * Deliberately NOT keyed on _totalLinesProcessed: the startup usage
+   * banner prints regardless of whether stdin was ever read at all, so
+   * that would suppress the backup exactly when it's needed.
+   */
+  _attachWasAcknowledged() {
+    return this._hookLinesProcessed > 0 || this._hooks.size > 0;
   }
 
   /**
@@ -2323,6 +2749,7 @@ class TextractorLauncher extends EventEmitter {
       try {
         this.process.stdin.write(cmd);
         this._stdinSent = true;
+        this._attachSendCount++;
       } catch (stdinErr) {
         console.error(`[TextractorLauncher] stdin write failed (${label}):`, stdinErr.message);
       }
@@ -2359,21 +2786,65 @@ class TextractorLauncher extends EventEmitter {
   }
 
   /**
-   * Clear all timers.
+   * v3.13.32: timers scoped to ONE spawned process — everything except
+   * _archRelaunchTimer, which belongs to the HANDOVER between two
+   * processes and must survive the one that's dying. Split out of the old
+   * do-everything _clearTimers() because that was the actual mechanism of
+   * a real, confirmed bug: _attemptArchFallback() calls kill() (:386-ish)
+   * BEFORE arming _archRelaunchTimer, but the dying child's own 'close'
+   * handler also calls the timer cleanup — and taskkill on Windows is a
+   * separate child process (~50-400ms), so that 'close' routinely arrives
+   * AFTER _archRelaunchTimer has already been armed. The old
+   * _clearTimers() cleared it right back out, cancelling the x86 relaunch
+   * outright and leaving nothing running — with no error, just a UI back
+   * on "Launch". See _clearTimers() and kill(options) for how the two
+   * callers (a real user-initiated kill vs. the internal pre-relaunch
+   * kill) are told apart.
    */
-  _clearTimers() {
+  _clearSessionTimers() {
     if (this._stdinTimer) { clearTimeout(this._stdinTimer); this._stdinTimer = null; }
     if (this._diagnosticTimer) { clearTimeout(this._diagnosticTimer); this._diagnosticTimer = null; }
     if (this._hookDiscoveryTimer) { clearTimeout(this._hookDiscoveryTimer); this._hookDiscoveryTimer = null; }
-    // v3.13.29: previously-orphaned timers (see their setTimeout call
-    // sites for what leaking them actually broke) — now covered by the
-    // same single cleanup path as the three above.
     if (this._hookDiscoveryPhaseTimer) { clearTimeout(this._hookDiscoveryPhaseTimer); this._hookDiscoveryPhaseTimer = null; }
+  }
+
+  /**
+   * Clear ALL timers, including the cross-process _archRelaunchTimer.
+   * Correct for launch() (a fresh session with no relaunch of its own
+   * pending yet) and for a genuine user/caller-initiated kill() — see
+   * _clearSessionTimers()'s doc for the one case this is deliberately NOT
+   * used from.
+   */
+  _clearTimers() {
+    this._clearSessionTimers();
     if (this._archRelaunchTimer) { clearTimeout(this._archRelaunchTimer); this._archRelaunchTimer = null; }
   }
 
-  kill() {
-    this._clearTimers();
+  /**
+   * v3.13.32: `options._forArchRelaunch` is set by exactly one caller —
+   * _attemptArchFallback(), right before it kills the current process to
+   * respawn the sibling architecture. Every other call site (tray,
+   * ipc-handlers' textractor-kill/input-method-switch/shutdown paths,
+   * launch()'s own "already running" guard) calls kill() with no
+   * arguments and gets the ordinary meaning: the caller wants this STOPPED,
+   * full stop — cancel any pending arch relaunch too (_clearTimers(), not
+   * _clearSessionTimers()), and don't let a later 'close'/'exited' from
+   * this same process get relabeled 'relaunching' by _emitStatus. Also
+   * closes a real collateral bug found while designing this: previously,
+   * killing TextractorCLI within its first 2s made the `close` handler's
+   * `runTime < 2 && code !== 0` branch treat that as an attach failure and
+   * fire _attemptArchFallback('quick-exit') — resurrecting, in the OTHER
+   * architecture, a process the user had just asked to stop.
+   */
+  kill(options = {}) {
+    const forRelaunch = options._forArchRelaunch === true;
+    if (forRelaunch) {
+      this._clearSessionTimers();
+    } else {
+      this._relaunchInProgress = false;
+      this._killedByUser = true;
+      this._clearTimers();
+    }
 
     if (this.process && this.isRunning) {
       try {
@@ -2395,7 +2866,7 @@ class TextractorLauncher extends EventEmitter {
       // lose it" case to recover here the way there is in the `close`
       // handler.
       this._resetStreamState();
-      this.emit('status', 'killed');
+      this._emitStatus('killed');
     }
   }
 
@@ -2412,6 +2883,10 @@ class TextractorLauncher extends EventEmitter {
       hookLinesProcessed: this._hookLinesProcessed,
       totalLinesProcessed: this._totalLinesProcessed,
       stdinSent: this._stdinSent,
+      // v3.13.32: distinguish 1 attach from 2 — the whole point of the
+      // conditional backup in _attachWasAcknowledged.
+      attachSendCount: this._attachSendCount,
+      hookInsertCount: this._hookInsertCount,
       activeHookKey: this.getActiveHookKey(),
       selectedHookKey: this._selectedHookKey,
       autoSelectedHookKey: this._autoSelectedHookKey,

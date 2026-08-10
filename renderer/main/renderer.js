@@ -192,9 +192,42 @@
             api.onTextractorCliArchFallback(({ from, to, reason }) => {
                 const t = translations[currentLang] || translations['en'];
                 const template = t.textractor_arch_fallback_toast || '{from} sin resultado, probando {to}...';
-                showToast(template.replace('{from}', from).replace('{to}', to));
+                const notice = template.replace('{from}', from).replace('{to}', to);
+                showToast(notice);
+                // v3.13.32: also remembered here (not just painted once) so
+                // the 'relaunching' case in updateCliStatus can re-show it
+                // across the killed/exited -> relaunching -> launched
+                // sequence the handover actually produces.
+                cliArchFallbackNotice = notice;
                 const text = document.getElementById('cli-status-text');
-                if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + template.replace('{from}', from).replace('{to}', to) + '</span>';
+                if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + notice + '</span>';
+            });
+            // v3.13.32: was emitted by the launcher (src/main/index.js) but
+            // missing from main-preload.js's ALLOWED_RECEIVE_CHANNELS, so
+            // this listener could never actually fire — a warning meant to
+            // tell the user their PID isn't a running process (which fails
+            // exactly as silently as an architecture mismatch) never
+            // reached the UI. Non-blocking: just a status-text hint.
+            api.onTextractorCliPidWarning(({ pid, message }) => {
+                const text = document.getElementById('cli-status-text');
+                const statusBar = document.getElementById('cli-status-bar');
+                if (text && statusBar) {
+                    statusBar.classList.remove('hidden');
+                    text.innerHTML = '<span class="text-amber-500">⚠ ' + message + '</span>';
+                }
+            });
+            // v3.13.32: a fallback proved which architecture actually works
+            // for this install — see TextractorLauncher's _markArchSuccess
+            // doc. Must update the PATH INPUT itself, not just settings:
+            // launchTextractorCli() reads `#textractor-cli-path`'s current
+            // DOM value directly, not the persisted setting, so without
+            // this the next manual Launch click would still send the old
+            // (proven-broken) path and the whole discovery would be lost.
+            api.onTextractorCliArchResolved(({ cliPath }) => {
+                const input = document.getElementById('textractor-cli-path');
+                if (input) input.value = cliPath;
+                const t = translations[currentLang] || translations['en'];
+                showToast((t.cli_arch_resolved_toast || 'This architecture works — Tuhua will use it from now on.'));
             });
             api.onHooksDiscovered((data) => updateHookSelector(data));
             api.onOcrStatus((status) => updateOcrStatus(status));
@@ -1847,6 +1880,23 @@
 
         // ===== TExtractorCLI FUNCTIONS =====
         let cliRunning = false;
+        // v3.13.32: the amber "x64 sin resultado, probando x86..." text set
+        // by onTextractorCliArchFallback below, re-shown by the
+        // 'relaunching' case in updateCliStatus() so it survives the
+        // status transitions the handover produces (see that function's
+        // doc for why 'relaunching' exists at all).
+        let cliArchFallbackNotice = '';
+        // v3.13.32: latched by the 'error' case, cleared by 'launched' and
+        // by a fresh manual Launch — see updateCliStatus()'s 'exited'/
+        // 'killed' case for the bug this guards (the error panel used to
+        // auto-hide itself 2s after ANY stop, even one carrying a terminal
+        // error the user hadn't had a chance to read).
+        let cliHasTerminalError = false;
+        // v3.13.32: handle for the 2s auto-hide timer scheduled by
+        // 'exited'/'killed' below, so a status that arrives before it
+        // fires (an error, or the relaunch's own 'launched') can cancel it
+        // instead of it unconditionally hiding the bar/error panel later.
+        let cliStatusHideTimer = null;
 
         async function browseTextractorCli() {
             const result = await api.textractorBrowseCli();
@@ -1899,6 +1949,15 @@
                 setTimeout(() => status.classList.add('hidden'), 3000);
                 return;
             }
+
+            // v3.13.32: a fresh, user-initiated Launch starts clean —
+            // don't carry over an amber arch-fallback notice or a latched
+            // terminal-error flag from whatever the previous session ended
+            // with (see updateCliStatus's 'launched'/'error'/'exited'
+            // cases for what these guard).
+            cliArchFallbackNotice = '';
+            cliHasTerminalError = false;
+            if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
 
             // Disable launch button, show kill button
             document.getElementById('btn-launch-cli').classList.add('hidden');
@@ -1956,7 +2015,36 @@
             switch (status) {
                 case 'launched':
                     cliRunning = true;
+                    // v3.13.32: a relaunch (arch fallback) is now over —
+                    // clear both the amber notice and any stale hide timer
+                    // from the 'relaunching'/'exited' transitions that led
+                    // here, so this 'launched' reads as an honest running
+                    // state, not a fallback still in progress.
+                    cliArchFallbackNotice = '';
+                    cliHasTerminalError = false;
+                    if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span>';
+                    errorDetail.classList.add('hidden');
+                    document.getElementById('btn-launch-cli').classList.add('hidden');
+                    document.getElementById('btn-kill-cli').classList.remove('hidden');
+                    break;
+                case 'relaunching':
+                    // v3.13.32: NOT a stop. The launcher killed the current
+                    // process on purpose and is spawning the sibling
+                    // architecture ~300ms later — see _emitStatus()'s doc
+                    // in textractor-launcher.js. This used to arrive as
+                    // plain 'killed'/'exited', which the case below maps
+                    // to "user stopped it": the Launch button reappeared
+                    // and the whole status bar hid itself 2s later,
+                    // erasing the amber "probando x86..." notice and
+                    // inviting the click that restarted the entire 2x60s
+                    // discovery cycle from scratch (a real, reported loop).
+                    // Kept the Stop button showing and cliRunning true so
+                    // the user can still cancel the handover if they want.
+                    cliRunning = true;
+                    cliHasTerminalError = false;
+                    if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
+                    text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + (cliArchFallbackNotice || t.cli_relaunching_status || 'Switching architecture...') + '</span>';
                     errorDetail.classList.add('hidden');
                     document.getElementById('btn-launch-cli').classList.add('hidden');
                     document.getElementById('btn-kill-cli').classList.remove('hidden');
@@ -1967,8 +2055,20 @@
                     text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
                     document.getElementById('btn-launch-cli').classList.remove('hidden');
                     document.getElementById('btn-kill-cli').classList.add('hidden');
-                    setTimeout(() => {
-                        if (!cliRunning) {
+                    // v3.13.32: cancelable now, and gated on !cliHasTerminalError
+                    // — this timer used to unconditionally hide
+                    // #cli-error-detail 2s after ANY stop, including one
+                    // that just carried a terminal error the user hadn't
+                    // had a chance to read yet (showCliError's OWN 15s
+                    // auto-hide never got a chance to run: this 2s one
+                    // always won the race). A previous investigation
+                    // relied on the "silent failure" this caused as
+                    // evidence something was un-diagnosable — it wasn't
+                    // silent, it was erased.
+                    if (cliStatusHideTimer) clearTimeout(cliStatusHideTimer);
+                    cliStatusHideTimer = setTimeout(() => {
+                        cliStatusHideTimer = null;
+                        if (!cliRunning && !cliHasTerminalError) {
                             errorDetail.classList.add('hidden');
                             statusBar.classList.add('hidden');
                         }
@@ -1976,6 +2076,8 @@
                     break;
                 case 'error':
                     cliRunning = false;
+                    cliHasTerminalError = true;
+                    if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: ' + (t.cli_error_status || 'Error') + '</span>';
                     document.getElementById('btn-launch-cli').classList.remove('hidden');
                     document.getElementById('btn-kill-cli').classList.add('hidden');

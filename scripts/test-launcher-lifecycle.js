@@ -111,9 +111,25 @@ function makeFakeProcess() {
 }
 
 let lastFakeProcess = null;
+// v3.13.32: every spawned exe path, in call order — lets the arch-fallback
+// tests below assert not just THAT a relaunch happened but which
+// architecture it actually spawned (x64 vs its x86 sibling), and how many
+// times spawn() was called in total. Reset per-test via spawnCalls.length=0.
+let spawnCalls = [];
 function installFakeSpawn() {
   const origSpawn = cp.spawn;
-  cp.spawn = () => {
+  cp.spawn = (exePath) => {
+    // v3.13.32: kill() also calls spawn('taskkill', ...) on a win32
+    // platform (which this bench always fakes) to terminate the process
+    // by PID. That call must NOT be recorded as a TextractorCLI (re)launch
+    // — spawnCalls/lastFakeProcess are read by the arch-fallback tests
+    // specifically to inspect the relaunched TextractorCLI process, and a
+    // 'taskkill' entry between two real launches threw those counts and
+    // "is this the new process" checks off.
+    if (exePath === 'taskkill') {
+      return makeFakeProcess();
+    }
+    spawnCalls.push(exePath);
     lastFakeProcess = makeFakeProcess();
     return lastFakeProcess;
   };
@@ -326,6 +342,433 @@ function testArchRelaunchTimerCancelable() {
   return { id: 'arch-relaunch-timer-cancelable', pass, fired, scheduled, cleared };
 }
 
+// ─── Tests 2b-2f (v3.13.32): the arch-fallback HANDOVER itself — the race
+// between the dying process's late 'close' and the 300ms relaunch, the
+// status the UI sees during that window, generation-based isolation of a
+// stale process's events, and the user-kill paths that must NOT be
+// mistaken for (or interrupted by) that handover. Unlike the tests above,
+// these actually call launch() and let the fake spawn/clock drive a real
+// end-to-end relaunch, so they need x64Path/x86Path — note that unlike
+// testArchRelaunchTimerCancelable above, no local fs override is needed
+// here: the module-scope installFakeFs()'s isFakePath already answers for
+// anything under path.dirname(FAKE_EXE_PATH) ('/fake'), which covers both
+// '/fake/x64/TextractorCLI.exe' and '/fake/x86/TextractorCLI.exe'. ───────
+
+function archSiblingPaths() {
+  const x64Path = FAKE_EXE_PATH.replace(path.sep + 'TextractorCLI.exe', path.sep + 'x64' + path.sep + 'TextractorCLI.exe');
+  const x86Path = x64Path.replace(path.sep + 'x64' + path.sep, path.sep + 'x86' + path.sep);
+  return { x64Path, x86Path };
+}
+
+function collectStatuses(launcher) {
+  const statuses = [];
+  launcher.on('status', (s) => statuses.push(s));
+  return statuses;
+}
+
+// Fire pending fake-clock timers one at a time until `predicate()` is true
+// or there's nothing left to fire — used instead of draining everything so
+// these tests don't also have to run the new session's full 10s-60s
+// diagnostic chain just to observe the 300ms relaunch handover.
+function drainUntil(clock, predicate, maxTicks = 30) {
+  let guard = 0;
+  while (!predicate() && clock.pendingCount() > 0 && guard++ < maxTicks) {
+    withSilencedConsole(() => clock.fireNext());
+  }
+}
+
+function testRelaunchSurvivesLateClose() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  // A synthetic 'close' with a non-zero code can make launch()'s close
+  // handler build and emit a real 'error' when the arch-fallback retry
+  // it also tries returns false (already attempted) — Node throws on an
+  // unhandled 'error' event, so every test below that emits 'close' needs
+  // a listener here even when the error itself isn't what's under test.
+  launcher.on('error', () => {});
+  const { x64Path, x86Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  const oldProcess = lastFakeProcess;
+
+  withSilencedConsole(() => launcher._attemptArchFallback('no-hooks'));
+  const relaunchScheduledBeforeClose = launcher._archRelaunchTimer !== null;
+
+  // The bug this reproduces: the dying process's 'close' arriving WITHIN
+  // the 300ms relaunch window, before the timer has fired. The old
+  // unconditional _clearTimers() inside that close handler cancelled
+  // _archRelaunchTimer right back out — no x86 relaunch, no error, just a
+  // UI back on "Launch".
+  withSilencedConsole(() => oldProcess.emit('close', 1, null));
+  const relaunchSurvivedClose = launcher._archRelaunchTimer !== null;
+
+  drainUntil(clock, () => spawnCalls.length >= 2);
+  clock.restore();
+
+  const pass = ok && relaunchScheduledBeforeClose && relaunchSurvivedClose
+    && spawnCalls.length === 2 && spawnCalls[1] === x86Path;
+  return { id: 'relaunch-survives-late-close', pass, relaunchScheduledBeforeClose, relaunchSurvivedClose, spawnCalls: [...spawnCalls] };
+}
+
+function testStatusMappingDuringRelaunch() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  // A synthetic 'close' with a non-zero code can make launch()'s close
+  // handler build and emit a real 'error' when the arch-fallback retry
+  // it also tries returns false (already attempted) — Node throws on an
+  // unhandled 'error' event, so every test below that emits 'close' needs
+  // a listener here even when the error itself isn't what's under test.
+  launcher.on('error', () => {});
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  // Start collecting only from here — the initial launch's own 'launched'
+  // isn't part of what this test is asserting about.
+  const statuses = collectStatuses(launcher);
+
+  withSilencedConsole(() => launcher._attemptArchFallback('no-hooks'));
+  drainUntil(clock, () => statuses.includes('launched'));
+  clock.restore();
+
+  const noRealStop = !statuses.includes('killed') && !statuses.includes('exited');
+  const sawRelaunching = statuses.includes('relaunching');
+  const sawSecondLaunched = statuses.includes('launched');
+  const pass = ok && spawnCalls.length === 2 && noRealStop && sawRelaunching && sawSecondLaunched;
+  return { id: 'status-mapping-during-relaunch', pass, statuses: [...statuses], spawnCallCount: spawnCalls.length };
+}
+
+function testStaleCloseIgnored() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  // A synthetic 'close' with a non-zero code can make launch()'s close
+  // handler build and emit a real 'error' when the arch-fallback retry
+  // it also tries returns false (already attempted) — Node throws on an
+  // unhandled 'error' event, so every test below that emits 'close' needs
+  // a listener here even when the error itself isn't what's under test.
+  launcher.on('error', () => {});
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  const oldProcess = lastFakeProcess;
+
+  withSilencedConsole(() => launcher._attemptArchFallback('no-hooks'));
+  drainUntil(clock, () => spawnCalls.length >= 2);
+  const newProcess = lastFakeProcess;
+  const relaunchHappened = spawnCalls.length === 2 && newProcess !== oldProcess;
+
+  // The stale process's 'close' arrives AFTER the new session already
+  // exists — must be a complete no-op against current-session state.
+  const hooksBeforeStaleClose = launcher._hooks.size;
+  withSilencedConsole(() => oldProcess.emit('close', 1, null));
+  const stillRunning = launcher.isRunning === true;
+  const stillOnNewProcess = launcher.process === newProcess;
+  const hooksUnaffected = launcher._hooks.size === hooksBeforeStaleClose;
+
+  // And — the one guard in this whole change with real data-loss risk if
+  // misplaced — the CURRENT session's own stdout must still process
+  // normally after the stale event was ignored, not just "nothing broke".
+  const hookLine = '[6:12345:AAAA:BBBB:0::HQ8@0:nekopara.exe] test dialogue\n';
+  withSilencedConsole(() => newProcess.stdout.emit('data', Buffer.from(hookLine, 'utf16le')));
+  const newSessionStillProcesses = launcher._hooks.size > hooksBeforeStaleClose;
+
+  clock.restore();
+
+  const pass = ok && relaunchHappened && stillRunning && stillOnNewProcess && hooksUnaffected && newSessionStillProcesses;
+  return { id: 'stale-close-ignored', pass, relaunchHappened, stillRunning, stillOnNewProcess, hooksUnaffected, newSessionStillProcesses };
+}
+
+function testUserKillCancelsRelaunch() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  // A synthetic 'close' with a non-zero code can make launch()'s close
+  // handler build and emit a real 'error' when the arch-fallback retry
+  // it also tries returns false (already attempted) — Node throws on an
+  // unhandled 'error' event, so every test below that emits 'close' needs
+  // a listener here even when the error itself isn't what's under test.
+  launcher.on('error', () => {});
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  withSilencedConsole(() => launcher._attemptArchFallback('no-hooks'));
+  const relaunchScheduled = launcher._archRelaunchTimer !== null;
+
+  // The USER stops it now — plain kill(), no options. Must cancel the
+  // pending relaunch outright (the v3.13.29 "resurrected process" fix,
+  // kept working here) and must not leave _relaunchInProgress stuck true.
+  withSilencedConsole(() => launcher.kill());
+  const relaunchCancelled = launcher._archRelaunchTimer === null;
+  const notStuckRelaunching = launcher._relaunchInProgress === false;
+
+  // Drain whatever's left — if the cancellation failed, this would fire
+  // the stale 300ms timer and spawn a third time.
+  drainUntil(clock, () => false, 20);
+  clock.restore();
+
+  const pass = ok && relaunchScheduled && relaunchCancelled && notStuckRelaunching && spawnCalls.length === 1;
+  return { id: 'user-kill-cancels-relaunch', pass, relaunchScheduled, relaunchCancelled, notStuckRelaunching, spawnCallCount: spawnCalls.length };
+}
+
+function testUserKillDoesNotTriggerFallback() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  // A synthetic 'close' with a non-zero code can make launch()'s close
+  // handler build and emit a real 'error' when the arch-fallback retry
+  // it also tries returns false (already attempted) — Node throws on an
+  // unhandled 'error' event, so every test below that emits 'close' needs
+  // a listener here even when the error itself isn't what's under test.
+  launcher.on('error', () => {});
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+  const fallbackEvents = [];
+  launcher.on('arch-fallback', (e) => fallbackEvents.push(e));
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  const proc = lastFakeProcess;
+
+  // The user stops it almost immediately — well within the runTime<2s
+  // window the 'quick-exit' heuristic uses.
+  withSilencedConsole(() => launcher.kill());
+  // The real OS process's 'close' arrives after kill(), with a non-zero
+  // exit code — exactly what taskkill /f produces.
+  withSilencedConsole(() => proc.emit('close', 1, null));
+
+  clock.restore();
+
+  const pass = ok && fallbackEvents.length === 0 && spawnCalls.length === 1;
+  return { id: 'user-kill-does-not-trigger-fallback', pass, fallbackEventCount: fallbackEvents.length, spawnCallCount: spawnCalls.length };
+}
+
+// ─── Tests: _archAttemptMemory — the actual loop-breaker (v3.13.32) ─────
+// Unlike the diagnostic-scenario tests above (which stub out
+// _attemptArchFallback to just observe reasons), these let it run for
+// real end-to-end: a launch() with zero hooks the whole time drains its
+// OWN full 10s-60s window, triggers a real relaunch onto the sibling
+// architecture, and THAT session also drains its own full window with
+// zero hooks — reaching _concludeArchFallback for real, which is what
+// marks (install, PID) exhausted. Drains both windows via drainUntil
+// rather than a fixed tick count so this doesn't silently stop verifying
+// anything if ARCH_FALLBACK_CHECK_MAX_MS/INTERVAL_MS ever change.
+
+function driveOnePidToExhaustion(launcher, clock, x64Path, fallbackEvents, errorEvents) {
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  // First window (x64, zero hooks) ends in exactly one real relaunch.
+  drainUntil(clock, () => fallbackEvents.length >= 1, 15);
+  // Second window (x86, also zero hooks — nothing here simulates the
+  // relaunched process producing any hooks) ends in the terminal error
+  // that marks this (install, PID) exhausted.
+  drainUntil(clock, () => errorEvents.length >= 1, 30);
+}
+
+function testArchMemoryBlocksSecondLoop() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+  const fallbackEvents = [];
+  const errorEvents = [];
+  launcher.on('arch-fallback', (e) => fallbackEvents.push(e));
+  launcher.on('error', (e) => errorEvents.push(e));
+
+  driveOnePidToExhaustion(launcher, clock, x64Path, fallbackEvents, errorEvents);
+  const fallbacksAfterFirstCycle = fallbackEvents.length;
+  const errorsAfterFirstCycle = errorEvents.length;
+  const spawnsAfterFirstCycle = spawnCalls.length;
+
+  // A second MANUAL launch, SAME PID, SAME install. Before
+  // _archAttemptMemory existed, this reset _archFallbackAttempted (every
+  // non-retry launch() does, deliberately — see its own comment) with
+  // nothing remembering the first cycle ever happened, buying another
+  // full pair of 60s waits — confirmed the actual mechanism behind a real
+  // reported "infinite loop of intentando x86".
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  drainUntil(clock, () => false, 30); // drain whatever this launch schedules, fully
+
+  clock.restore();
+
+  const pass = fallbacksAfterFirstCycle === 1 && errorsAfterFirstCycle === 1 && spawnsAfterFirstCycle === 2
+    // The second launch spawns once (the manual relaunch itself) but must
+    // NOT trigger a second automatic arch-fallback, and must NOT report a
+    // second (redundant) terminal error for the same exhausted key.
+    && spawnCalls.length === 3 && fallbackEvents.length === 1 && errorEvents.length === 1;
+  return {
+    id: 'arch-memory-blocks-second-loop', pass,
+    fallbacksAfterFirstCycle, errorsAfterFirstCycle, spawnsAfterFirstCycle,
+    spawnCallCountFinal: spawnCalls.length, fallbackEventCountFinal: fallbackEvents.length, errorEventCountFinal: errorEvents.length
+  };
+}
+
+function testArchMemoryScopedByPid() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+  const fallbackEvents = [];
+  const errorEvents = [];
+  launcher.on('arch-fallback', (e) => fallbackEvents.push(e));
+  launcher.on('error', (e) => errorEvents.push(e));
+
+  driveOnePidToExhaustion(launcher, clock, x64Path, fallbackEvents, errorEvents);
+  const fallbacksAfterFirstPid = fallbackEvents.length;
+
+  // A DIFFERENT PID (different game) against the SAME install — must get
+  // its own fresh attempt, not be silently blocked by the first PID's
+  // exhausted memory. _archAttemptKey is (PID, install) precisely for this.
+  withSilencedConsole(() => launcher.launch(999, { cliPath: x64Path }));
+  drainUntil(clock, () => fallbackEvents.length > fallbacksAfterFirstPid, 15);
+
+  clock.restore();
+
+  const pass = fallbacksAfterFirstPid === 1 && fallbackEvents.length === 2
+    && fallbackEvents[1].to === fallbackEvents[0].to; // same sibling-arch swap, just for the new PID
+  return { id: 'arch-memory-scoped-by-pid', pass, fallbacksAfterFirstPid, fallbackEventCountFinal: fallbackEvents.length };
+}
+
+// ─── Tests: fewer attaches (v3.13.32) — the 1.5s backup attach becoming
+// conditional, and _sendKnownGoodHooks moving from "every launch" to "only
+// once the diagnostic actually sees the generic-hook failure mode". Both
+// are about how many times this file injects into the game process per
+// launch, not about hook selection or timing — getStats()'s new
+// attachSendCount/hookInsertCount exist specifically so these can assert
+// exact counts instead of just "at least one". ──────────────────────────
+
+function testAttachSentOnceWhenAcked() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  const { x64Path } = archSiblingPaths();
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  const proc = lastFakeProcess;
+
+  // A real hook line arrives before the 1.5s backup timer fires — this is
+  // what _attachWasAcknowledged() is meant to detect.
+  const hookLine = '[6:12345:AAAA:BBBB:0::HQ8@0:nekopara.exe] test dialogue\n';
+  withSilencedConsole(() => proc.stdout.emit('data', Buffer.from(hookLine, 'utf16le')));
+
+  // Drain enough to fire the 1.5s backup timer (and whatever else is
+  // pending soon after) without running the full 10s-60s diagnostic.
+  drainUntil(clock, () => false, 3);
+  clock.restore();
+
+  const stats = launcher.getStats();
+  const pass = ok && stats.attachSendCount === 1;
+  return { id: 'attach-sent-once-when-acked', pass, attachSendCount: stats.attachSendCount, hookLinesProcessed: stats.hookLinesProcessed };
+}
+
+function testAttachResentWhenSilent() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  const { x64Path } = archSiblingPaths();
+
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  // Nothing acknowledges the immediate attach — fire just the 1.5s timer
+  // (the earliest pending one) and stop before the 10s diagnostic.
+  drainUntil(clock, () => false, 1);
+  clock.restore();
+
+  const stats = launcher.getStats();
+  const pass = ok && stats.attachSendCount === 2;
+  return { id: 'attach-resent-when-silent', pass, attachSendCount: stats.attachSendCount };
+}
+
+function testKnownGoodHooksOnlyOnGeneric() {
+  // Generic case (mirrors diagnostic scenario B): the known-good hook
+  // codes SHOULD fire exactly once, on the first 'no-clean-hook' tick.
+  const clockA = installFakeClock();
+  const launcherA = new TextractorLauncher();
+  launcherA.on('error', () => {});
+  launcherA._attemptArchFallback = () => false; // observe only, don't relaunch
+  withSilencedConsole(() => launcherA.launch(12345, { cliPath: FAKE_EXE_PATH }));
+  launcherA._hooks.set('6:1:A:B', {
+    key: '6:1:A:B', name: 'game.exe', isSystemHook: false,
+    textCount: 3, hookCode: 'HB0@0', hasCJK: true, totalTextLength: 30, qualityPenalty: 0
+  });
+  drainUntil(clockA, () => launcherA.getStats().hookInsertCount > 0, 5);
+  clockA.restore();
+  const generic = launcherA.getStats();
+
+  // Clean case (mirrors diagnostic scenario C): a real, non-generic hook
+  // exists from the start — known-good hooks must never fire.
+  const clockB = installFakeClock();
+  const launcherB = new TextractorLauncher();
+  launcherB.on('error', () => {});
+  withSilencedConsole(() => launcherB.launch(12345, { cliPath: FAKE_EXE_PATH }));
+  launcherB._hooks.set('6:1:A:B', {
+    key: '6:1:A:B', name: 'game.exe', isSystemHook: false,
+    textCount: 3, hookCode: 'HQ8@0', hasCJK: true, totalTextLength: 30, qualityPenalty: 0
+  });
+  drainUntil(clockB, () => false, 5);
+  clockB.restore();
+  const clean = launcherB.getStats();
+
+  const pass = generic.hookInsertCount === 1 && generic.attachSendCount === 1 && clean.hookInsertCount === 0;
+  return { id: 'known-good-hooks-only-on-generic', pass, generic: { hookInsertCount: generic.hookInsertCount, attachSendCount: generic.attachSendCount }, clean: { hookInsertCount: clean.hookInsertCount } };
+}
+
+// ─── Tests: persisting the winning architecture (v3.13.32) — once a
+// fallback's relaunch actually produces real hook text, launch() should
+// reuse that architecture on the NEXT session instead of re-discovering it
+// from scratch every time, but only within the SAME Textractor install. ──
+
+function testArchPreferenceReused() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  launcher.on('error', () => {});
+  const { x64Path, x86Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+  const archResolvedEvents = [];
+  launcher.on('arch-resolved', (e) => archResolvedEvents.push(e));
+
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  drainUntil(clock, () => spawnCalls.length >= 2, 15); // x64 -> x86 relaunch
+  const x86Process = lastFakeProcess;
+
+  // A real, non-system hook produces text on x86 — this is what proves the
+  // architecture and triggers _markArchSuccess.
+  const hookLine = '[6:12345:AAAA:BBBB:0::HQ8@0:nekopara.exe] hola mundo\n';
+  withSilencedConsole(() => x86Process.stdout.emit('data', Buffer.from(hookLine, 'utf16le')));
+
+  // A fresh MANUAL launch, pointed at x64 again (as if the user never
+  // touched settings) — must reuse the proven x86 path instead of
+  // re-discovering it from a brand new 60s window.
+  withSilencedConsole(() => launcher.kill());
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+
+  clock.restore();
+
+  const pass = spawnCalls.length === 3 && spawnCalls[2] === x86Path && archResolvedEvents.length === 1;
+  return { id: 'arch-preference-reused', pass, spawnCalls: [...spawnCalls], archResolvedEventCount: archResolvedEvents.length };
+}
+
+function testArchPreferenceNotCrossingInstalls() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  launcher.on('error', () => {});
+  const { x64Path } = archSiblingPaths();
+  spawnCalls.length = 0;
+
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+  drainUntil(clock, () => spawnCalls.length >= 2, 15);
+  const x86Process = lastFakeProcess;
+  const hookLine = '[6:12345:AAAA:BBBB:0::HQ8@0:nekopara.exe] hola mundo\n';
+  withSilencedConsole(() => x86Process.stdout.emit('data', Buffer.from(hookLine, 'utf16le')));
+  withSilencedConsole(() => launcher.kill());
+
+  // A DIFFERENT install entirely (not the x64/x86 pair just proven) — the
+  // preference for the first install must not leak here; an explicit
+  // pointer at a different Textractor folder always wins.
+  const otherInstallPath = FAKE_EXE_PATH.replace(path.sep + 'TextractorCLI.exe', path.sep + 'other' + path.sep + 'TextractorCLI.exe');
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: otherInstallPath }));
+
+  clock.restore();
+
+  const pass = spawnCalls.length === 3 && spawnCalls[2] === otherInstallPath; // used as-is, no swap
+  return { id: 'arch-preference-not-crossing-installs', pass, spawnCalls: [...spawnCalls] };
+}
+
 // ─── Test 3: arch-fallback diagnostic tick count, three scenarios ───────
 
 function runDiagnosticScenario(label, setupHooks) {
@@ -333,6 +776,13 @@ function runDiagnosticScenario(label, setupHooks) {
   const launcher = new TextractorLauncher();
   const fallbackCalls = [];
   launcher._attemptArchFallback = (reason) => { fallbackCalls.push(reason); return false; }; // don't actually relaunch — just observe
+  // v3.13.32: with the spy above always returning false, any scenario
+  // where the window ends with !hasAnyRealHook now reaches
+  // _concludeArchFallback(), which emits a real 'error' — Node throws on
+  // an unhandled one, so this needs a listener even in scenarios that
+  // don't expect an error (the array just stays empty for those).
+  const errorEvents = [];
+  launcher.on('error', (e) => errorEvents.push(e));
 
   const savedLog = console.log, savedWarn = console.warn;
   console.log = () => {}; console.warn = () => {};
@@ -356,7 +806,7 @@ function runDiagnosticScenario(label, setupHooks) {
 
   console.log = savedLog; console.warn = savedWarn;
   clock.restore();
-  return { label, diagnosticTicks, fallbackCalls, pendingAtEnd: clock.pendingCount() };
+  return { label, diagnosticTicks, fallbackCalls, errorEvents, pendingAtEnd: clock.pendingCount() };
 }
 
 function testDiagnosticScenarios() {
@@ -406,10 +856,23 @@ function testDiagnosticScenarios() {
   }));
 
   const expectations = {
-    'A-no-hooks-ever': { ticks: 11, expectedReasons: Array(11).fill('no-hooks') },
-    'B-all-generic': { ticks: 11, expectedReasons: Array(11).fill('no-clean-hook') },
-    'C-real-hook-clean': { ticks: 1, expectedReasons: [] },
-    'D-only-system-hooks-forever': { ticks: 11, expectedReasons: ['no-real-hook'] }
+    // v3.13.32: A and D now ALSO end in exactly one terminal error via
+    // _concludeArchFallback — both are "the 60s window ended with no real
+    // hook" cases (A: hasAnyRealHook was never true at all; D: same, a
+    // system hook doesn't count). B doesn't (a real, if generic, hook DOES
+    // exist — hasAnyRealHook is true — so !hasAnyRealHook never matches
+    // and _concludeArchFallback is never reached). C stops after one tick
+    // with a real, non-generic hook — nothing to conclude either.
+    'A-no-hooks-ever': { ticks: 11, expectedReasons: Array(11).fill('no-hooks'), expectedErrors: 1 },
+    // v3.13.32: 10, not 11 — the FIRST 'no-clean-hook' tick now sends the
+    // known-good hook codes instead of escalating straight to arch
+    // fallback (see the diagnostic's 'no-clean-hook' branch), so only the
+    // remaining 10 ticks actually call _attemptArchFallback. This changed
+    // count IS the assertion that the cheap-fix-before-expensive-fix
+    // ordering landed — not a loosened expectation.
+    'B-all-generic': { ticks: 11, expectedReasons: Array(10).fill('no-clean-hook'), expectedErrors: 0 },
+    'C-real-hook-clean': { ticks: 1, expectedReasons: [], expectedErrors: 0 },
+    'D-only-system-hooks-forever': { ticks: 11, expectedReasons: ['no-real-hook'], expectedErrors: 1 }
   };
 
   const checked = results.map(r => {
@@ -417,8 +880,10 @@ function testDiagnosticScenarios() {
     const ticksOk = r.diagnosticTicks === exp.ticks;
     const callsOk = r.fallbackCalls.length === exp.expectedReasons.length
       && r.fallbackCalls.every((x, i) => x === exp.expectedReasons[i]);
+    const errorsOk = r.errorEvents.length === exp.expectedErrors
+      && r.errorEvents.every(e => e.messageKey === 'err_arch_fallback_exhausted');
     const pendingOk = r.pendingAtEnd === 0;
-    return { ...r, pass: ticksOk && callsOk && pendingOk, ticksOk, callsOk, pendingOk, expected: exp };
+    return { ...r, pass: ticksOk && callsOk && errorsOk && pendingOk, ticksOk, callsOk, errorsOk, pendingOk, expected: exp };
   });
 
   return checked;
@@ -498,6 +963,18 @@ function run() {
   if (!args.only || 'pid-check'.includes(args.only) || 'pid-liveness'.includes(args.only)) all.push(...testPidLivenessCheck());
   if (!args.only || 'timer-cleanup-after-kill'.includes(args.only)) all.push(testTimerCleanupAfterKill());
   if (!args.only || 'arch-relaunch-timer-cancelable'.includes(args.only)) all.push(testArchRelaunchTimerCancelable());
+  if (!args.only || 'relaunch-survives-late-close'.includes(args.only)) all.push(testRelaunchSurvivesLateClose());
+  if (!args.only || 'status-mapping-during-relaunch'.includes(args.only)) all.push(testStatusMappingDuringRelaunch());
+  if (!args.only || 'stale-close-ignored'.includes(args.only)) all.push(testStaleCloseIgnored());
+  if (!args.only || 'user-kill-cancels-relaunch'.includes(args.only)) all.push(testUserKillCancelsRelaunch());
+  if (!args.only || 'user-kill-does-not-trigger-fallback'.includes(args.only)) all.push(testUserKillDoesNotTriggerFallback());
+  if (!args.only || 'arch-memory-blocks-second-loop'.includes(args.only)) all.push(testArchMemoryBlocksSecondLoop());
+  if (!args.only || 'arch-memory-scoped-by-pid'.includes(args.only)) all.push(testArchMemoryScopedByPid());
+  if (!args.only || 'attach-sent-once-when-acked'.includes(args.only)) all.push(testAttachSentOnceWhenAcked());
+  if (!args.only || 'attach-resent-when-silent'.includes(args.only)) all.push(testAttachResentWhenSilent());
+  if (!args.only || 'known-good-hooks-only-on-generic'.includes(args.only)) all.push(testKnownGoodHooksOnlyOnGeneric());
+  if (!args.only || 'arch-preference-reused'.includes(args.only)) all.push(testArchPreferenceReused());
+  if (!args.only || 'arch-preference-not-crossing-installs'.includes(args.only)) all.push(testArchPreferenceNotCrossingInstalls());
   if (!args.only || 'diagnostic'.includes(args.only) || 'tick'.includes(args.only)) all.push(...testDiagnosticScenarios());
   if (!args.only || 'hysteresis'.includes(args.only) || 'stale'.includes(args.only)) all.push(...testHysteresisAgeDiscount());
 

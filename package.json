@@ -1,7 +1,7 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.31",
-  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.31",
+  "version": "3.13.32",
+  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.32",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -15,6 +15,7 @@
     "test:hook-cleaning": "node scripts/test-hook-cleaning.js",
     "test:stdout-decoding": "node scripts/test-stdout-decoding.js",
     "test:launcher-lifecycle": "node scripts/test-launcher-lifecycle.js",
+    "test:ipc-channels": "node scripts/test-ipc-channels.js",
     "test:context-memory": "node scripts/test-context-memory.js"
   },
   "author": {
