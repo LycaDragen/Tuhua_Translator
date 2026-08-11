@@ -179,6 +179,22 @@ class TextractorLauncher extends EventEmitter {
     // the game's threads — the user-visible freeze a real bug report was
     // about — so this is a real behavior change, not just a log toggle).
     this._forceDoubleAttach = process.env.TUHUA_FORCE_DOUBLE_ATTACH === '1';
+    // v3.13.33: diagnostic-only escape hatch, set TUHUA_SHOW_CLI_WINDOW=1
+    // to test whether spawning TextractorCLI with windowsHide:true (below)
+    // affects its ability to establish whatever session-level hook
+    // infrastructure Textractor's engine auto-detection (vnreng) needs —
+    // suspected because a real Windows investigation found that hook
+    // detection reliably succeeds via the GUI (a normal, visible window)
+    // but never via Tuhua's automated attach, survives across Tuhua/game
+    // restarts within the same Windows logon session, and is lost only on
+    // a full reboot — a pattern consistent with a per-session OS
+    // construct (e.g. a global hook table tied to the interactive Window
+    // Station) rather than anything Tuhua's own code persists. Ruled out
+    // separately: the Textractor install folder, the specific hook code,
+    // and x64 vs x86 (all reproduced/refuted with real Windows sessions —
+    // see plan-textractor-ux memory for the full elimination). Default
+    // (unset) keeps today's behavior — this is not meant to ship enabled.
+    this._showCliWindow = process.env.TUHUA_SHOW_CLI_WINDOW === '1';
     // v3.13.32: reset per-launch — see the diagnostic's 'no-clean-hook'
     // branch, the new call site for _sendKnownGoodHooks.
     this._knownGoodHooksSent = false;
@@ -2231,8 +2247,11 @@ class TextractorLauncher extends EventEmitter {
         env: { ...process.env }
       };
 
-      if (process.platform === 'win32') {
+      if (process.platform === 'win32' && !this._showCliWindow) {
         spawnOptions.windowsHide = true;
+      }
+      if (this._showCliWindow) {
+        console.log(`[TextractorLauncher] TUHUA_SHOW_CLI_WINDOW=1 — spawning with a visible console window for this diagnostic.`);
       }
 
       this.process = spawn(resolvedPath, args, spawnOptions);
