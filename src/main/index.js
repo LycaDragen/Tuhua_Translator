@@ -153,6 +153,15 @@ app.whenReady().then(() => {
     windowManager.sendToMainWindow('textractor-cli-pid-warning', { pid, message });
   });
 
+  // v3.13.37: same pattern as 'arch-fallback'/'pid-warning' above — lets
+  // the renderer show a live countdown instead of a dead "Launch" button
+  // during the up-to-60s hook discovery window (fresh launch or an
+  // internal arch-fallback retry, launch() emits it either way).
+  textractorLauncher.on('search-started', ({ arch, durationMs }) => {
+    log.info(`[TextractorLauncher] Search started: arch=${arch || 'unknown'} durationMs=${durationMs}`);
+    windowManager.sendToMainWindow('textractor-cli-search-started', { arch, durationMs });
+  });
+
   // v3.13.32: a fallback just discovered which architecture actually
   // works for this Textractor install — see TextractorLauncher's
   // _markArchSuccess doc for why nothing persisted this before. Only

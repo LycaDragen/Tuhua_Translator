@@ -130,6 +130,9 @@
             if (settings.textractorPort) document.getElementById('textractor-port').value = settings.textractorPort;
             if (settings.textractorCliPath) document.getElementById('textractor-cli-path').value = settings.textractorCliPath;
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
+            // v3.13.37: persisted so auto-launch has a PID to work with
+            // right after Tuhua restarts, without the user re-typing it.
+            if (settings.gamePid) document.getElementById('game-pid').value = settings.gamePid;
             if (settings.debounceMs) { document.getElementById('debounce-range').value = settings.debounceMs; document.getElementById('debounce-val').innerText = settings.debounceMs + 'ms'; }
             if (settings.systemPrompt) document.getElementById('system-prompt').value = settings.systemPrompt;
             if (settings.maxContextHistory !== undefined) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
@@ -181,12 +184,23 @@
 
             // Listen for events
             api.onTextractorStatus((status) => updateConnectionStatus(status));
-            api.onTranslationResult((data) => updateLiveTranslation(data));
+            api.onTranslationResult((data) => {
+                // v3.13.37: the first real translation result IS the "found
+                // dialogue" signal the search countdown is waiting for —
+                // gated to textractor so switching to clipboard/OCR/xuat
+                // mid-search doesn't stop a countdown that isn't showing.
+                if (currentInputMethod === 'textractor') stopSearchCountdown();
+                updateLiveTranslation(data);
+            });
             api.onTranslationError((data) => updateLiveError(data));
             api.onShortcutPressed((data) => handleShortcut(data));
             api.onTextractorCliStatusChanged((status) => updateCliStatus(status));
             api.onTextractorCliOutput((text) => appendCliOutput(text));
             api.onTextractorCliError((errorData) => showCliError(errorData));
+            // v3.13.37: backend told us a hook-discovery window just
+            // started (fresh launch or an internal arch-fallback retry) —
+            // show a live countdown instead of a dead "Launch" button.
+            api.onTextractorCliSearchStarted(({ arch, durationMs }) => startSearchCountdown(arch, durationMs));
             // v3.13.23: x64<->x86 auto-fallback — same "toast + status text"
             // pattern already used for onOcrEngineFallback below.
             api.onTextractorCliArchFallback(({ from, to, reason }) => {
@@ -219,10 +233,11 @@
             // v3.13.32: a fallback proved which architecture actually works
             // for this install — see TextractorLauncher's _markArchSuccess
             // doc. Must update the PATH INPUT itself, not just settings:
-            // launchTextractorCli() reads `#textractor-cli-path`'s current
-            // DOM value directly, not the persisted setting, so without
-            // this the next manual Launch click would still send the old
-            // (proven-broken) path and the whole discovery would be lost.
+            // maybeAutoLaunchTextractor()/doLaunchTextractor() read
+            // `#textractor-cli-path`'s current DOM value directly, not the
+            // persisted setting, so without this the next auto-launch
+            // would still send the old (proven-broken) path and the whole
+            // discovery would be lost.
             api.onTextractorCliArchResolved(({ cliPath }) => {
                 const input = document.getElementById('textractor-cli-path');
                 if (input) input.value = cliPath;
@@ -1724,6 +1739,7 @@
                 textractorPort: parseInt(document.getElementById('textractor-port').value),
                 textractorCliPath: document.getElementById('textractor-cli-path').value.trim(),
                 manualTextractorMode: document.getElementById('manual-textractor-mode').checked,
+                gamePid: parseInt(document.getElementById('game-pid').value) || 0,
                 inputMethod: currentInputMethod,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
                 systemPrompt: document.getElementById('system-prompt').value,
@@ -1783,6 +1799,12 @@
 
             // 7. Mark as saved (remove visual indicator)
             markSaved();
+
+            // v3.13.37: Save is a "real trigger" for Textractor auto-launch —
+            // covers both a fresh path/PID entry and retrying after a Kill
+            // (see maybeAutoLaunchTextractor's doc for why Kill itself
+            // doesn't auto-retry).
+            maybeAutoLaunchTextractor();
 
             // Update cached settings
             window._lastSettings = await api.getSettings();
@@ -1852,6 +1874,14 @@
                     stopOcrSession();
                 }
             }
+
+            // v3.13.37: resuming (play) is a "real trigger" for Textractor
+            // auto-launch, same as Save — see maybeAutoLaunchTextractor's
+            // doc. Pausing deliberately does NOT kill the CLI: Kill remains
+            // the only manual stop control.
+            if (currentInputMethod === 'textractor' && translationActive) {
+                maybeAutoLaunchTextractor();
+            }
         }
 
         function updateToggleUI() {
@@ -1898,6 +1928,44 @@
         // instead of it unconditionally hiding the bar/error panel later.
         let cliStatusHideTimer = null;
 
+        // v3.13.37: live countdown for the up-to-ARCH_FALLBACK_CHECK_MAX_MS
+        // (60s) hook-discovery window, driven by the backend's
+        // 'search-started' event. Purely a local 1s ticker — the backend
+        // already told us the total duration, no need to poll it further.
+        let _searchCountdownInterval = null;
+        let _searchCountdownDeadline = 0;
+        let _searchCountdownArch = null;
+
+        function startSearchCountdown(arch, durationMs) {
+            stopSearchCountdown();
+            _searchCountdownArch = arch;
+            _searchCountdownDeadline = Date.now() + durationMs;
+            const el = document.getElementById('cli-search-status');
+            if (!el) return;
+            el.classList.remove('hidden');
+            updateSearchCountdownUI();
+            _searchCountdownInterval = setInterval(updateSearchCountdownUI, 1000);
+        }
+
+        function updateSearchCountdownUI() {
+            const el = document.getElementById('cli-search-status');
+            if (!el) return;
+            const secondsLeft = Math.max(0, Math.round((_searchCountdownDeadline - Date.now()) / 1000));
+            const t = translations[currentLang] || translations['en'];
+            const template = t.cli_search_status || 'Searching {arch} — {seconds}s left';
+            el.textContent = template.replace('{arch}', _searchCountdownArch || '?').replace('{seconds}', secondsLeft);
+            if (secondsLeft <= 0) stopSearchCountdown();
+        }
+
+        function stopSearchCountdown() {
+            if (_searchCountdownInterval) {
+                clearInterval(_searchCountdownInterval);
+                _searchCountdownInterval = null;
+            }
+            const el = document.getElementById('cli-search-status');
+            if (el) el.classList.add('hidden');
+        }
+
         async function browseTextractorCli() {
             const result = await api.textractorBrowseCli();
             if (result.canceled) return;
@@ -1931,36 +1999,21 @@
             api.saveSettings({ textractorCliPath: result.path });
         }
 
-        async function launchTextractorCli() {
-            const cliPath = document.getElementById('textractor-cli-path').value.trim();
-            const gamePid = parseInt(document.getElementById('game-pid').value);
-
-            if (!cliPath) {
-                await browseTextractorCli();
-                return;
-            }
-
-            if (!gamePid || gamePid <= 0) {
-                const status = document.getElementById('cli-status-bar');
-                const text = document.getElementById('cli-status-text');
-                const t = translations[currentLang] || translations['en'];
-                status.classList.remove('hidden');
-                text.innerHTML = '<span class="text-red-500">⚠ ' + (t.cli_pid_required || 'PID required') + '</span>';
-                setTimeout(() => status.classList.add('hidden'), 3000);
-                return;
-            }
-
-            // v3.13.32: a fresh, user-initiated Launch starts clean —
-            // don't carry over an amber arch-fallback notice or a latched
-            // terminal-error flag from whatever the previous session ended
-            // with (see updateCliStatus's 'launched'/'error'/'exited'
-            // cases for what these guard).
+        // v3.13.37: extracted from the old manual launchTextractorCli() so
+        // both the auto-launch path (maybeAutoLaunchTextractor, below) and
+        // any future manual trigger share one implementation. cliPath/
+        // gamePid are passed in rather than re-read from the DOM so a
+        // caller can validate them first (see maybeAutoLaunchTextractor).
+        async function doLaunchTextractor(cliPath, gamePid) {
+            // v3.13.32: a fresh launch starts clean — don't carry over an
+            // amber arch-fallback notice or a latched terminal-error flag
+            // from whatever the previous session ended with (see
+            // updateCliStatus's 'launched'/'error'/'exited' cases for what
+            // these guard).
             cliArchFallbackNotice = '';
             cliHasTerminalError = false;
             if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
 
-            // Disable launch button, show kill button
-            document.getElementById('btn-launch-cli').classList.add('hidden');
             document.getElementById('btn-kill-cli').classList.remove('hidden');
 
             // Pass the port from the UI to the backend (fix: port wasn't being used on launch)
@@ -1985,16 +2038,35 @@
             } else {
                 const t = translations[currentLang] || translations['en'];
                 text.innerHTML = '<span class="text-red-500">✗ Error: ' + (result.error || t.cli_unknown_error || 'Unknown') + '</span>';
-                document.getElementById('btn-launch-cli').classList.remove('hidden');
                 document.getElementById('btn-kill-cli').classList.add('hidden');
                 setTimeout(() => status.classList.add('hidden'), 5000);
             }
         }
 
+        // v3.13.37: replaces the manual "Lanzar" button — Textractor now
+        // launches itself whenever there's something real to react to
+        // (Save, resuming from pause, leaving manual mode), as long as
+        // Tuhua isn't already running it. Silent no-ops (missing path/PID,
+        // manual mode, paused, already running) are intentional: this is
+        // called opportunistically from several places, not from a single
+        // explicit user action, so it shouldn't surface an error for
+        // "nothing to do yet". Kill remains the only manual stop control,
+        // and — deliberately — killing does NOT block a future auto-launch
+        // here; it just means none of these triggers have fired again yet.
+        async function maybeAutoLaunchTextractor() {
+            if (currentInputMethod !== 'textractor') return;
+            if (document.getElementById('manual-textractor-mode').checked) return;
+            if (!translationActive) return;
+            if (cliRunning) return;
+            const cliPath = document.getElementById('textractor-cli-path').value.trim();
+            const gamePid = parseInt(document.getElementById('game-pid').value);
+            if (!cliPath || !gamePid || gamePid <= 0) return;
+            await doLaunchTextractor(cliPath, gamePid);
+        }
+
         async function killTextractorCli() {
             await api.textractorKill();
             cliRunning = false;
-            document.getElementById('btn-launch-cli').classList.remove('hidden');
             document.getElementById('btn-kill-cli').classList.add('hidden');
 
             const status = document.getElementById('cli-status-bar');
@@ -2025,7 +2097,6 @@
                     if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span>';
                     errorDetail.classList.add('hidden');
-                    document.getElementById('btn-launch-cli').classList.add('hidden');
                     document.getElementById('btn-kill-cli').classList.remove('hidden');
                     break;
                 case 'relaunching':
@@ -2046,14 +2117,13 @@
                     if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + (cliArchFallbackNotice || t.cli_relaunching_status || 'Switching architecture...') + '</span>';
                     errorDetail.classList.add('hidden');
-                    document.getElementById('btn-launch-cli').classList.add('hidden');
                     document.getElementById('btn-kill-cli').classList.remove('hidden');
                     break;
                 case 'exited':
                 case 'killed':
                     cliRunning = false;
+                    stopSearchCountdown();
                     text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
-                    document.getElementById('btn-launch-cli').classList.remove('hidden');
                     document.getElementById('btn-kill-cli').classList.add('hidden');
                     // v3.13.32: cancelable now, and gated on !cliHasTerminalError
                     // — this timer used to unconditionally hide
@@ -2077,9 +2147,9 @@
                 case 'error':
                     cliRunning = false;
                     cliHasTerminalError = true;
+                    stopSearchCountdown();
                     if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: ' + (t.cli_error_status || 'Error') + '</span>';
-                    document.getElementById('btn-launch-cli').classList.remove('hidden');
                     document.getElementById('btn-kill-cli').classList.add('hidden');
                     break;
                 case 'extracting':
@@ -2237,7 +2307,6 @@
         function toggleManualMode(enabled) {
             const cliPathInput = document.getElementById('textractor-cli-path');
             const gamePidInput = document.getElementById('game-pid');
-            const launchBtn = document.getElementById('btn-launch-cli');
             const killBtn = document.getElementById('btn-kill-cli');
 
             if (enabled) {
@@ -2246,8 +2315,6 @@
                 cliPathInput.classList.add('opacity-50');
                 gamePidInput.disabled = true;
                 gamePidInput.classList.add('opacity-50');
-                launchBtn.disabled = true;
-                launchBtn.classList.add('opacity-50');
                 killBtn.disabled = true;
                 killBtn.classList.add('opacity-50');
                 // Connect directly to TCP
@@ -2257,11 +2324,12 @@
                 cliPathInput.classList.remove('opacity-50');
                 gamePidInput.disabled = false;
                 gamePidInput.classList.remove('opacity-50');
-                launchBtn.disabled = false;
-                launchBtn.classList.remove('opacity-50');
                 killBtn.disabled = false;
                 killBtn.classList.remove('opacity-50');
                 api.saveSettings({ manualTextractorMode: false });
+                // v3.13.37: leaving manual mode is a "real trigger" for
+                // auto-launch — see maybeAutoLaunchTextractor's doc.
+                maybeAutoLaunchTextractor();
             }
         }
 

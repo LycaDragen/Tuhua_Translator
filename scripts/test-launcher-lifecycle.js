@@ -1365,6 +1365,116 @@ function testUtf16GarbageDetection() {
   return results;
 }
 
+function testStalenessPenalty() {
+  const launcher = new TextractorLauncher();
+  const results = [];
+
+  const baseHook = (overrides) => ({
+    name: 'x.exe', isSystemHook: false, lastText: 'abc', textCount: 1,
+    totalTextLength: 10, qualityPenalty: 0, cjkChars: 0, scoredChars: 0, hasCJK: false,
+    ...overrides
+  });
+
+  // Below NOVELTY_MIN_EMITS: no penalty applied, regardless of how stale
+  // the ratio would otherwise look — protects freshly-discovered hooks
+  // from being scored down before there's enough signal.
+  {
+    const noPenaltyScore = launcher._scoreHook(baseHook({ emitCount: 0 }));
+    const belowFloorScore = launcher._scoreHook(baseHook({ emitCount: 3 }));
+    results.push({ id: 'staleness-below-evidence-floor-unpenalized', pass: belowFloorScore === noPenaltyScore, noPenaltyScore, belowFloorScore });
+  }
+
+  // At/above the floor with a low novelty ratio (repeats far more than
+  // it says anything new): penalized.
+  {
+    const staleScore = launcher._scoreHook(baseHook({ emitCount: 10 })); // ratio 1/10 = 0.1
+    const freshScore = launcher._scoreHook(baseHook({ emitCount: 0 }));
+    results.push({ id: 'staleness-penalizes-low-novelty-ratio', pass: freshScore - staleScore > 0 && freshScore - staleScore <= 700, diff: freshScore - staleScore });
+  }
+
+  // Penalty is capped at NOVELTY_STALENESS_PENALTY_MAX even for extreme
+  // repetition — a menu hammering the same frame 50 times shouldn't
+  // score more negatively than a hook that's merely "quite stale", and
+  // neither should ever exceed the cap.
+  {
+    const extreme = launcher._scoreHook(baseHook({ emitCount: 50 })); // ratio 1/50 = 0.02
+    const moderate = launcher._scoreHook(baseHook({ emitCount: 10 })); // ratio 1/10 = 0.1
+    const freshScore = launcher._scoreHook(baseHook({ emitCount: 0 }));
+    results.push({
+      id: 'staleness-penalty-capped',
+      pass: (freshScore - extreme) <= 700 && extreme <= moderate,
+      extremePenalty: freshScore - extreme, moderatePenalty: freshScore - moderate
+    });
+  }
+
+  // A hook with a couple of fresh emissions of genuinely new content
+  // (novelty ratio 1.0) must not be penalized at all — dialogue that's
+  // just getting started shouldn't lose to an established, stale menu
+  // on a technicality.
+  {
+    const newDialogue = launcher._scoreHook(baseHook({ emitCount: 2, textCount: 2 }));
+    const noPenaltyBaseline = launcher._scoreHook(baseHook({ emitCount: 0, textCount: 2 }));
+    results.push({ id: 'staleness-fresh-full-novelty-unpenalized', pass: newDialogue === noPenaltyBaseline, newDialogue, noPenaltyBaseline });
+  }
+
+  // Real dialogue that occasionally repeats a short line ("...") a
+  // couple of times out of many emissions keeps a high enough novelty
+  // ratio to clear NOVELTY_RATIO_FLOOR — must not be penalized.
+  {
+    const mostlyNovel = launcher._scoreHook(baseHook({ emitCount: 10, textCount: 6 })); // ratio 0.6 > floor 0.5
+    const noPenaltyBaseline = launcher._scoreHook(baseHook({ emitCount: 0, textCount: 6 }));
+    results.push({ id: 'staleness-mostly-novel-dialogue-unpenalized', pass: mostlyNovel === noPenaltyBaseline, mostlyNovel, noPenaltyBaseline });
+  }
+
+  // Back-compat: hook objects without an emitCount field at all (older
+  // fixtures, or any hook object built before v3.13.37) must not throw
+  // and must not be penalized — `hook.emitCount || 0` treats missing as
+  // 0, below the evidence floor.
+  {
+    const legacyHook = { name: 'x.exe', isSystemHook: false, lastText: 'abc', textCount: 1, totalTextLength: 10, qualityPenalty: 0, hasCJK: false };
+    const score = launcher._scoreHook(legacyHook);
+    const noPenaltyBaseline = launcher._scoreHook(baseHook({ emitCount: 0 }));
+    results.push({ id: 'staleness-missing-emitcount-backcompat', pass: score === noPenaltyBaseline, score, noPenaltyBaseline });
+  }
+
+  // Integration, reproducing the real session's pattern end-to-end via
+  // _processHookLine: a menu hook re-rendering the SAME text on every
+  // frame must lose to a dialogue hook that only emitted once with NEW
+  // content, by more than HOOK_SWITCH_THRESHOLD (200) — before this fix
+  // both hooks capped textCount at 1 (v3.13.36 dedup) and scored within
+  // a few points of each other regardless of emitCount.
+  {
+    const l = new TextractorLauncher();
+    const menuHook = {
+      key: 'menu', name: 'game.exe', isSystemHook: false, hookCode: 'HQ8@0:gdi32.dll:GetTextExtentPoint32W',
+      lastText: '', textCount: 0, emitCount: 0, cjkChars: 0, scoredChars: 0, hasCJK: false,
+      looksUtf16Garbled: false, totalTextLength: 0, qualityPenalty: 0, discoveredAt: Date.now(),
+      lastTextAt: 0, _recentHashes: new Set(), _recentHashOrder: []
+    };
+    withSilencedConsole(() => {
+      const menuText = 'ファイル 画面 言語設定';
+      for (let i = 0; i < 5; i++) {
+        const parsed = { hookKey: 'menu', hookName: menuHook.name, displayName: menuHook.name, text: menuText, fullName: '', hookCode: menuHook.hookCode, funcAddr: '', processName: menuHook.name, hookIndex: 1, isSystemHook: false };
+        l._hooks.set('menu', menuHook);
+        l._processHookLine(parsed);
+      }
+      const dialogueParsed = { hookKey: 'dialogue', hookName: 'dialogue.exe', displayName: 'dialogue.exe', text: '猫耳が人間社会に溶け込んでいる', fullName: '', hookCode: 'HW-8*14:-8*0@F80E0', funcAddr: '', processName: 'dialogue.exe', hookIndex: 2, isSystemHook: false };
+      l._processHookLine(dialogueParsed);
+    });
+    const menu = l._hooks.get('menu');
+    const dialogue = l._hooks.get('dialogue');
+    const menuScore = l._scoreHook(menu);
+    const dialogueScore = l._scoreHook(dialogue);
+    results.push({
+      id: 'staleness-integration-menu-loses-to-new-dialogue',
+      pass: (dialogueScore - menuScore) > 200,
+      menuScore, dialogueScore, menuEmitCount: menu.emitCount, menuTextCount: menu.textCount
+    });
+  }
+
+  return results;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
 
 function run() {
@@ -1396,6 +1506,7 @@ function run() {
   if (!args.only || 'hookcode-type'.includes(args.only)) all.push(...testHookCodeType());
   if (!args.only || 'single-byte'.includes(args.only)) all.push(...testAllRealHooksAreSingleByteType());
   if (!args.only || 'garbage'.includes(args.only) || 'utf16'.includes(args.only)) all.push(...testUtf16GarbageDetection());
+  if (!args.only || 'staleness'.includes(args.only) || 'novelty'.includes(args.only)) all.push(...testStalenessPenalty());
 
   console.log(`${C.bold}TextractorLauncher lifecycle bench${C.reset} — ${all.length} case(s)\n`);
   let passed = 0;

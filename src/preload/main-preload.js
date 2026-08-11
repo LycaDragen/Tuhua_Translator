@@ -84,6 +84,9 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   // in this Set, so the renderer's listener could never actually fire.
   'textractor-cli-pid-warning',
   'textractor-cli-arch-resolved',
+  // v3.13.37: same lesson as the pid-warning comment above — allowlist
+  // AND wrapper both required, not just one.
+  'textractor-cli-search-started',
   'hooks-discovered',
   'translation-result',
   'translation-error',
@@ -284,6 +287,7 @@ const api = {
   onTextractorCliArchFallback: (callback) => secureOn('textractor-cli-arch-fallback', callback),
   onTextractorCliPidWarning: (callback) => secureOn('textractor-cli-pid-warning', callback),
   onTextractorCliArchResolved: (callback) => secureOn('textractor-cli-arch-resolved', callback),
+  onTextractorCliSearchStarted: (callback) => secureOn('textractor-cli-search-started', callback),
   onHooksDiscovered: (callback) => secureOn('hooks-discovered', callback),
   onTranslationResult: (callback) => secureOn('translation-result', callback),
   onTranslationError: (callback) => secureOn('translation-error', callback),

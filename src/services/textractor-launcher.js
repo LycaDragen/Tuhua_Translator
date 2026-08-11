@@ -183,6 +183,21 @@ const UTF16_GARBAGE_MIN_LEN = 8;
 const CJK_RATIO_STRONG = 0.30;
 const CJK_RATIO_UI = 0.05;
 
+// v3.13.37: staleness penalty — a hook that keeps re-emitting the SAME
+// content (a game menu re-rendering on every frame) was scoring almost
+// identically to a hook producing one line of real, new dialogue, because
+// v3.13.36's dedup already caps textCount at 1 for both ("says the same
+// thing" vs "says something new" look alike once textCount stops growing).
+// emitCount (raw emissions, tracked since v3.13.36 but unused in scoring
+// until now) is the missing signal: textCount/emitCount is the ratio of
+// NEW content to total emissions — low for a repeating menu, high for
+// dialogue. NOVELTY_MIN_EMITS is an evidence floor so a freshly-discovered
+// hook, or real dialogue that happens to repeat a short line ("...") a
+// couple of times, isn't penalized before there's enough signal.
+const NOVELTY_MIN_EMITS = 4;
+const NOVELTY_RATIO_FLOOR = 0.5;
+const NOVELTY_STALENESS_PENALTY_MAX = 700;
+
 // v3.13.36: recent-content memory per hook for dedup in
 // _isNewHookContent — bounded so a long session can't leak memory one
 // hash at a time.
@@ -568,6 +583,19 @@ class TextractorLauncher extends EventEmitter {
    */
   _archAttemptKey(resolvedPath, gamePid) {
     return `${gamePid}::${this._archInstallKey(resolvedPath)}`;
+  }
+
+  /**
+   * v3.13.37: best-effort x64/x86 label for the 'search-started' event's
+   * UI countdown — same marker detection _archInstallKey normalizes away,
+   * kept as a separate method because that one deliberately erases which
+   * side it was (for the memoization key), and this needs the opposite.
+   */
+  _detectArch(resolvedPath) {
+    const base = String(resolvedPath || '');
+    if (base.includes(path.sep + 'x64' + path.sep) || base.includes(path.sep + 'X64' + path.sep)) return 'x64';
+    if (base.includes(path.sep + 'x86' + path.sep) || base.includes(path.sep + 'X86' + path.sep)) return 'x86';
+    return null;
   }
 
   /**
@@ -1713,6 +1741,16 @@ class TextractorLauncher extends EventEmitter {
     // Penalize hooks that produce doubled chars, encoded text, menu text, etc.
     score -= hook.qualityPenalty;
 
+    // v3.13.37: STALENESS PENALTY — see NOVELTY_* constants' doc above.
+    const emitCount = hook.emitCount || 0;
+    if (emitCount >= NOVELTY_MIN_EMITS) {
+      const noveltyRatio = hook.textCount / emitCount;
+      if (noveltyRatio < NOVELTY_RATIO_FLOOR) {
+        const staleness = 1 - (noveltyRatio / NOVELTY_RATIO_FLOOR);
+        score -= Math.round(NOVELTY_STALENESS_PENALTY_MAX * staleness);
+      }
+    }
+
     return score;
   }
 
@@ -2576,6 +2614,19 @@ class TextractorLauncher extends EventEmitter {
     if (pidRunning === false) {
       console.warn(`[TextractorLauncher] WARNING: PID ${gamePid} does not appear to be a running process — attach will fail exactly as silently as an architecture mismatch. Verify the PID in Task Manager before assuming this is x64/x86.`);
       this.emit('pid-warning', { pid: gamePid, message: `PID ${gamePid} does not appear to be running.` });
+    }
+
+    // v3.13.37: tell the UI a discovery window is starting, so it can
+    // show a live countdown instead of a dead "Launch" button during the
+    // up-to-ARCH_FALLBACK_CHECK_MAX_MS wait for a real hook. Gated on
+    // pidRunning !== false: a dead PID (stale after a game/PC restart)
+    // should show the pid-warning above instead of racing it with a
+    // countdown that's doomed to fail. launch() is the SAME function used
+    // both for a fresh launch and for _attemptArchFallback's internal
+    // retry, so this one emit site covers both — the retry's own
+    // resolvedPath naturally yields the other arch's label.
+    if (pidRunning !== false) {
+      this.emit('search-started', { arch: this._detectArch(resolvedPath), durationMs: ARCH_FALLBACK_CHECK_MAX_MS });
     }
 
     try {
