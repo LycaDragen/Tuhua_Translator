@@ -104,7 +104,16 @@ function makeFakeProcess() {
   const proc = new EventEmitter();
   proc.stdout = new EventEmitter();
   proc.stderr = new EventEmitter();
-  proc.stdin = { write: () => {}, destroyed: false };
+  // v3.13.35: `writes` captures every chunk handed to stdin.write(), in
+  // order — the old stub (`write: () => {}`) accepted anything silently,
+  // which is exactly how the encoding bug this bench now guards against
+  // (plain-string writes that TextractorCLI's UTF-16-mode stdin parser
+  // can never match a line ending in) went undetected for several real
+  // investigation sessions. Tests read proc.stdin.writes directly rather
+  // than adding a separate spy, so there's one source of truth for "what
+  // actually left the process" matching how _writeStdinCommand's own hex
+  // dump describes itself.
+  proc.stdin = { writes: [], write(chunk) { this.writes.push(chunk); }, destroyed: false };
   proc.pid = 12345;
   proc.kill = () => {};
   return proc;
@@ -674,6 +683,67 @@ function testAttachResentWhenSilent() {
   return { id: 'attach-resent-when-silent', pass, attachSendCount: stats.attachSendCount };
 }
 
+// ─── Tests: stdin UTF-16LE encoding (v3.13.35) ──────────────────────────
+// TextractorCLI's own stdin is UTF-16 text mode (host/CLI/main.cpp:
+// _setmode(_fileno(stdin), _O_U16TEXT) + fgetws + swscanf). A plain-string
+// write is single-byte-per-char and never contains the wide newline
+// fgetws is scanning for, so the command is silently never parsed — not
+// an error, not a rejection, just a process that looks alive and mute
+// forever. None of the OTHER benches (attachSendCount, hookInsertCount)
+// would ever catch a regression back to plain-string writes, since they
+// only count that a write was ATTEMPTED, never what bytes it contained —
+// exactly the gap that let this bug hide across several real Windows
+// investigation sessions. These tests read proc.stdin.writes directly.
+
+function testStdinIsUtf16le() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: FAKE_EXE_PATH }));
+  const proc = lastFakeProcess;
+  clock.restore();
+
+  const first = proc.stdin.writes[0];
+  const isBuffer = Buffer.isBuffer(first);
+  const decoded = isBuffer ? first.toString('utf16le') : null;
+  // The defining check: a UTF-16LE-encoded ASCII command has a 0x00 byte
+  // after every character. A plain-string write (the bug) would not.
+  const hasNullPadding = isBuffer && first.length >= 2 && first[1] === 0x00;
+
+  const pass = ok && isBuffer && hasNullPadding && decoded === 'attach -P12345\n';
+  return { id: 'stdin-is-utf16le', pass, isBuffer, hasNullPadding, decoded };
+}
+
+function testStdinDetachIsUtf16le() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: FAKE_EXE_PATH }));
+  const proc = lastFakeProcess;
+  proc.stdin.writes.length = 0; // isolate the detach write from the launch-time attaches
+  withSilencedConsole(() => launcher.kill());
+  clock.restore();
+
+  const detachWrite = proc.stdin.writes.find(w => Buffer.isBuffer(w) && w.toString('utf16le').startsWith('detach'));
+  const pass = !!detachWrite && detachWrite.toString('utf16le') === 'detach -P12345\n';
+  return { id: 'stdin-detach-is-utf16le', pass, writes: proc.stdin.writes.map(w => Buffer.isBuffer(w) ? w.toString('utf16le').trim() : w) };
+}
+
+function testStdinRejectsHookCodeWithSpace() {
+  const clock = installFakeClock();
+  const launcher = new TextractorLauncher();
+  withSilencedConsole(() => launcher.launch(12345, { cliPath: FAKE_EXE_PATH }));
+  const proc = lastFakeProcess;
+  const writesBefore = proc.stdin.writes.length;
+
+  // A space here would truncate TextractorCLI's own `%500s` match — see
+  // STDIN_COMMAND_RE's doc. insertHookCode() must reject this BEFORE it
+  // ever reaches stdin, not rely on TextractorCLI to survive it.
+  const result = withSilencedConsole(() => launcher.insertHookCode('bad code with spaces'));
+  clock.restore();
+
+  const pass = result.success === false && proc.stdin.writes.length === writesBefore;
+  return { id: 'stdin-rejects-hook-code-with-space', pass, result, writesAdded: proc.stdin.writes.length - writesBefore };
+}
+
 function testKnownGoodHooksOnlyOnGeneric() {
   // Generic case (mirrors diagnostic scenario B): the known-good hook
   // codes SHOULD fire exactly once, on the first 'no-clean-hook' tick.
@@ -972,6 +1042,9 @@ function run() {
   if (!args.only || 'arch-memory-scoped-by-pid'.includes(args.only)) all.push(testArchMemoryScopedByPid());
   if (!args.only || 'attach-sent-once-when-acked'.includes(args.only)) all.push(testAttachSentOnceWhenAcked());
   if (!args.only || 'attach-resent-when-silent'.includes(args.only)) all.push(testAttachResentWhenSilent());
+  if (!args.only || 'stdin-is-utf16le'.includes(args.only)) all.push(testStdinIsUtf16le());
+  if (!args.only || 'stdin-detach-is-utf16le'.includes(args.only)) all.push(testStdinDetachIsUtf16le());
+  if (!args.only || 'stdin-rejects-hook-code-with-space'.includes(args.only)) all.push(testStdinRejectsHookCodeWithSpace());
   if (!args.only || 'known-good-hooks-only-on-generic'.includes(args.only)) all.push(testKnownGoodHooksOnlyOnGeneric());
   if (!args.only || 'arch-preference-reused'.includes(args.only)) all.push(testArchPreferenceReused());
   if (!args.only || 'arch-preference-not-crossing-installs'.includes(args.only)) all.push(testArchPreferenceNotCrossingInstalls());

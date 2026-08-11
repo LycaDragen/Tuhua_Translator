@@ -103,6 +103,17 @@ const KNOWN_GOOD_HOOK_CODES = [
   'HQ8@0:gdi32.dll:GetTextExtentPoint32W'
 ];
 
+// v3.13.35: what a well-formed stdin command to TextractorCLI looks like —
+// see _writeStdinCommand's doc for the full story. TextractorCLI's own
+// parser is `swscanf(input, L"%500s -P%d", command, &processId)`: %s stops
+// at the first whitespace, so a command token containing a space silently
+// truncates the match; if the match fails at all, TextractorCLI calls
+// ExitProcess(0) — not an error, a clean-looking exit that's easy to
+// mistake for "the game closed" or "nothing went wrong." This regex is the
+// last line of defense against ever sending something that would trigger
+// that, regardless of which caller composed the string.
+const STDIN_COMMAND_RE = /^\S+ -P\d+\n$/;
+
 // v3.13.27: how often (and for how long) the arch-fallback diagnostic
 // re-checks hook state after the first look at 10s — see the comment on the
 // diagnostic scheduling in launch() for why a single one-shot check isn't
@@ -179,21 +190,16 @@ class TextractorLauncher extends EventEmitter {
     // the game's threads — the user-visible freeze a real bug report was
     // about — so this is a real behavior change, not just a log toggle).
     this._forceDoubleAttach = process.env.TUHUA_FORCE_DOUBLE_ATTACH === '1';
-    // v3.13.33: diagnostic-only escape hatch, set TUHUA_SHOW_CLI_WINDOW=1
-    // to test whether spawning TextractorCLI with windowsHide:true (below)
-    // affects its ability to establish whatever session-level hook
-    // infrastructure Textractor's engine auto-detection (vnreng) needs —
-    // suspected because a real Windows investigation found that hook
-    // detection reliably succeeds via the GUI (a normal, visible window)
-    // but never via Tuhua's automated attach, survives across Tuhua/game
-    // restarts within the same Windows logon session, and is lost only on
-    // a full reboot — a pattern consistent with a per-session OS
-    // construct (e.g. a global hook table tied to the interactive Window
-    // Station) rather than anything Tuhua's own code persists. Ruled out
-    // separately: the Textractor install folder, the specific hook code,
-    // and x64 vs x86 (all reproduced/refuted with real Windows sessions —
-    // see plan-textractor-ux memory for the full elimination). Default
-    // (unset) keeps today's behavior — this is not meant to ship enabled.
+    // v3.13.33: diagnostic-only escape hatch, set TUHUA_SHOW_CLI_WINDOW=1 to
+    // spawn TextractorCLI with a visible console instead of windowsHide.
+    // Was tested as a candidate cause for "hooks never engage automated"
+    // (a real Windows session confirmed with a visible window that
+    // windowsHide was NOT the cause) before the real root cause was found
+    // and fixed in v3.13.35 (_writeStdinCommand: stdin needs UTF-16LE, not
+    // the plain-string writes used everywhere before that). Left in as a
+    // general-purpose diagnostic — seeing TextractorCLI's own console
+    // output live is occasionally useful — not because windowsHide is
+    // still a live suspect. Default (unset) keeps today's behavior.
     this._showCliWindow = process.env.TUHUA_SHOW_CLI_WINDOW === '1';
     // v3.13.32: reset per-launch — see the diagnostic's 'no-clean-hook'
     // branch, the new call site for _sendKnownGoodHooks.
@@ -2725,15 +2731,73 @@ class TextractorLauncher extends EventEmitter {
       return { success: false, error: 'No game PID attached' };
     }
     const cleanCode = hookCode.trim();
+    // v3.13.35: reject up front, with a message the user (this comes from
+    // IPC / the UI's manual hook-insert field, unlike attach/detach which
+    // Tuhua composes itself) can actually act on. See STDIN_COMMAND_RE's
+    // doc: a space here truncates TextractorCLI's own `%500s` match, which
+    // makes the whole parse fail and kills the process outright.
+    if (/\s/.test(cleanCode)) {
+      return { success: false, error: 'Hook code cannot contain spaces — TextractorCLI would fail to parse it and exit.' };
+    }
     const cmd = `${cleanCode} -P${this._gamePid}\n`;
-    console.log(`[TextractorLauncher] Sending stdin (manual hook insert): "${cmd.trim()}"`);
+    if (!this._writeStdinCommand(cmd, 'manual hook insert')) {
+      return { success: false, error: 'stdin write failed — see log for details' };
+    }
+    this._hookInsertCount++;
+    return { success: true };
+  }
+
+  /**
+   * v3.13.35: single choke point for every stdin write to TextractorCLI.
+   *
+   * ROOT CAUSE (confirmed against Textractor's own source,
+   * host/CLI/main.cpp, github.com/Artikash/Textractor): TextractorCLI puts
+   * its stdin in UTF-16 text mode — `_setmode(_fileno(stdin),
+   * _O_U16TEXT)` — and reads commands with `fgetws`, a wide-character line
+   * read, then parses with `swscanf(input, L"%500s -P%d", ...)`. Every
+   * prior version of this file wrote commands as a plain JS string, which
+   * Buffer/stream defaults encode as UTF-8/ASCII (one byte per char).
+   * Those bytes never contain the wide newline TextractorCLI's `fgetws` is
+   * scanning for (0x000A as a 16-bit code unit) — which is the part that
+   * cost several real investigation sessions to pin down: the process
+   * didn't error, didn't exit, didn't log anything. `fgetws` just blocked
+   * forever waiting for a line ending that, in UTF-16, never arrived. That
+   * silence is why TextractorCLI looked "alive but not hooking anything"
+   * for the full 60s diagnostic window in every session tried — across
+   * both architectures, every install location, and with windowsHide on
+   * or off (v3.13.33) — none of those were ever the cause, because none
+   * of them touched this.
+   *
+   * Fix: encode as UTF-16LE. `Buffer.from('...\n', 'utf16le')` ends in the
+   * bytes `0A 00` — exactly the wide char 0x000A `fgetws` is waiting for.
+   * No \r\n needed; MSVC's text-mode translation isn't what was missing.
+   *
+   * Every command now shares this one guard, this one encoding, this one
+   * format check (STDIN_COMMAND_RE — see its doc for what a bad command
+   * costs on the other end), and a hex dump of what actually went out.
+   * That last part is the piece that was missing for so long: nothing
+   * ever showed what bytes left the process, symmetric to
+   * _maybeDumpRawBytes on the read side. Returns true if the write was
+   * attempted, false if the process isn't in a writable state or the
+   * command was rejected before ever reaching stdin.
+   */
+  _writeStdinCommand(cmd, label) {
+    if (!this.process || !this.process.stdin || this.process.stdin.destroyed || !this.isRunning) {
+      console.warn(`[TextractorLauncher] Cannot send stdin (${label}) — process not available`);
+      return false;
+    }
+    if (!STDIN_COMMAND_RE.test(cmd)) {
+      console.error(`[TextractorLauncher] Refusing to send malformed stdin command (${label}): "${cmd.trim()}" — TextractorCLI's parser (swscanf "%500s -P%d") would fail this and call ExitProcess(0), silently killing the process instead of erroring.`);
+      return false;
+    }
+    const buf = Buffer.from(cmd, 'utf16le');
+    console.log(`[TextractorLauncher] Sending stdin (${label}): "${cmd.trim()}"\n` + this._formatHexDump(buf));
     try {
-      this.process.stdin.write(cmd);
-      this._hookInsertCount++;
-      return { success: true };
+      this.process.stdin.write(buf);
+      return true;
     } catch (err) {
-      console.error(`[TextractorLauncher] stdin write failed (manual hook insert):`, err.message);
-      return { success: false, error: err.message };
+      console.error(`[TextractorLauncher] stdin write failed (${label}):`, err.message);
+      return false;
     }
   }
 
@@ -2762,18 +2826,10 @@ class TextractorLauncher extends EventEmitter {
    * Send the attach command via stdin.
    */
   _sendStdinAttach(gamePid, label) {
-    if (this.process && this.process.stdin && !this.process.stdin.destroyed && this.isRunning) {
-      const cmd = `attach -P${gamePid}\n`;
-      console.log(`[TextractorLauncher] Sending stdin (${label}): "${cmd.trim()}"`);
-      try {
-        this.process.stdin.write(cmd);
-        this._stdinSent = true;
-        this._attachSendCount++;
-      } catch (stdinErr) {
-        console.error(`[TextractorLauncher] stdin write failed (${label}):`, stdinErr.message);
-      }
-    } else {
-      console.warn(`[TextractorLauncher] Cannot send stdin (${label}) — process not available`);
+    const cmd = `attach -P${gamePid}\n`;
+    if (this._writeStdinCommand(cmd, label)) {
+      this._stdinSent = true;
+      this._attachSendCount++;
     }
   }
 
@@ -2867,9 +2923,11 @@ class TextractorLauncher extends EventEmitter {
 
     if (this.process && this.isRunning) {
       try {
-        if (this.process.stdin && !this.process.stdin.destroyed) {
-          try { this.process.stdin.write(`detach -P${this._gamePid}\n`); } catch (e) { /* ignore */ }
-        }
+        // v3.13.35: routed through _writeStdinCommand — see its doc.
+        // Best-effort either way (the process is about to be killed
+        // outright below regardless of whether TextractorCLI ever
+        // actually parses this detach).
+        this._writeStdinCommand(`detach -P${this._gamePid}\n`, 'detach on kill');
         if (process.platform === 'win32') {
           spawn('taskkill', ['/pid', String(this.process.pid), '/f'], { windowsHide: true });
         } else {
