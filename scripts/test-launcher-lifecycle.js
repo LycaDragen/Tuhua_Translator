@@ -925,6 +925,42 @@ function testDiagnosticScenarios() {
     });
   }));
 
+  // Scenario E (v3.13.36): hooks discovered from REAL stdout lines with a
+  // HEX PID (59C4) — the exact case the old `(\d+)` capture group in the
+  // pre-canonical parser couldn't match. Before this version those two
+  // lines fell through to the generic bracket fallback (hookCode: ''),
+  // which made `hasRealHookWithText` true but the old
+  // `_allRealHooksAreGenericType()` false (empty string !== 'HB0@0') —
+  // landing in the bare-`return` branch after exactly ONE tick, with
+  // KNOWN_GOOD_HOOK_CODES never sent and the arch-fallback never
+  // attempted. Routing the lines through the REAL `_parseHookLine` +
+  // `_processHookLine` (not hand-built hook objects, unlike A-D above) is
+  // what actually exercises the parser bug this scenario guards against.
+  results.push(runDiagnosticScenario('E-hex-pid-all-single-byte', (launcher) => {
+    const lines = [
+      '[2:59C4:7567B3D0:731BE89A:0::HB0@0:nekopara_vol1_trial.exe] k0n0g0k0n0g0k0n0',
+      '[8:59C4:6380E0:63A140:1A::HB0@0:nekopara_vol1_trial.exe] k0k0n0k0n0g0n0k0'
+    ];
+    for (const line of lines) {
+      const parsed = launcher._parseHookLine(line);
+      if (parsed) launcher._processHookLine(parsed);
+    }
+  }));
+
+  // Scenario F: same shape as E, but the degraded signal comes from
+  // CONTENT (garbage ratio), not TYPE — the one real hook is HW8@0
+  // (unicode type, so _allRealHooksAreSingleByteType() is false on its
+  // own) yet still emits the UTF-16-as-bytes garbage pattern. Proves the
+  // content signal catches what the structural signal alone would miss:
+  // a unicode-typed hook pointed at the wrong parameter (documented
+  // elsewhere in this file, see KNOWN_GOOD_HOOK_CODES, as a real
+  // failure mode, not hypothetical).
+  results.push(runDiagnosticScenario('F-content-degraded-non-byte-type', (launcher) => {
+    const line = '[2:59C4:7567B3D0:731BE89A:0::HW8@0:nekopara_vol1_trial.exe] k0n0g0k0n0g0k0n0';
+    const parsed = launcher._parseHookLine(line);
+    if (parsed) launcher._processHookLine(parsed);
+  }));
+
   const expectations = {
     // v3.13.32: A and D now ALSO end in exactly one terminal error via
     // _concludeArchFallback — both are "the 60s window ended with no real
@@ -942,7 +978,12 @@ function testDiagnosticScenarios() {
     // ordering landed — not a loosened expectation.
     'B-all-generic': { ticks: 11, expectedReasons: Array(10).fill('no-clean-hook'), expectedErrors: 0 },
     'C-real-hook-clean': { ticks: 1, expectedReasons: [], expectedErrors: 0 },
-    'D-only-system-hooks-forever': { ticks: 11, expectedReasons: ['no-real-hook'], expectedErrors: 1 }
+    'D-only-system-hooks-forever': { ticks: 11, expectedReasons: ['no-real-hook'], expectedErrors: 1 },
+    // v3.13.36: same shape as B — this IS the regression test. Before the
+    // parser fix these hex-PID lines produced exactly C's shape (1 tick,
+    // 0 fallback calls) because they silently fell through to FORMAT D.
+    'E-hex-pid-all-single-byte': { ticks: 11, expectedReasons: Array(10).fill('no-clean-hook'), expectedErrors: 0 },
+    'F-content-degraded-non-byte-type': { ticks: 11, expectedReasons: Array(10).fill('no-clean-hook'), expectedErrors: 0 }
   };
 
   const checked = results.map(r => {
@@ -1023,6 +1064,307 @@ function testHysteresisAgeDiscount() {
   return results;
 }
 
+// ─── Test: hook-line parser (v3.13.36) ──────────────────────────────────
+// Pure — no launch()/spawn/clock needed, just _parseHookLine against real
+// line shapes. See HOOK_LINE_RE's doc in textractor-launcher.js for the
+// printf these are transcribed from (Artikash/Textractor, host/CLI/main.cpp).
+
+function testHookLineParsing() {
+  const launcher = new TextractorLauncher();
+  const results = [];
+
+  // The exact line from a real session that exposed the bug: PID 59C4
+  // has a letter in it, which the old `(\d+)` capture group could not
+  // match — no backtrack possible, falls through to the generic bracket
+  // fallback with hookCode: ''.
+  {
+    const p = launcher._parseHookLine('[2:59C4:7567B3D0:731BE89A:0::HB0@0:nekopara_vol1_trial.exe] texto');
+    const pass = !!p && p.hookKey === '2:59C4:7567B3D0:731BE89A'
+      && p.hookCode === 'HB0@0:nekopara_vol1_trial.exe'
+      && p.hookCodeType === 'byte' && p.isSystemHook === false
+      && p.hookIndex === 2 && p.text === 'texto';
+    results.push({ id: 'parse-real-hex-pid', pass, parsed: p });
+  }
+
+  // ctx2 (the 5th field) is hex too — 1A, not a decimal 26.
+  {
+    const p = launcher._parseHookLine('[8:59C4:6380E0:63A140:1A::HB0@0:nekopara_vol1_trial.exe] t');
+    const pass = !!p && p.ctx2Addr === '1A' && p.hookCode === 'HB0@0:nekopara_vol1_trial.exe';
+    results.push({ id: 'parse-hex-ctx2', pass, parsed: p });
+  }
+
+  // System hooks (pid === 0) — name is present, hookCode has no suffix.
+  {
+    const p = launcher._parseHookLine('[0:0:FFFFFFFFFFFFFFFF:FFFFFFFFFFFFFFFF:FFFFFFFFFFFFFFFF:Consola:HB0@0] t');
+    const pass = !!p && p.isSystemHook === true && p.hookName === 'Consola' && p.hookCode === 'HB0@0';
+    results.push({ id: 'parse-system-hook-console', pass, parsed: p });
+  }
+  {
+    const p = launcher._parseHookLine('[1:0:0:FFFFFFFFFFFFFFFF:FFFFFFFFFFFFFFFF:Portapapeles:HB0@0] t');
+    const pass = !!p && p.isSystemHook === true && p.hookName === 'Portapapeles';
+    results.push({ id: 'parse-system-hook-clipboard', pass, parsed: p });
+  }
+
+  // The detection must be structural (pid === 0), not a name allowlist —
+  // a differently-localized Textractor UI shouldn't stop being detected.
+  {
+    const p = launcher._parseHookLine('[1:0:0:FFFFFFFFFFFFFFFF:FFFFFFFFFFFFFFFF:UnknownLocalizedName:HB0@0] t');
+    const pass = !!p && p.isSystemHook === true;
+    results.push({ id: 'parse-system-hook-by-pid-not-name', pass, parsed: p });
+  }
+
+  // hookCode itself contains ':' — the old `[^:]+` group could never
+  // capture this.
+  {
+    const p = launcher._parseHookLine('[6:59C4:7567B3D0:731BE89A:0::HQ8@0:gdi32.dll:GetTextExtentPoint32W:nekopara.exe] t');
+    const pass = !!p && p.hookCode === 'HQ8@0:gdi32.dll:GetTextExtentPoint32W:nekopara.exe' && p.hookCodeType === 'unicode';
+    results.push({ id: 'parse-hookcode-with-colons', pass, parsed: p });
+  }
+
+  // Text itself can contain ']' — hookCode must not cross it.
+  {
+    const p = launcher._parseHookLine('[2:59C4:7567B3D0:731BE89A:0::HB0@0:nekopara.exe] some[thing] weird');
+    const pass = !!p && p.text === 'some[thing] weird';
+    results.push({ id: 'parse-text-with-bracket', pass, parsed: p });
+  }
+
+  // The reported symptom, directly: 13 real hooks with different `addr`
+  // used to collapse into indistinguishable entries once they fell
+  // through to the generic fallback. Distinct addr -> distinct displayName.
+  {
+    const addrs = ['7567B3D0', '7791AF50', '6380E0', '7791B850', '7791B370', '4E80E0', 'AAAAAA', 'BBBBBB', 'CCCCCC', 'DDDDDD', 'EEEEEE', 'FFFFFF', '111111'];
+    const parsed = addrs.map((addr, i) =>
+      launcher._parseHookLine(`[${i.toString(16)}:59C4:${addr}:731BE89A:0::HB0@0:nekopara_vol1_trial.exe] t`));
+    const names = new Set(parsed.map(p => p.displayName));
+    results.push({ id: 'parse-distinct-display-names', pass: parsed.every(Boolean) && names.size === addrs.length, count: names.size });
+  }
+
+  // hookKey stability: same thread (handle:pid:addr:ctx), different text
+  // -> same key, so hook state accumulates on one entry, not a new one
+  // per line.
+  {
+    const p1 = launcher._parseHookLine('[2:59C4:7567B3D0:731BE89A:0::HB0@0:nekopara.exe] first');
+    const p2 = launcher._parseHookLine('[2:59C4:7567B3D0:731BE89A:0::HB0@0:nekopara.exe] second');
+    const pass = !!p1 && !!p2 && p1.hookKey === p2.hookKey && p1.hookKey === '2:59C4:7567B3D0:731BE89A';
+    results.push({ id: 'parse-hookkey-stable', pass, key: p1 && p1.hookKey });
+  }
+
+  // Legacy fallback still works for a shape the canonical regex doesn't match.
+  {
+    const before = launcher._legacyParseCount;
+    const p = launcher._parseHookLine('[0x1234:5:MiHook] t');
+    const pass = !!p && launcher._legacyParseCount === before + 1;
+    results.push({ id: 'parse-legacy-still-works', pass, parsed: p });
+  }
+
+  return results;
+}
+
+// ─── Test: hookCodeType (v3.13.36) ──────────────────────────────────────
+// Pure static method — see its doc in textractor-launcher.js for the
+// letter-to-type mapping, sourced from host/hookcode.cpp (ParseHCode).
+
+function testHookCodeType() {
+  const table = [
+    ['HB0@0', 'byte'],
+    ['HB0@0:nekopara_vol1_trial.exe', 'byte'],
+    ['HA0@0', 'byte'],
+    ['HS0@0', 'byte'],
+    ['HQ8@0:gdi32.dll:GetTextExtentPoint32W', 'unicode'],
+    ['HW8@0', 'unicode'],
+    ['HW-8*14:-8*0@1A2B', 'unicode'],
+    ['HV0@0', 'utf8'],
+    ['HM0@0', 'hexdump'],
+    ['', 'unknown'],
+    ['garbage', 'unknown'],
+    ['RS0@0', 'byte']
+  ];
+  const results = table.map(([code, expected]) => {
+    const got = TextractorLauncher.hookCodeType(code);
+    return { id: `hookcode-type-${code || 'empty'}`, pass: got === expected, code, expected, got };
+  });
+
+  // The bug this whole signal exists to fix: the real hookCode always
+  // carries a module suffix, and the type check must not care.
+  {
+    const got = TextractorLauncher.hookCodeType('HB0@0:nekopara_vol1_trial.exe');
+    results.push({ id: 'hookcode-type-ignores-module-suffix', pass: got === 'byte', got });
+  }
+
+  return results;
+}
+
+// ─── Test: _allRealHooksAreSingleByteType (v3.13.36) ────────────────────
+
+function testAllRealHooksAreSingleByteType() {
+  const results = [];
+
+  {
+    const launcher = new TextractorLauncher();
+    launcher._hooks.set('a', { isSystemHook: false, textCount: 3, hookCode: 'HB0@0:nekopara_vol1_trial.exe' });
+    launcher._hooks.set('b', { isSystemHook: false, textCount: 2, hookCode: 'HB0@0:other.exe' });
+    // This is the direct reproduction of Bug 2: with the OLD exact-string
+    // check (`hookCode !== 'HB0@0'`), a real hookCode WITH a module
+    // suffix would make this evaluate to false — the trigger was dead
+    // even with hookCode present, independent of the parser bug.
+    results.push({ id: 'all-real-hooks-single-byte-with-module-suffix', pass: launcher._allRealHooksAreSingleByteType() === true });
+  }
+  {
+    const launcher = new TextractorLauncher();
+    launcher._hooks.set('a', { isSystemHook: false, textCount: 3, hookCode: 'HB0@0:x.exe' });
+    launcher._hooks.set('b', { isSystemHook: false, textCount: 2, hookCode: 'HQ8@0:gdi32.dll:GetTextExtentPoint32W' });
+    results.push({ id: 'mixed-types-not-all-single-byte', pass: launcher._allRealHooksAreSingleByteType() === false });
+  }
+  {
+    const launcher = new TextractorLauncher();
+    launcher._hooks.set('a', { isSystemHook: true, textCount: 3, hookCode: 'HB0@0' });
+    results.push({ id: 'system-hooks-dont-count', pass: launcher._allRealHooksAreSingleByteType() === false });
+  }
+
+  return results;
+}
+
+// ─── Test: UTF-16-as-bytes garbage detection + dedup + CJK ratio (v3.13.36)
+
+function testUtf16GarbageDetection() {
+  const launcher = new TextractorLauncher();
+  const results = [];
+
+  // Strong garbage — a real line's worth of the k0/n0/g0 pattern.
+  {
+    const penalty = launcher._textQualityPenalty('k0n0g0k0n0g0k0n0');
+    results.push({ id: 'utf16-garbage-penalty-strong', pass: penalty >= 1400, penalty });
+  }
+
+  // Real Japanese with digits must NOT trip the detector.
+  const clean = ['2020年10月30日', '残り10分です', 'HP:100 MP:50', 'Lv.30 → Lv.40', 'あ0'];
+  for (const text of clean) {
+    const ratio = launcher._utf16ByteGarbageRatio(text);
+    results.push({ id: `utf16-garbage-no-false-positive-${text}`, pass: ratio === 0, text, ratio });
+  }
+
+  // Pure digit strings are excluded explicitly (not dialogue anyway).
+  {
+    const ratio = launcher._utf16ByteGarbageRatio('20201030');
+    results.push({ id: 'utf16-garbage-ignores-pure-digits', pass: ratio === 0, ratio });
+  }
+
+  // textCount dedup: a growing buffer counts as ONE piece of content.
+  {
+    const hook = {
+      key: 'x', name: 'game.exe', isSystemHook: false, lastText: '',
+      textCount: 0, emitCount: 0, cjkChars: 0, scoredChars: 0, hasCJK: false,
+      looksUtf16Garbled: false, totalTextLength: 0, qualityPenalty: 0,
+      lastTextAt: 0, _recentHashes: new Set(), _recentHashOrder: []
+    };
+    for (const t of ['あい', 'あいう', 'あいうえ']) {
+      const isNew = launcher._isNewHookContent(hook, t);
+      hook.lastText = t;
+      hook.emitCount++;
+      if (isNew) { hook.textCount++; hook.totalTextLength += t.length; }
+    }
+    results.push({ id: 'textcount-dedup-growing-buffer', pass: hook.textCount === 1 && hook.emitCount === 3, textCount: hook.textCount, emitCount: hook.emitCount });
+  }
+
+  // Exact repeats also dedup.
+  {
+    const hook = {
+      lastText: '', textCount: 0, emitCount: 0, _recentHashes: new Set(), _recentHashOrder: []
+    };
+    for (let i = 0; i < 5; i++) {
+      const isNew = launcher._isNewHookContent(hook, 'こんにちは');
+      hook.lastText = 'こんにちは';
+      hook.emitCount++;
+      if (isNew) hook.textCount++;
+    }
+    results.push({ id: 'textcount-dedup-exact-repeat', pass: hook.textCount === 1, textCount: hook.textCount });
+  }
+
+  // Genuinely different text each time all counts as new.
+  {
+    const hook = { lastText: '', textCount: 0, _recentHashes: new Set(), _recentHashOrder: [] };
+    for (const t of ['おはよう', 'こんばんは', 'さようなら']) {
+      const isNew = launcher._isNewHookContent(hook, t);
+      hook.lastText = t;
+      if (isNew) hook.textCount++;
+    }
+    results.push({ id: 'textcount-counts-new-content', pass: hook.textCount === 3, textCount: hook.textCount });
+  }
+
+  // CJK ratio is no longer sticky: a mostly-garbage hook with one
+  // accidental katakana character must NOT collect the full +1000.
+  {
+    const hook = {
+      name: 'x.exe', isSystemHook: false, lastText: '', textCount: 1,
+      cjkChars: 1, scoredChars: 40, totalTextLength: 40, qualityPenalty: 0, hasCJK: true
+    };
+    const score = launcher._scoreHook(hook);
+    results.push({ id: 'cjk-ratio-not-sticky', pass: score < 800, score });
+  }
+
+  // Real Japanese dialogue still gets the full CJK bonus.
+  {
+    const text = '今日はいい天気ですね';
+    const hook = {
+      name: 'x.exe', isSystemHook: false, lastText: text, textCount: 1,
+      cjkChars: text.length, scoredChars: text.length, totalTextLength: text.length,
+      qualityPenalty: 0, hasCJK: true
+    };
+    const score = launcher._scoreHook(hook);
+    results.push({ id: 'cjk-ratio-full-for-japanese', pass: score >= 1000, score });
+  }
+
+  // Backward compat: a hook built with only the OLD `hasCJK` field (no
+  // cjkChars/scoredChars — exactly what testHysteresisAgeDiscount's
+  // fixtures and any pre-v3.13.36 hook object look like) must still get
+  // the full CJK bonus, not silently lose it. lastText/totalTextLength
+  // deliberately long enough (>=3 chars) to avoid tripping the separate,
+  // pre-existing "avgLen < 3 -> -200" short-text penalty, which would
+  // otherwise mask the exact thing this case is checking.
+  {
+    const hook = {
+      name: 'x.exe', isSystemHook: false, lastText: '恵麻さん', textCount: 1,
+      totalTextLength: 4, qualityPenalty: 0, hasCJK: true
+    };
+    const score = launcher._scoreHook(hook);
+    results.push({ id: 'score-back-compat-legacy-hook-object', pass: score >= 1000, score });
+  }
+
+  // The integration case, reproducing the real session's numbers: a hook
+  // that re-emits a growing garbage buffer must lose to a hook that
+  // emits clean text once, by more than HOOK_SWITCH_THRESHOLD (200).
+  {
+    const l = new TextractorLauncher();
+    const garbageHook = {
+      key: 'garbage', name: 'nekopara_vol1_trial.exe', isSystemHook: false, hookCode: 'HB0@0:nekopara_vol1_trial.exe',
+      lastText: '', textCount: 0, emitCount: 0, cjkChars: 0, scoredChars: 0, hasCJK: false,
+      looksUtf16Garbled: false, totalTextLength: 0, qualityPenalty: 0, discoveredAt: Date.now(),
+      lastTextAt: 0, _recentHashes: new Set(), _recentHashOrder: []
+    };
+    withSilencedConsole(() => {
+      let buf = '';
+      for (let i = 0; i < 30; i++) {
+        buf += 'k0n0';
+        const parsed = { hookKey: 'garbage', hookName: garbageHook.name, displayName: garbageHook.name, text: buf, fullName: '', hookCode: garbageHook.hookCode, funcAddr: '', processName: garbageHook.name, hookIndex: 1, isSystemHook: false };
+        l._hooks.set('garbage', garbageHook);
+        l._processHookLine(parsed);
+      }
+      const cleanParsed = { hookKey: 'clean', hookName: 'clean.exe', displayName: 'clean.exe', text: 'こんにちは、世界！', fullName: '', hookCode: 'HQ8@0:gdi32.dll:GetTextExtentPoint32W', funcAddr: '', processName: 'clean.exe', hookIndex: 2, isSystemHook: false };
+      l._processHookLine(cleanParsed);
+    });
+    const g = l._hooks.get('garbage');
+    const c = l._hooks.get('clean');
+    const scoreDiff = l._scoreHook(c) - l._scoreHook(g);
+    results.push({
+      id: 'garbage-hook-loses-to-clean-hook',
+      pass: scoreDiff > 200,
+      scoreDiff, garbageScore: l._scoreHook(g), cleanScore: l._scoreHook(c)
+    });
+  }
+
+  return results;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
 
 function run() {
@@ -1050,6 +1392,10 @@ function run() {
   if (!args.only || 'arch-preference-not-crossing-installs'.includes(args.only)) all.push(testArchPreferenceNotCrossingInstalls());
   if (!args.only || 'diagnostic'.includes(args.only) || 'tick'.includes(args.only)) all.push(...testDiagnosticScenarios());
   if (!args.only || 'hysteresis'.includes(args.only) || 'stale'.includes(args.only)) all.push(...testHysteresisAgeDiscount());
+  if (!args.only || 'parse'.includes(args.only)) all.push(...testHookLineParsing());
+  if (!args.only || 'hookcode-type'.includes(args.only)) all.push(...testHookCodeType());
+  if (!args.only || 'single-byte'.includes(args.only)) all.push(...testAllRealHooksAreSingleByteType());
+  if (!args.only || 'garbage'.includes(args.only) || 'utf16'.includes(args.only)) all.push(...testUtf16GarbageDetection());
 
   console.log(`${C.bold}TextractorLauncher lifecycle bench${C.reset} — ${all.length} case(s)\n`);
   let passed = 0;

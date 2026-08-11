@@ -114,6 +114,80 @@ const KNOWN_GOOD_HOOK_CODES = [
 // that, regardless of which caller composed the string.
 const STDIN_COMMAND_RE = /^\S+ -P\d+\n$/;
 
+// v3.13.36: canonical hook-line layout, transcribed LITERALLY from the
+// single printf that produces every hook line TextractorCLI ever emits
+// (Artikash/Textractor, host/CLI/main.cpp):
+//
+//   wprintf_s(L"[%I64X:%I32X:%I64X:%I64X:%I64X:%s:%s] %s\n",
+//       thread.handle,        // %I64X  HEX
+//       thread.tp.processId,  // %I32X  HEX
+//       thread.tp.addr,       // %I64X  HEX
+//       thread.tp.ctx,        // %I64X  HEX
+//       thread.tp.ctx2,       // %I64X  HEX
+//       thread.name.c_str(),          // can be the EMPTY string
+//       HookCode::Generate(...),      // CAN CONTAIN ':'
+//       output.c_str());
+//
+// Seven fields. Four things the three previous patches to this regex
+// (v3.13.27 the hook index, v3.13.28 the hex index, and the original
+// heuristic before either) never saw, because none of them had read this
+// printf:
+//
+//   1. All FIVE numeric fields are %X. There is not one %d in the source.
+//      Any `\d+` here is a latent bug that only surfaces once the process
+//      involved happens to have a PID with a letter in it. Confirmed real:
+//      pid=59C4 — the old `(\d+)` for the PID group failed to match, with
+//      no possible backtrack, and all 13 real hooks in that session fell
+//      through to the old generic FORMAT D with hookCode:'' and the SAME
+//      displayName (the process name) — indistinguishable in the UI's
+//      hook selector.
+//   2. `name` can be the empty string. The "::" the old FORMAT A treated
+//      as a literal separator is NOT a separator: it's ':' + empty-name +
+//      ':'. That's why FORMAT A could never parse a hook that DID have a
+//      name (Console/Clipboard) and a whole separate FORMAT B had to be
+//      invented for the exact same printf.
+//   3. `hookCode` comes from HookCode::Generate and CONTAINS ':'
+//      ("HB0@0:nekopara_vol1_trial.exe",
+//      "HQ8@0:gdi32.dll:GetTextExtentPoint32W"). `[^:]+` could never
+//      capture it. Even with the \d+ fixed, FORMAT A was still wrong.
+//   4. The TEXT itself can contain ']'. The closing ']' that terminates
+//      the bracket is the first one after a well-formed hookCode — hence
+//      hookCode is captured with `[^:\]]*`/`[^\]]*` (never crosses a ']'),
+//      not `.*`.
+//
+// IF THIS REGEX EVER STOPS MATCHING: don't patch a field blind. Go back to
+// the printf in host/CLI/main.cpp and diff it field by field first.
+//
+// Complexity: linear. Every character class is disjoint and there's no
+// nested quantification — this runs on every stdout line, it can't be
+// allowed to backtrack catastrophically.
+const HOOK_LINE_RE = /^\[([0-9A-Fa-f]+):([0-9A-Fa-f]+):([0-9A-Fa-f]+):([0-9A-Fa-f]+):([0-9A-Fa-f]+):([^:\]]*):([^\]]*)\]\s*([\s\S]*)$/;
+
+// v3.13.36: signature of "a single-byte-type hook pointed at a buffer
+// that's actually UTF-16LE" — see _utf16ByteGarbageRatio's doc for the
+// full mechanics (kana/kanji code points have a fixed low byte of 0x30 in
+// UTF-16LE, which is the ASCII digit '0', so each CJK character reads back
+// as "<char>0" when consumed one byte at a time).
+const UTF16_BYTE_RUN_RE = /(?:[^0\s]0){3,}/g;
+const UTF16_GARBAGE_RATIO_STRONG = 0.6;
+const UTF16_GARBAGE_RATIO_WEAK = 0.35;
+const UTF16_GARBAGE_MIN_LEN = 8;
+
+// v3.13.36: CJK bonus in _scoreHook moved from a sticky boolean to a
+// ratio — see hook.hasCJK's update site in _processHookLine for why a
+// boolean let UTF-16-byte garbage collect the same +1000 real Japanese
+// dialogue gets. CJK_RATIO_STRONG is where the full bonus applies;
+// CJK_RATIO_UI is a much lower bar just for showing the 🎌 badge in the
+// hook selector (kept intentionally generous there — a hook worth
+// flagging as "has some Japanese" doesn't need to be majority-Japanese).
+const CJK_RATIO_STRONG = 0.30;
+const CJK_RATIO_UI = 0.05;
+
+// v3.13.36: recent-content memory per hook for dedup in
+// _isNewHookContent — bounded so a long session can't leak memory one
+// hash at a time.
+const HOOK_RECENT_HASH_LIMIT = 64;
+
 // v3.13.27: how often (and for how long) the arch-fallback diagnostic
 // re-checks hook state after the first look at 10s — see the comment on the
 // diagnostic scheduling in launch() for why a single one-shot check isn't
@@ -204,6 +278,12 @@ class TextractorLauncher extends EventEmitter {
     // v3.13.32: reset per-launch — see the diagnostic's 'no-clean-hook'
     // branch, the new call site for _sendKnownGoodHooks.
     this._knownGoodHooksSent = false;
+    // v3.13.36: count of lines that needed _parseLegacyHookLine's fallback
+    // formats instead of the canonical HOOK_LINE_RE — see _parseHookLine's
+    // doc. Should stay at 0 against a real TextractorCLI; exposed via
+    // getStats() so that claim can be checked with data before ever
+    // deleting the fallback.
+    this._legacyParseCount = 0;
     this._gamePid = null;
     this._launchTime = null;
     this._diagnosticTimer = null;
@@ -964,86 +1044,91 @@ class TextractorLauncher extends EventEmitter {
    */
   _parseHookLine(line) {
     if (!line || line.length < 3) return null;
+    const m = HOOK_LINE_RE.exec(line);
+    if (m) return this._buildCanonicalHook(m);
+    // v3.13.36: the old heuristic formats now only run as a fallback for a
+    // TextractorCLI printf this project hasn't seen. In practice they
+    // should never fire — _legacyParseCount (exposed via getStats()) lets
+    // that be confirmed with data instead of assumption before ever
+    // deleting them.
+    const legacy = this._parseLegacyHookLine(line);
+    if (legacy) this._legacyParseCount++;
+    return legacy;
+  }
 
-    // === FORMAT A: Full game hook ===
-    // [index:PID:moduleAddr:funcAddr:split::hookCode:processName] text
-    // Key feature: double colon (::) before hookCode
-    // v3.13.27: hookIndex is [0-9A-Fa-f]+, not \d+ — TextractorCLI switches
-    // to hex digits (A, B, C, ...) once a session has more than 10 hooks.
-    // Confirmed real: a \d+-only capture here silently fails to match any
-    // hook whose index is a letter, falling through all the way to FORMAT D
-    // (generic bracket), which stores the *entire* raw bracket text as
-    // hookKey and leaves hookCode empty — not 'HB0@0', just ''. That empty
-    // string is exactly what let those hooks slip past
-    // _allRealHooksAreGenericType()'s `!== 'HB0@0'` check undetected, killing
-    // the arch-fallback trigger in every session that reached 10+ hooks
-    // (confirmed against real debug output: hooks #A/#B/#C showed
-    // `code=""` while every single-digit hook showed `code="HB0@0"`).
-    let match = line.match(/\[([0-9A-Fa-f]+):(\d+):([0-9A-Fa-f]+):([0-9A-Fa-f]+):(\d+)::([^:]+):([^\]]+)\]\s*(.*)/);
-    if (match) {
-      const hookIndex = match[1];
-      const pid = match[2];
-      const moduleAddr = match[3];
-      const funcAddr = match[4];
-      const split = match[5];
-      const hookCode = match[6].trim();   // e.g. HB0@0
-      const processName = match[7].trim(); // e.g. nekopara_vol1_trial.exe
-      const text = match[8].trim();
+  /**
+   * v3.13.36: builds the hook object from HOOK_LINE_RE's 8 capture groups.
+   * See HOOK_LINE_RE's doc for the source printf this mirrors field-by-field.
+   */
+  _buildCanonicalHook(m) {
+    const [, handle, pid, addr, ctx, ctx2, name, hookCode, rawText] = m;
+    const text = rawText.trim();
 
-      const hookKey = `${hookIndex}:${pid}:${moduleAddr}:${funcAddr}`;
-      const displayName = `#${hookIndex} ${hookCode} @${funcAddr}`;
-      const fullName = `[${hookIndex}:${pid}:${moduleAddr}:${funcAddr}:${split}::${hookCode}:${processName}]`;
+    // v3.13.36: pid === 0 is the STRUCTURAL signature of TextractorCLI's
+    // own internal threads (Console/Clipboard register with
+    // ThreadParam{processId: 0, ...} — confirmed against host/textthread.h
+    // via the same source read that found this whole printf). Replaces
+    // the old `['Console','Clipboard','Consola','Portapapeles']` name
+    // list, which depended on Textractor's own UI language and silently
+    // stopped recognizing system hooks the moment someone ran it in
+    // German, Japanese, French, etc. No real game process has PID 0.
+    const isSystemHook = /^0+$/.test(pid);
 
-      return {
-        hookKey, hookName: processName, displayName, text, fullName,
-        hookCode, funcAddr, processName, hookIndex: parseInt(hookIndex, 16), isSystemHook: false
-      };
-    }
+    // hookKey: SAME shape and SAME source values (groups 1-4) as the old
+    // FORMAT A — deliberately unchanged. `handle` is already unique per
+    // TextractorCLI thread, so folding ctx2 in wouldn't add uniqueness
+    // and would just invalidate every existing key comparison.
+    const hookKey = `${handle}:${pid}:${addr}:${ctx}`;
 
-    // === FORMAT B: System hook (Console/Clipboard) ===
-    // [index:PID:...:TypeName:hookCode] text
-    // These have FFFFFFFFFFFFFFFF addresses and names like Consola/Portapapeles/Console/Clipboard
-    // v3.13.27: same hex-index fix as Format A above.
-    match = line.match(/\[([0-9A-Fa-f]+):(\d+):([^\]]+)\]\s*(.*)/);
-    if (match) {
-      const hookIndex = match[1];
-      const pid = match[2];
-      const bracketContent = match[3];
-      const text = match[4].trim();
+    const codeType = TextractorLauncher.hookCodeType(hookCode);
+    const codeParts = hookCode ? hookCode.split(':') : [];
+    const codeHead = codeParts[0] || '';                      // e.g. HQ8@0
+    const codeTarget = codeParts.length > 1 ? codeParts.slice(1).join('!') : ''; // e.g. gdi32.dll!GetTextExtentPoint32W
 
-      const parts = bracketContent.split(':');
-      // Find the hook type name (Console, Clipboard, Consola, Portapapeles, etc.)
-      const systemNames = ['Console', 'Clipboard', 'Consola', 'Portapapeles'];
-      let hookTypeName = '';
-      for (const part of parts) {
-        if (systemNames.includes(part.trim())) {
-          hookTypeName = part.trim();
-          break;
-        }
-      }
-      // Find hook code (last non-empty part that looks like a hook code, e.g. HB0@0)
-      let hookCode = '';
-      for (let i = parts.length - 1; i >= 0; i--) {
-        const p = parts[i].trim();
-        if (p && /@[0-9A-Fa-f]+$/i.test(p)) {
-          hookCode = p;
-          break;
-        }
-      }
+    // v3.13.36: displayName is the direct fix for the reported symptom —
+    // 13 hooks that all showed the SAME label (the process name) because
+    // they'd all fallen through to the old generic FORMAT D. `addr` is a
+    // cheap, stable discriminant (it's also what a manual GUI hook search
+    // shows), and the [1B] suffix flags single-byte-type hooks — the ones
+    // that produce garbage on a CJK game — right in the selector.
+    const displayName = isSystemHook
+      ? `#${handle} ${name || codeHead || 'system'}`
+      : `#${handle} ${codeHead || '?'} @${addr}` +
+        (name ? ` ${name}` : (codeTarget ? ` ${codeTarget}` : '')) +
+        (codeType === 'byte' ? ' [1B]' : '');
 
-      if (hookTypeName || hookCode) {
-        const hookKey = `${hookIndex}:${pid}:${parts[2] || '0'}`;
-        const displayName = hookTypeName ? `#${hookIndex} ${hookTypeName}` : `#${hookIndex} ${hookCode}`;
-        const fullName = `[${bracketContent}]`;
-        return {
-          hookKey, hookName: hookTypeName || hookCode, displayName, text, fullName,
-          hookCode, funcAddr: '', processName: '', hookIndex: parseInt(hookIndex, 16), isSystemHook: true
-        };
-      }
-    }
+    return {
+      hookKey,
+      hookName: name || codeTarget || codeHead || (isSystemHook ? 'system' : ''),
+      displayName,
+      text,
+      fullName: `[${handle}:${pid}:${addr}:${ctx}:${ctx2}:${name}:${hookCode}]`,
+      hookCode,
+      hookCodeType: codeType,
+      hookAddr: addr,
+      ctxAddr: ctx,
+      ctx2Addr: ctx2,
+      // v3.13.36: this field historically held match[4] = thread.tp.ctx,
+      // which is a context/return address, not a function address —
+      // despite the name. Kept as `funcAddr` for payload compatibility,
+      // now actually holding tp.addr as the name always implied. The old
+      // value is still available as ctxAddr above.
+      funcAddr: addr,
+      processName: isSystemHook ? '' : (codeTarget.split('!').pop() || ''),
+      hookIndex: parseInt(handle, 16),
+      isSystemHook
+    };
+  }
 
+  /**
+   * v3.13.36: pre-canonical heuristic formats, kept only as a fallback —
+   * see _parseHookLine's doc. Formerly FORMAT C and FORMAT D; the old
+   * FORMAT A and FORMAT B are gone, fully subsumed by HOOK_LINE_RE (they
+   * were both parsing the exact same printf, just with different bugs).
+   */
+  _parseLegacyHookLine(line) {
     // === FORMAT C: Legacy [0xHEX:DIGIT:NAME] text ===
-    match = line.match(/\[(0x[0-9A-Fa-f]+):(\d+):([^\]]*)\]\s*(.*)/);
+    let match = line.match(/\[(0x[0-9A-Fa-f]+):(\d+):([^\]]*)\]\s*(.*)/);
     if (match) {
       const hookAddr = match[1];
       const threadNum = match[2];
@@ -1053,7 +1138,7 @@ class TextractorLauncher extends EventEmitter {
       const displayName = hookName || `${hookAddr}:${threadNum}`;
       return {
         hookKey, hookName, displayName, text, fullName: `[${hookAddr}:${threadNum}:${hookName}]`,
-        hookCode: '', funcAddr: '', processName: '', hookIndex: 0, isSystemHook: false
+        hookCode: '', hookCodeType: 'unknown', funcAddr: '', processName: '', hookIndex: 0, isSystemHook: false
       };
     }
 
@@ -1068,7 +1153,7 @@ class TextractorLauncher extends EventEmitter {
         const hookKey = bracketContent;
         return {
           hookKey, hookName, displayName: hookName, text, fullName: `[${bracketContent}]`,
-          hookCode: '', funcAddr: '', processName: '', hookIndex: 0, isSystemHook: false
+          hookCode: '', hookCodeType: 'unknown', funcAddr: '', processName: '', hookIndex: 0, isSystemHook: false
         };
       }
     }
@@ -1077,10 +1162,128 @@ class TextractorLauncher extends EventEmitter {
   }
 
   /**
+   * v3.13.36: read-encoding type a hook code selects, from the letter
+   * right after the 'H' (or 'R' for a direct-read code) - mapped from
+   * Textractor's own host/hookcode.cpp (ParseHCode):
+   *
+   *   B  (ANSI, the generic auto-engine's default)     -> 'byte'
+   *   A  (2-byte/BIG_ENDIAN, NOT UTF-16)                -> 'byte'
+   *   S  (USING_STRING, no unicode flag)                -> 'byte'
+   *   Q  (USING_STRING|USING_UNICODE)                   -> 'unicode'
+   *   W  (USING_UNICODE)                                -> 'unicode'
+   *   V  (USING_STRING|USING_UTF8)                      -> 'utf8'
+   *   M  (...|HEX_DUMP)                                 -> 'hexdump'
+   *
+   * Static, and keyed on the TYPE letter rather than the whole string -
+   * closes the actual bug in the old _allRealHooksAreGenericType(), which
+   * compared `hook.hookCode !== 'HB0@0'` by exact equality while the real
+   * hookCode TextractorCLI prints always carries a module suffix
+   * ("HB0@0:nekopara_vol1_trial.exe"). That comparison could never be
+   * true against a real line, parser bug or not.
+   */
+  static hookCodeType(hookCode) {
+    if (!hookCode) return 'unknown';
+    const m = /^\s*[HR]([A-Za-z])/.exec(hookCode);
+    if (!m) return 'unknown';
+    switch (m[1].toUpperCase()) {
+      case 'B': case 'A': case 'S': return 'byte';
+      case 'Q': case 'W': return 'unicode';
+      case 'V': return 'utf8';
+      case 'M': return 'hexdump';
+      default: return 'unknown';
+    }
+  }
+
+  /**
    * Check if text contains CJK characters.
    */
   _hasCJK(text) {
     return /[\u3000-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\uff65-\uff9f]/.test(text);
+  }
+
+  /**
+   * v3.13.36: count of CJK characters in text - same character class as
+   * _hasCJK above (kept as one literal each rather than sharing a compiled
+   * regex, since one needs .test() semantics and this needs a global
+   * count; a shared /g regex would need lastIndex resets between calls,
+   * which is exactly the kind of subtle stateful bug this file has
+   * already hit once with a hand-rolled decoder).
+   */
+  _countCJK(text) {
+    const m = text.match(/[\u3000-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af\uff65-\uff9f]/g);
+    return m ? m.length : 0;
+  }
+
+  /**
+   * v3.13.36: fraction of `text` covered by runs of "<char>0" - the
+   * signature of a single-byte-type hook reading a buffer that's actually
+   * UTF-16LE.
+   *
+   * Mechanics: kana lives at U+3040-30FF and kanji at U+4E00-9FFF. In
+   * UTF-16LE the LOW byte comes first, so a kana character at U+3042 is
+   * the byte pair 42 30. Read one byte at a time, 0x30 is the ASCII digit
+   * '0' - every kana character becomes "<char>0":
+   *     U+306B -> bytes 6B 30 -> "k0"
+   *     U+306E -> bytes 6E 30 -> "n0"
+   *     U+3067 -> bytes 67 30 -> "g0"
+   * which is exactly what a real corrupted session showed: a run of
+   * "k0k0" fragments alongside intact ASCII from the same buffer (see
+   * _sanitizeLine's note below for why the ASCII survives unaffected).
+   *
+   * Kanji's range isn't modeled separately: any real Japanese sentence
+   * carries kana particles (U+306F, U+304C, U+3092, U+306E, U+306B among
+   * others), so the "<char>0" pattern shows up regardless. Covering
+   * kanji's high bytes (0x4E-0x9F, which surface as Latin letters or
+   * other mojibake depending on codepage) would add false positives on
+   * plain Latin text without adding recall.
+   *
+   * Why _textQualityPenalty's existing 7 patterns never caught this: its
+   * doubled-char pattern compares ADJACENT EQUAL characters
+   * ("IInnsstt") - here the second character of each pair is always '0'
+   * but the first never is, so no pair is ever equal. Its single-repeated
+   * -char pattern requires ONE character repeated across the WHOLE
+   * string, which this isn't either.
+   *
+   * Why this is a RUN search, not a fixed-parity index check:
+   * _sanitizeLine (see its own doc) strips control chars before this ever
+   * runs, and ASCII within the same buffer arrives as "A\0" - stripping
+   * the NUL loses the high byte and shifts parity for the rest of the
+   * string from that point on. Scanning for runs sidesteps needing a
+   * stable parity at all.
+   *
+   * Why this signal exists ALONGSIDE hookCodeType() rather than instead
+   * of it - three independent reasons:
+   *   1. The type can be MISSING. With a broken parser, hookCode lands on
+   *      '' and hookCodeType('') is 'unknown'. A type-only policy goes
+   *      mute in exactly the scenario that needs catching - this looks
+   *      only at content, so it survives a broken parser (or the next
+   *      TextractorCLI version changing the printf).
+   *   2. A single-byte hook can be PERFECT. On a Shift-JIS game,
+   *      TextractorCLI converts the buffer with codepage 932 and an
+   *      HB0@0 produces flawless Japanese. Penalizing by type alone would
+   *      break most older VNs.
+   *   3. A unicode hook can be BROKEN. The inverse case is already
+   *      documented in this file (see KNOWN_GOOD_HOOK_CODES): at the same
+   *      memory address, HB0@0 produced garbage and HQ8@0 produced clean
+   *      text - same function, same address. A Q/W hook pointed at the
+   *      wrong parameter emits garbage just the same.
+   * Content decides hook SELECTION; type decides the architecture
+   * DIAGNOSIS (_allRealHooksAreSingleByteType). They answer different
+   * questions and neither substitutes for the other.
+   */
+  _utf16ByteGarbageRatio(text) {
+    if (!text || text.length < UTF16_GARBAGE_MIN_LEN) return 0;
+    // Guard against the one real false positive found while calibrating
+    // this: a long run of alternating digits ("20201030") matches the
+    // pattern. A pure-digit string isn't dialogue anyway
+    // (_looksLikeGameText already rejects it elsewhere) - this is belt
+    // and suspenders.
+    if (/^[0-9\s]+$/.test(text)) return 0;
+    const runs = text.match(UTF16_BYTE_RUN_RE);
+    if (!runs) return 0;
+    let covered = 0;
+    for (const r of runs) covered += r.length;
+    return covered / text.length;
   }
 
   /**
@@ -1181,6 +1384,18 @@ class TextractorLauncher extends EventEmitter {
       penalty += 500;
     }
 
+    // 7. v3.13.36: UTF-16LE read byte-by-byte (see _utf16ByteGarbageRatio).
+    //    Penalty deliberately larger than the +1000 CJK bonus a hook this
+    //    broken can still collect (see hook.hasCJK's update site): the
+    //    real case measured was garbage at 1510 vs. clean text at 1110.
+    //    For the clean hook to win by more than HOOK_SWITCH_THRESHOLD
+    //    (200), the penalty needs to clear roughly 750 points even after
+    //    that bonus; 1400 leaves margin even if the garbage hook also
+    //    piles up volume.
+    const garbageRatio = this._utf16ByteGarbageRatio(text);
+    if (garbageRatio >= UTF16_GARBAGE_RATIO_STRONG) penalty += 1400;
+    else if (garbageRatio >= UTF16_GARBAGE_RATIO_WEAK) penalty += 900;
+
     return penalty;
   }
 
@@ -1214,14 +1429,85 @@ class TextractorLauncher extends EventEmitter {
    * yet" the same as "only generic real hooks" would cut that off
    * prematurely.
    */
-  _allRealHooksAreGenericType() {
+  /**
+   * v3.13.36 (was _allRealHooksAreGenericType): true when at least one
+   * real hook produced text AND every one of them is single-byte type
+   * (B/A/S — see hookCodeType).
+   *
+   * What changed and why: the old version did
+   * `hook.hookCode !== 'HB0@0'` — exact equality against a bare literal.
+   * The hookCode TextractorCLI actually prints is whatever
+   * HookCode::Generate(hp, pid) returns, which always carries the module
+   * suffix ("HB0@0:nekopara_vol1_trial.exe"). That comparison could never
+   * be true against a real line — the trigger this feeds was dead for
+   * TWO independent reasons (this, and the \d+-vs-hex parser bug that
+   * left hookCode at '' in the first place).
+   *
+   * The reasoning from v3.13.26 still holds and is why this signal is
+   * kept at all: in two real sessions on the same game compared side by
+   * side, x64 gave 100% single-byte hooks (~15 hooks, 90+ seconds, zero
+   * exceptions) and x86 gave ZERO single-byte hooks (HQ18@0, HQ8@0,
+   * HW8@0, and KiriKiriZ's own native code). What changed is how it's
+   * measured: the TYPE, not the string.
+   *
+   * NOT the same claim as "single-byte hooks are bad": an HB0@0 on a
+   * Shift-JIS game is the normal, correct configuration (TextractorCLI
+   * converts with codepage 932 and it comes out perfect). This detects
+   * the degenerate case "the auto-engine never identified a single typed
+   * hook all session" — not text quality, which is
+   * _utf16ByteGarbageRatio's job, on purpose kept independent of this.
+   */
+  _allRealHooksAreSingleByteType() {
     let hasRealHook = false;
     for (const hook of this._hooks.values()) {
       if (hook.isSystemHook || hook.textCount === 0) continue;
       hasRealHook = true;
-      if (hook.hookCode !== 'HB0@0') return false;
+      if (TextractorLauncher.hookCodeType(hook.hookCode) !== 'byte') return false;
     }
     return hasRealHook;
+  }
+
+  /**
+   * v3.13.36: is `text` NEW content for this hook, as opposed to a
+   * re-emission of something already counted?
+   *
+   * The real case this fixes: a hook with a growing/refreshing buffer
+   * (ctx2=1A in a real session) re-emitted its ENTIRE accumulated buffer
+   * on every stdout tick. Each re-emission counted as +1 toward
+   * hook.textCount, which _scoreHook turns into up to +500 of pure
+   * volume bonus, plus inflated hook.totalTextLength pushing avgLen's
+   * +100 bonus to its cap almost immediately. A hook emitting the exact
+   * same clean text ONCE scored barely above zero on both terms.
+   * Measured on a real session: the noisy hook scored 1510, the clean
+   * one 1110 — 400 points apart, comfortably past HOOK_SWITCH_THRESHOLD
+   * (200), so not even the hysteresis protected the clean hook.
+   * `_lastTextHash` (the module-level dedup) doesn't help here: it
+   * filters the emitted 'text' EVENT of whichever hook is already
+   * selected, not the per-hook count that decides selection in the first
+   * place.
+   *
+   * Exact-hash dedup alone isn't enough either: the real case isn't
+   * identical text, it's a GROWING buffer ("A" -> "AB" -> "ABC"), so this
+   * also treats a straightforward prefix/suffix relationship to the
+   * previous text as "not new" — the same growing/shrinking notion
+   * text-cleaning.js's detectGrowingPrefix/detectShrinkingSuffix apply
+   * downstream, just checked here before it ever affects scoring.
+   */
+  _isNewHookContent(hook, text) {
+    const prev = hook.lastText || '';
+    const hash = crypto.createHash('md5').update(text).digest('hex');
+    const seen = hook._recentHashes.has(hash);
+    if (!seen) {
+      hook._recentHashes.add(hash);
+      hook._recentHashOrder.push(hash);
+      if (hook._recentHashOrder.length > HOOK_RECENT_HASH_LIMIT) {
+        hook._recentHashes.delete(hook._recentHashOrder.shift());
+      }
+    }
+    if (!prev) return true;
+    if (seen) return false;
+    if (text.startsWith(prev) || prev.startsWith(text)) return false;
+    return true;
   }
 
   /**
@@ -1241,17 +1527,32 @@ class TextractorLauncher extends EventEmitter {
         displayName: displayName || hookName,
         fullName: fullName,
         hookCode: hookCode || '',
+        // v3.13.36: type read off hookCode once at hook-creation time,
+        // not recomputed per line — hookCode never changes after the
+        // first line for a given hookKey (both come from the same
+        // Generate() call on Textractor's side).
+        hookCodeType: TextractorLauncher.hookCodeType(hookCode),
         funcAddr: funcAddr || '',
         processName: processName || '',
         hookIndex: hookIndex || 0,
         isSystemHook: isSystemHook || false,
         lastText: '',
+        // v3.13.36: textCount/totalTextLength/cjkChars/scoredChars all
+        // count NEW content only — see _isNewHookContent's doc. emitCount
+        // is the raw line count, kept for diagnostics/getStats() only,
+        // never fed into scoring.
         textCount: 0,
+        emitCount: 0,
+        cjkChars: 0,
+        scoredChars: 0,
         hasCJK: false,
+        looksUtf16Garbled: false,
         totalTextLength: 0,
         qualityPenalty: 0,
         discoveredAt: Date.now(),
-        lastTextAt: 0 // v3.13.29: set on first text below, used by the hysteresis age discount
+        lastTextAt: 0, // v3.13.29: set on first text below, used by the hysteresis age discount
+        _recentHashes: new Set(),
+        _recentHashOrder: []
       };
       this._hooks.set(hookKey, hook);
       console.log(`[TextractorLauncher] NEW HOOK: ${fullName} → ${displayName} (total: ${this._hooks.size})`);
@@ -1259,17 +1560,30 @@ class TextractorLauncher extends EventEmitter {
 
     // Update hook state
     if (text && text.length > 0) {
+      hook.emitCount++;
+      const isNewContent = this._isNewHookContent(hook, text);
       hook.lastText = text;
-      hook.textCount++;
-      hook.totalTextLength += text.length;
-      hook.lastTextAt = Date.now(); // v3.13.29: see _autoSelectBestHook's hysteresis
-      if (this._hasCJK(text)) {
-        hook.hasCJK = true;
-      }
-      // Update quality penalty (use worst seen)
-      const penalty = this._textQualityPenalty(text);
-      if (penalty > hook.qualityPenalty) {
-        hook.qualityPenalty = penalty;
+      // v3.13.29: reflects hook ACTIVITY for the hysteresis age discount —
+      // updates on every emission, including re-emitted/growing buffers,
+      // since those still mean the hook is alive and producing signal.
+      hook.lastTextAt = Date.now();
+
+      if (isNewContent) {
+        hook.textCount++;
+        hook.totalTextLength += text.length;
+        hook.cjkChars += this._countCJK(text);
+        hook.scoredChars += text.length;
+        // v3.13.36: UI badge only — a much lower bar than the scoring
+        // ratio in _scoreHook, kept generous on purpose (see CJK_RATIO_UI's doc).
+        hook.hasCJK = hook.scoredChars > 0 && (hook.cjkChars / hook.scoredChars) >= CJK_RATIO_UI;
+        // Update quality penalty (use worst seen)
+        const penalty = this._textQualityPenalty(text);
+        if (penalty > hook.qualityPenalty) {
+          hook.qualityPenalty = penalty;
+        }
+        if (this._utf16ByteGarbageRatio(text) >= UTF16_GARBAGE_RATIO_STRONG) {
+          hook.looksUtf16Garbled = true;
+        }
       }
 
       // v3.13.32: the first time a REAL (non-system) hook produces text
@@ -1335,8 +1649,31 @@ class TextractorLauncher extends EventEmitter {
   _scoreHook(hook) {
     let score = 0;
 
-    // CJK text is a very strong signal
-    if (hook.hasCJK) score += 1000;
+    // v3.13.36: CJK bonus moved from a sticky boolean to a ratio of the
+    // hook's SCORED (new, deduped) content — see hook.hasCJK's update
+    // site in _processHookLine for why the boolean let UTF-16-byte
+    // garbage collect the same +1000 real Japanese dialogue earns.
+    // Mechanism: TextractorCLI converts a single-byte buffer to wide
+    // using the system ANSI codepage (932 on a Japanese-locale install)
+    // BEFORE printing it, and codepage 932 is multi-byte — two
+    // consecutive low bytes >=0x81 can combine into a REAL katakana
+    // character by accident. With the old sticky flag, one such accident
+    // anywhere in the session was worth +1000 forever. The ratio tells
+    // real Japanese (typically 0.8-1.0 CJK) apart from garbage with an
+    // accidental character (typically well under 0.1).
+    //
+    // Backward-compat fallback deliberate, not defensive: hook objects
+    // built by the test bench's fixtures (and by anything constructed
+    // before this version) set hasCJK directly without the
+    // cjkChars/scoredChars counters behind it. Without this fallback,
+    // testHysteresisAgeDiscount and the B/C/D diagnostic scenarios would
+    // lose their CJK score and change result for a reason that has
+    // nothing to do with what they're testing.
+    const cjkRatio = hook.scoredChars > 0
+      ? hook.cjkChars / hook.scoredChars
+      : (hook.hasCJK ? 1 : 0);
+    if (cjkRatio >= CJK_RATIO_STRONG) score += 1000;
+    else if (cjkRatio > 0) score += Math.round(1000 * (cjkRatio / CJK_RATIO_STRONG));
 
     // v3.8.24: CLEAN PROSE BONUS
     // Check if lastText looks like clean narrative English prose
@@ -2278,6 +2615,7 @@ class TextractorLauncher extends EventEmitter {
       this._stdinSent = false;
       this._attachSendCount = 0;
       this._hookInsertCount = 0;
+      this._legacyParseCount = 0;
       // v3.13.32: whether _sendKnownGoodHooks has already run THIS
       // session — see its new call site in the diagnostic's
       // 'no-clean-hook' branch for why this needs a per-session guard now
@@ -2366,15 +2704,36 @@ class TextractorLauncher extends EventEmitter {
 
         // Distinguish "no real hook has produced text yet" (keep waiting —
         // some engines, e.g. KiriKiriZ, take up to ~45s) from "a real hook
-        // exists and isn't stuck on the generic type" (nothing to fix, stop
-        // polling) — _allRealHooksAreGenericType() alone returns false for
-        // both, so it can't tell them apart on its own.
-        const hasRealHookWithText = Array.from(this._hooks.values())
-          .some(h => !h.isSystemHook && h.textCount > 0);
+        // exists and isn't stuck on a degraded type/content" (nothing to
+        // fix, stop polling).
+        const realHooks = Array.from(this._hooks.values()).filter(h => !h.isSystemHook);
+        const realWithText = realHooks.filter(h => h.textCount > 0);
+        const hasRealHookWithText = realWithText.length > 0;
         // v3.13.30: distinct from `_hooks.size === 0` below — see the
         // last-resort branch at the bottom of this function for why this
         // is needed at all.
-        const hasAnyRealHook = Array.from(this._hooks.values()).some(h => !h.isSystemHook);
+        const hasAnyRealHook = realHooks.length > 0;
+
+        // v3.13.36: TWO independent signals that "this architecture isn't
+        // working for this game" — either alone is enough to escalate, and
+        // they're kept separate on purpose because they cover different
+        // failure shapes:
+        //   structural — the auto-engine never identified a single typed
+        //     hook all session (every real hook is single-byte type). This
+        //     is the v3.13.26 signal; it was DEAD before this version for
+        //     two independent reasons layered on top of each other: a
+        //     \d+-vs-hex parser bug that left hookCode at '' (so the old
+        //     exact-string check against 'HB0@0' had nothing to match),
+        //     and — even with hookCode present — that check compared
+        //     against a bare literal while the real string always carries
+        //     a module suffix ("HB0@0:nekopara_vol1_trial.exe"), so it
+        //     could never be true against a real line either way.
+        //   content — every real hook that HAS produced text shows the
+        //     UTF-16-byte garbage signature. Fires even with mixed hook
+        //     types, and even if the parser fell back to legacy formats
+        //     and hookCode is empty — it only looks at the text itself.
+        const structurallyDegraded = this._allRealHooksAreSingleByteType();
+        const contentDegraded = hasRealHookWithText && realWithText.every(h => h.looksUtf16Garbled);
 
         if (this._hooks.size === 0) {
           console.warn(`[TextractorLauncher]   *** NO HOOKS FOUND! ***`);
@@ -2388,48 +2747,63 @@ class TextractorLauncher extends EventEmitter {
           // doesn't always fail loudly in that case, it just never hooks
           // anything. Try the sibling architecture once before giving up.
           if (this._attemptArchFallback('no-hooks')) return;
-        } else if (hasRealHookWithText && this._allRealHooksAreGenericType()) {
-          // v3.13.26: hooks DO exist, but every real (non-system) one has
-          // the generic HB0@0 code — a different failure mode than "zero
-          // hooks", and one the size===0 check above can't see. Confirmed
-          // real with a side-by-side comparison on Nekopara Vol.1: x64
-          // TextractorCLI's own auto-engine consistently produced only
-          // HB0@0 hooks across an entire multi-minute session (the generic
-          // hooks themselves don't self-correct with more time), while x86
-          // TextractorCLI auto-detected specifically-typed hooks (HQ18@0,
-          // HQ8@0, HW8@0, KiriKiriZ's own code) immediately on attach, no
-          // manual intervention needed.
-          console.warn(`[TextractorLauncher]   *** ALL REAL HOOKS ARE GENERIC TYPE (HB0@0) ***`);
+        } else if (hasRealHookWithText && (structurallyDegraded || contentDegraded)) {
+          // v3.13.26/v3.13.36: hooks DO exist, but they're degraded — a
+          // different failure mode than "zero hooks", and one the
+          // size===0 check above can't see. Confirmed real with a
+          // side-by-side comparison on Nekopara Vol.1: x64 TextractorCLI's
+          // own auto-engine consistently produced only single-byte hooks
+          // across an entire multi-minute session (they don't self-correct
+          // with more time), while x86 TextractorCLI auto-detected
+          // specifically-typed hooks (HQ18@0, HQ8@0, HW8@0, KiriKiriZ's own
+          // code) immediately on attach, no manual intervention needed.
+          console.warn(`[TextractorLauncher]   *** HOOKS DEGRADED (single-byte type: ${structurallyDegraded}, UTF-16-as-bytes garbage: ${contentDegraded}) ***`);
           if (!this._knownGoodHooksSent) {
             // v3.13.32: try the CHEAP fix once before the expensive one.
             // _sendKnownGoodHooks used to run unconditionally 1.5s into
             // EVERY launch (see its own doc for why that was proactive by
             // design) — but that meant one more DLL-injection freeze on
             // every single healthy session too, for a hook code that in
-            // practice only ever helped this exact generic-hook failure
+            // practice only ever helped this exact degraded-hook failure
             // mode. Doesn't contradict the "proactive, not reactive"
             // reasoning documented there: that argument was about not
             // being able to correlate a garbled hook's runtime ADDRESS
             // back to a function name. The trigger here isn't a
-            // correlation — it's _allRealHooksAreGenericType(), the whole-
-            // session condition this diagnostic already computes. The
-            // insertion is still blind as to which function it helps;
-            // it's only deferred until there's evidence something is
-            // actually wrong, and it costs one injection instead of
-            // running on every launch regardless of need.
+            // correlation — it's this diagnostic's own whole-session
+            // condition. The insertion is still blind as to which function
+            // it helps; it's only deferred until there's evidence
+            // something is actually wrong, and it costs one injection
+            // instead of running on every launch regardless of need.
             console.warn(`[TextractorLauncher]   Trying known-good hook codes before falling back to the sibling architecture...`);
             this._sendKnownGoodHooks(`diagnostic-${elapsedLabel}`);
             this._knownGoodHooksSent = true;
-            // Give it one polling interval to produce a non-generic hook
-            // before considering the arch fallback — fall through to the
+            // Give it one polling interval to produce a clean hook before
+            // considering the arch fallback — fall through to the
             // reschedule at the bottom rather than escalating this tick.
           } else {
-            console.warn(`[TextractorLauncher]   The auto-engine couldn't identify a specific hook type for this process, and the known-good hook code didn't help either — the sibling architecture may do better.`);
+            console.warn(`[TextractorLauncher]   The auto-engine's hooks stayed degraded, and the known-good hook code didn't help either — the sibling architecture may do better.`);
             if (this._attemptArchFallback('no-clean-hook')) return;
           }
         } else if (hasRealHookWithText) {
-          // A real hook exists and isn't stuck on the generic type —
-          // nothing to fall back from. Stop polling.
+          // v3.13.36: this branch is why the real session that exposed
+          // this whole chain went silent after exactly one tick — with
+          // the parser bug leaving hookCode at '', the degraded-hooks
+          // branch above evaluated false (an empty hookCode's type is
+          // 'unknown', not 'byte'), so this `return` fired on the very
+          // first 10s check, never sending KNOWN_GOOD_HOOK_CODES and
+          // never attempting the sibling architecture.
+          //
+          // Still correct to stop here UNCONDITIONALLY now that the
+          // degraded-hooks branch above is fixed: reaching this branch at
+          // all means at least one real hook has text AND
+          // (structurallyDegraded || contentDegraded) was false — i.e.
+          // NOT every real-with-text hook is single-byte type, and NOT
+          // every one of them looks like UTF-16-as-bytes garbage. Since
+          // structurallyDegraded is computed over the exact same hook set
+          // this branch sees, "not all single-byte" here means at least
+          // one hook is a NON-byte type with text already — genuine
+          // evidence of health, not merely the absence of bad evidence.
+          // Nothing to fall back from.
           return;
         }
 
@@ -2964,6 +3338,7 @@ class TextractorLauncher extends EventEmitter {
       // conditional backup in _attachWasAcknowledged.
       attachSendCount: this._attachSendCount,
       hookInsertCount: this._hookInsertCount,
+      legacyParseCount: this._legacyParseCount,
       activeHookKey: this.getActiveHookKey(),
       selectedHookKey: this._selectedHookKey,
       autoSelectedHookKey: this._autoSelectedHookKey,
