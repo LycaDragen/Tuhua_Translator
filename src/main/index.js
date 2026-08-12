@@ -268,8 +268,17 @@ app.whenReady().then(() => {
     // background state while using a different input method. This was causing the
     // "Reconnecting..." yellow badge to appear even when OCR was working fine.
     const currentInputMethod = ipcHandlers._getCurrentInputMethod();
+    // v3.13.39: 'error' and 'connected' added to the suppression list. The
+    // TCP socket used to never actually connect (a broken readyState guard —
+    // fixed this version), so these two were unreachable in practice. Now
+    // that the socket connects for real, an OCR/XUAT/clipboard user with
+    // Textractor's "Start Server" extension running in the background would
+    // otherwise see up to 15 red 'error' paints from ECONNREFUSED retries,
+    // or the badge flipping from "OCR Mode" to green "Connected" — neither
+    // has anything to do with the input method they're actually using.
     if ((currentInputMethod === 'ocr' || currentInputMethod === 'xuat' || currentInputMethod === 'clipboard') &&
-        (status === 'reconnecting' || status === 'disconnected' || status === 'timeout')) {
+        (status === 'reconnecting' || status === 'disconnected' || status === 'timeout' ||
+         status === 'error' || status === 'connected')) {
       log.info(`[Textractor] Suppressing '${status}' status — current input method is '${currentInputMethod}'`);
       return;
     }
@@ -278,6 +287,16 @@ app.whenReady().then(() => {
 
   textractor.on('error', (err) => {
     log.error('[Textractor] Error:', err.message);
+    // v3.13.39: same suppression as the 'status' handler above — this event
+    // bypassed it entirely, and with the socket now actually connecting
+    // (and therefore actually able to ECONNREFUSED), it would otherwise
+    // paint OCR/XUAT/clipboard users red from a background socket they
+    // don't use.
+    const currentInputMethod = ipcHandlers._getCurrentInputMethod();
+    if (currentInputMethod === 'ocr' || currentInputMethod === 'xuat' || currentInputMethod === 'clipboard') {
+      log.info(`[Textractor] Suppressing 'error' — current input method is '${currentInputMethod}'`);
+      return;
+    }
     windowManager.sendToMainWindow('textractor-status', 'error');
   });
 

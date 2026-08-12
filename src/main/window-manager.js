@@ -17,6 +17,29 @@ const path = require('path');
 
 const RENDERER_BASE = path.join(__dirname, '..', '..', 'renderer');
 
+/**
+ * v3.13.39: channels whose payload is CURRENT STATE, not a one-off event —
+ * the renderer needs the latest value even if it wasn't listening when it
+ * was sent. This is what fixes the badge staying red for a whole session
+ * (session17.log): textractor.reconfigure(port) (src/main/index.js) runs
+ * synchronously inside app.whenReady(), right after createMainWindow() —
+ * this.mainWindow already exists at that point, so sendToMainWindow's
+ * delivery guard passes, but the renderer process hasn't executed a single
+ * line of script yet. webContents.send() is a guaranteed no-op there, not a
+ * race — replaying the last known value once the page is actually ready is
+ * the only fix.
+ *
+ * Everything else (translation-result, textractor-cli-output, *-error,
+ * *-progress, hooks-discovered) is a discrete event and must NEVER be
+ * replayed: re-firing a translation result or an error toast on every page
+ * load would be a new bug, not a fix.
+ */
+const REPLAYABLE_CHANNELS = new Set([
+  'textractor-status',
+  'textractor-cli-status-changed',
+  'xuat-status'
+]);
+
 class WindowManager {
   constructor(store) {
     this.store = store;
@@ -28,6 +51,8 @@ class WindowManager {
     this._alwaysOnTopTimer = null;
     // Input overlay removed — original text is visible in all modes:
     // Textractor: in the game, Clipboard: in clipboard, OCR: behind capture area
+    // v3.13.39: last known value per REPLAYABLE_CHANNELS entry.
+    this._lastStateByChannel = new Map();
   }
 
   /**
@@ -114,6 +139,15 @@ class WindowManager {
     this.mainWindow.once('ready-to-show', () => {
       this.mainWindow.show();
     });
+
+    // v3.13.39: 'dom-ready' (= DOMContentLoaded), not 'did-finish-load', on
+    // purpose. dom-ready fires once index.html's last classic script tag
+    // (renderer.js) has executed — so ipcRenderer.on listeners already
+    // exist — but does NOT wait on subresources, and index.html loads
+    // Tailwind from a CDN, which on an offline machine would hold
+    // did-finish-load back until that request times out. dom-ready also
+    // fires again on a page reload, which is what we want here.
+    this.mainWindow.webContents.on('dom-ready', () => this._replayStateToMainWindow());
 
     this.mainWindow.on('moved', () => this._saveMainWindowBounds());
     this.mainWindow.on('resized', () => this._saveMainWindowBounds());
@@ -241,7 +275,20 @@ class WindowManager {
   }
 
   sendToMainWindow(channel, data) {
+    // v3.13.39: record BEFORE the delivery check — see REPLAYABLE_CHANNELS'
+    // doc for why this specific ordering matters (the renderer may not
+    // exist yet even though this.mainWindow does).
+    if (REPLAYABLE_CHANNELS.has(channel)) {
+      this._lastStateByChannel.set(channel, data);
+    }
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+      this.mainWindow.webContents.send(channel, data);
+    }
+  }
+
+  _replayStateToMainWindow() {
+    if (!this.mainWindow || this.mainWindow.isDestroyed()) return;
+    for (const [channel, data] of this._lastStateByChannel) {
       this.mainWindow.webContents.send(channel, data);
     }
   }

@@ -17,6 +17,11 @@
         // Staged profile changes — profiles created/deleted before save
         let stagedProfileCreates = [];  // { name } — profiles to create on save
         let stagedProfileDeletes = [];  // profile names to delete on save
+        // v3.13.39: was declared inside init()'s listener block, where
+        // registerIpcListeners() (see its own doc) used to live inline —
+        // hoisted to module scope so the extraction doesn't change its
+        // lifetime (still exactly one counter for the process's lifetime).
+        let xuatTranslationCount = 0;
 
         // v3.13.12: Normalize language codes that may come from translation APIs.
         // Google Translate sometimes returns 'izh' (Izhorian) when misidentifying
@@ -31,6 +36,135 @@
             if (!code) return 'auto';
             const lower = code.toLowerCase();
             return SOURCE_LANG_NORMALIZE[lower] || code;
+        }
+
+        // v3.13.39: extracted out of init()'s body. init() is re-invoked on
+        // resetSettingsToDefaults() and loadProfile() (a full settings
+        // reload), and secureOn (src/preload/main-preload.js) is a bare
+        // ipcRenderer.on with no dedup — every one of those re-runs used to
+        // register a SECOND copy of every listener below, so a profile
+        // switch mid-session would double (then triple, ...) every status
+        // update, toast, and countdown reset. registerIpcListeners() is now
+        // called exactly once, right before the FIRST init() call, at the
+        // bottom of this file.
+        function registerIpcListeners() {
+            api.onTextractorStatus((status) => { tcpStatus = status; recomputeBadge(); });
+            api.onTranslationResult((data) => {
+                // v3.13.37: the first real translation result IS the "found
+                // dialogue" signal the search countdown is waiting for —
+                // gated to textractor so switching to clipboard/OCR/xuat
+                // mid-search doesn't stop a countdown that isn't showing.
+                if (currentInputMethod === 'textractor') stopSearchCountdown();
+                updateLiveTranslation(data);
+            });
+            api.onTranslationError((data) => updateLiveError(data));
+            api.onShortcutPressed((data) => handleShortcut(data));
+            api.onTextractorCliStatusChanged((status) => updateCliStatus(status));
+            api.onTextractorCliOutput((text) => appendCliOutput(text));
+            api.onTextractorCliError((errorData) => showCliError(errorData));
+            // v3.13.37: backend told us a hook-discovery window just
+            // started (fresh launch or an internal arch-fallback retry) —
+            // show a live countdown instead of a dead "Launch" button.
+            api.onTextractorCliSearchStarted(({ arch, durationMs }) => startSearchCountdown(arch, durationMs));
+            // v3.13.23: x64<->x86 auto-fallback — same "toast + status text"
+            // pattern already used for onOcrEngineFallback below.
+            api.onTextractorCliArchFallback(({ from, to, reason }) => {
+                const t = translations[currentLang] || translations['en'];
+                const template = t.textractor_arch_fallback_toast || '{from} sin resultado, probando {to}...';
+                const notice = template.replace('{from}', from).replace('{to}', to);
+                showToast(notice);
+                // v3.13.32: also remembered here (not just painted once) so
+                // the 'relaunching' case in updateCliStatus can re-show it
+                // across the killed/exited -> relaunching -> launched
+                // sequence the handover actually produces.
+                cliArchFallbackNotice = notice;
+                const text = document.getElementById('cli-status-text');
+                if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + notice + '</span>';
+            });
+            // v3.13.32: was emitted by the launcher (src/main/index.js) but
+            // missing from main-preload.js's ALLOWED_RECEIVE_CHANNELS, so
+            // this listener could never actually fire — a warning meant to
+            // tell the user their PID isn't a running process (which fails
+            // exactly as silently as an architecture mismatch) never
+            // reached the UI. Non-blocking: just a status-text hint.
+            api.onTextractorCliPidWarning(({ pid, message }) => {
+                const text = document.getElementById('cli-status-text');
+                const statusBar = document.getElementById('cli-status-bar');
+                if (text && statusBar) {
+                    statusBar.classList.remove('hidden');
+                    text.innerHTML = '<span class="text-amber-500">⚠ ' + message + '</span>';
+                }
+            });
+            // v3.13.32: a fallback proved which architecture actually works
+            // for this install — see TextractorLauncher's _markArchSuccess
+            // doc. Must update the PATH INPUT itself, not just settings:
+            // maybeAutoLaunchTextractor()/doLaunchTextractor() read
+            // `#textractor-cli-path`'s current DOM value directly, not the
+            // persisted setting, so without this the next auto-launch
+            // would still send the old (proven-broken) path and the whole
+            // discovery would be lost.
+            api.onTextractorCliArchResolved(({ cliPath }) => {
+                const input = document.getElementById('textractor-cli-path');
+                if (input) input.value = cliPath;
+                const t = translations[currentLang] || translations['en'];
+                showToast((t.cli_arch_resolved_toast || 'This architecture works — Tuhua will use it from now on.'));
+            });
+            api.onHooksDiscovered((data) => updateHookSelector(data));
+            api.onOcrStatus((status) => updateOcrStatus(status));
+
+            // v3.13.01-fix: Handle PaddleOCR fallback to Tesseract
+            api.onOcrEngineFallback(({ engine, reason }) => {
+                const t = translations[currentLang] || translations['en'];
+                const selectEl = document.getElementById('ocr-engine-select');
+                const descEl = document.getElementById('ocr-engine-desc');
+                const warningEl = document.getElementById('ocr-paddle-warning');
+                // Update selector to reflect actual engine
+                if (selectEl) selectEl.value = engine;
+                // Show fallback message
+                if (descEl) descEl.textContent = t.ocr_paddle_fallback || `PaddleOCR falló, usando Tesseract: ${reason}`;
+                if (warningEl) warningEl.classList.add('hidden');
+                // Show toast notification
+                showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
+            });
+
+            // XUAT events
+            // v3.11.2: Pass error data to updateXuatStatus for proper error display
+            api.onXuatStatus((data) => {
+                // Update local tracking variable from event data
+                if (data && data.running !== undefined) {
+                    xuatServerRunning = data.running;
+                }
+                updateXuatStatus();
+            });
+            api.onXuatInstallProgress((data) => {
+                if (data.percent && data.percent >= 0) {
+                    document.getElementById('xuat-install-bar').style.width = data.percent + '%';
+                }
+                if (data.status) {
+                    document.getElementById('xuat-install-status').textContent = data.status;
+                }
+                if (data.error) {
+                    document.getElementById('xuat-install-status').textContent = 'Error: ' + data.error;
+                }
+            });
+
+            // XUAT game connected event
+            api.onXuatGameConnected((data) => {
+                if (data && data.name) {
+                    updateXuatConnectedGame(data.name, data.path);
+                }
+            });
+
+            // XUAT translation request event — update counter in real time
+            api.onXuatTranslationRequest((data) => {
+                xuatTranslationCount++;
+                const counterEl = document.getElementById('xuat-translation-counter');
+                const countEl = document.getElementById('xuat-translation-count');
+                if (counterEl && countEl) {
+                    counterEl.classList.remove('hidden');
+                    countEl.textContent = xuatTranslationCount;
+                }
+            });
         }
 
         // ===== INITIALIZATION =====
@@ -166,140 +300,19 @@
 
             // Input method - apply from saved settings
             const savedInputMethod = settings.inputMethod || 'textractor';
+            // v3.13.39: setInputMethod() now ends with recomputeBadge(), so
+            // the immediate 'watching'/'ocr' badge paint that used to live
+            // here is redundant — removing it also removes a stale-code
+            // path that painted the badge WITHOUT going through the derived
+            // state (it would have shown 'ocr' even if translationActive
+            // were false, for example).
             setInputMethod(savedInputMethod);
-
-            // If starting in clipboard mode, update the status badge immediately
-            if (savedInputMethod === 'clipboard') {
-                updateConnectionStatus('watching');
-            } else if (savedInputMethod === 'ocr') {
-                updateConnectionStatus('ocr');
-            }
 
             // Load tabs data
             loadGlossary();
             loadProfiles();
             loadRegexFilters();
             loadHookCleaningSteps();
-
-            // Listen for events
-            api.onTextractorStatus((status) => updateConnectionStatus(status));
-            api.onTranslationResult((data) => {
-                // v3.13.37: the first real translation result IS the "found
-                // dialogue" signal the search countdown is waiting for —
-                // gated to textractor so switching to clipboard/OCR/xuat
-                // mid-search doesn't stop a countdown that isn't showing.
-                if (currentInputMethod === 'textractor') stopSearchCountdown();
-                updateLiveTranslation(data);
-            });
-            api.onTranslationError((data) => updateLiveError(data));
-            api.onShortcutPressed((data) => handleShortcut(data));
-            api.onTextractorCliStatusChanged((status) => updateCliStatus(status));
-            api.onTextractorCliOutput((text) => appendCliOutput(text));
-            api.onTextractorCliError((errorData) => showCliError(errorData));
-            // v3.13.37: backend told us a hook-discovery window just
-            // started (fresh launch or an internal arch-fallback retry) —
-            // show a live countdown instead of a dead "Launch" button.
-            api.onTextractorCliSearchStarted(({ arch, durationMs }) => startSearchCountdown(arch, durationMs));
-            // v3.13.23: x64<->x86 auto-fallback — same "toast + status text"
-            // pattern already used for onOcrEngineFallback below.
-            api.onTextractorCliArchFallback(({ from, to, reason }) => {
-                const t = translations[currentLang] || translations['en'];
-                const template = t.textractor_arch_fallback_toast || '{from} sin resultado, probando {to}...';
-                const notice = template.replace('{from}', from).replace('{to}', to);
-                showToast(notice);
-                // v3.13.32: also remembered here (not just painted once) so
-                // the 'relaunching' case in updateCliStatus can re-show it
-                // across the killed/exited -> relaunching -> launched
-                // sequence the handover actually produces.
-                cliArchFallbackNotice = notice;
-                const text = document.getElementById('cli-status-text');
-                if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + notice + '</span>';
-            });
-            // v3.13.32: was emitted by the launcher (src/main/index.js) but
-            // missing from main-preload.js's ALLOWED_RECEIVE_CHANNELS, so
-            // this listener could never actually fire — a warning meant to
-            // tell the user their PID isn't a running process (which fails
-            // exactly as silently as an architecture mismatch) never
-            // reached the UI. Non-blocking: just a status-text hint.
-            api.onTextractorCliPidWarning(({ pid, message }) => {
-                const text = document.getElementById('cli-status-text');
-                const statusBar = document.getElementById('cli-status-bar');
-                if (text && statusBar) {
-                    statusBar.classList.remove('hidden');
-                    text.innerHTML = '<span class="text-amber-500">⚠ ' + message + '</span>';
-                }
-            });
-            // v3.13.32: a fallback proved which architecture actually works
-            // for this install — see TextractorLauncher's _markArchSuccess
-            // doc. Must update the PATH INPUT itself, not just settings:
-            // maybeAutoLaunchTextractor()/doLaunchTextractor() read
-            // `#textractor-cli-path`'s current DOM value directly, not the
-            // persisted setting, so without this the next auto-launch
-            // would still send the old (proven-broken) path and the whole
-            // discovery would be lost.
-            api.onTextractorCliArchResolved(({ cliPath }) => {
-                const input = document.getElementById('textractor-cli-path');
-                if (input) input.value = cliPath;
-                const t = translations[currentLang] || translations['en'];
-                showToast((t.cli_arch_resolved_toast || 'This architecture works — Tuhua will use it from now on.'));
-            });
-            api.onHooksDiscovered((data) => updateHookSelector(data));
-            api.onOcrStatus((status) => updateOcrStatus(status));
-
-            // v3.13.01-fix: Handle PaddleOCR fallback to Tesseract
-            api.onOcrEngineFallback(({ engine, reason }) => {
-                const t = translations[currentLang] || translations['en'];
-                const selectEl = document.getElementById('ocr-engine-select');
-                const descEl = document.getElementById('ocr-engine-desc');
-                const warningEl = document.getElementById('ocr-paddle-warning');
-                // Update selector to reflect actual engine
-                if (selectEl) selectEl.value = engine;
-                // Show fallback message
-                if (descEl) descEl.textContent = t.ocr_paddle_fallback || `PaddleOCR falló, usando Tesseract: ${reason}`;
-                if (warningEl) warningEl.classList.add('hidden');
-                // Show toast notification
-                showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
-            });
-
-            // XUAT events
-            // v3.11.2: Pass error data to updateXuatStatus for proper error display
-            api.onXuatStatus((data) => {
-                // Update local tracking variable from event data
-                if (data && data.running !== undefined) {
-                    xuatServerRunning = data.running;
-                }
-                updateXuatStatus();
-            });
-            api.onXuatInstallProgress((data) => {
-                if (data.percent && data.percent >= 0) {
-                    document.getElementById('xuat-install-bar').style.width = data.percent + '%';
-                }
-                if (data.status) {
-                    document.getElementById('xuat-install-status').textContent = data.status;
-                }
-                if (data.error) {
-                    document.getElementById('xuat-install-status').textContent = 'Error: ' + data.error;
-                }
-            });
-
-            // XUAT game connected event
-            api.onXuatGameConnected((data) => {
-                if (data && data.name) {
-                    updateXuatConnectedGame(data.name, data.path);
-                }
-            });
-
-            // XUAT translation request event — update counter in real time
-            let xuatTranslationCount = 0;
-            api.onXuatTranslationRequest((data) => {
-                xuatTranslationCount++;
-                const counterEl = document.getElementById('xuat-translation-counter');
-                const countEl = document.getElementById('xuat-translation-count');
-                if (counterEl && countEl) {
-                    counterEl.classList.remove('hidden');
-                    countEl.textContent = xuatTranslationCount;
-                }
-            });
 
             // Restore XUAT port from settings
             if (settings.xuatPort) {
@@ -425,6 +438,14 @@
 
             // Update the translation toggle button status text
             updateToggleUI();
+
+            // v3.13.39: updateConnectionStatus() replaces the badge's
+            // innerHTML with a plain span carrying no data-i18n attribute
+            // (see its own comment), so without this the navbar/footer
+            // badges stopped following language changes after their first
+            // paint. recomputeBadge() also repaints with the CURRENT
+            // language's label, not whatever was cached from the last event.
+            recomputeBadge();
 
             api.saveSettings({ uiLanguage: lang });
         }
@@ -758,6 +779,7 @@
             }
             previousInputMethod = method;
             inputMethodInitialized = true;
+            recomputeBadge();
         }
 
         // ===== ENGINE FIELDS =====
@@ -896,14 +918,60 @@
                     label = t.status_xuat || 'XUAT Mode';
                     colorClass = 'bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800/50';
                     break;
+                case 'searching':
+                    // v3.13.39: the up-to-60s window between TextractorCLI
+                    // launching and the first real game text — distinct from
+                    // 'reconnecting' on purpose (nothing is retrying here,
+                    // Textractor is looking). #cli-search-status carries the
+                    // numeric countdown; this is the always-visible summary.
+                    label = t.status_searching || 'Searching for text…';
+                    colorClass = 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800/50';
+                    break;
                 default:
                     label = t.status_disconnected;
                     colorClass = 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800/50';
             }
 
             badge.className = `flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${colorClass}`;
-            const dot = status === 'connected' ? '<span class="w-1.5 h-1.5 rounded-full bg-current pulse-dot"></span>' : '<span class="w-1.5 h-1.5 rounded-full bg-current"></span>';
+            const dot = (status === 'connected' || status === 'searching') ? '<span class="w-1.5 h-1.5 rounded-full bg-current pulse-dot"></span>' : '<span class="w-1.5 h-1.5 rounded-full bg-current"></span>';
             badge.innerHTML = `${dot} <span>${label}</span>`;
+
+            // v3.13.39: #connection-badge-bottom used to be referenced by no
+            // JavaScript at all — it kept the markup's hardcoded gray
+            // "Disconnected" for the whole session, in the footer, directly
+            // under a navbar badge that could say something completely
+            // different. Keeps the footer's muted typography; only the dot
+            // carries colour.
+            const bottom = document.getElementById('connection-badge-bottom');
+            if (bottom) {
+                const DOT = {
+                    connected: 'bg-emerald-500', searching: 'bg-amber-500',
+                    reconnecting: 'bg-yellow-500', watching: 'bg-blue-500',
+                    ocr: 'bg-purple-500', xuat: 'bg-purple-500'
+                };
+                bottom.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${DOT[status] || 'bg-red-500'}"></span> <span>${label}</span>`;
+            }
+        }
+
+        // v3.13.39: derived badge state — see src/services/badge-state.js
+        // for the full rationale and the decision table itself. Nothing
+        // here paints the badge directly anymore; every call site that used
+        // to call updateConnectionStatus(status) now updates the relevant
+        // piece of state and calls recomputeBadge(), so the badge is always
+        // a pure function of "what's actually happening" rather than
+        // "whatever event arrived last".
+        let tcpStatus = '';
+        let cliEverExtracted = false;
+
+        function recomputeBadge() {
+            updateConnectionStatus(deriveBadgeStatus({
+                currentInputMethod,
+                translationActive,
+                xuatServerRunning,
+                cliRunning,
+                cliEverExtracted,
+                tcpStatus
+            }));
         }
 
         // ===== LIVE TRANSLATION =====
@@ -1845,15 +1913,12 @@
             api.saveSettings({ translationActive: translationActive });
             updateToggleUI();
 
-            // v3.11.22: When clipboard is paused, show disconnected status instead of "watching"
-            // to make it clear clipboard is no longer being monitored
-            if (currentInputMethod === 'clipboard') {
-                if (translationActive) {
-                    updateConnectionStatus('watching');
-                } else {
-                    updateConnectionStatus('disconnected');
-                }
-            }
+            // v3.11.22: When clipboard is paused, show disconnected status
+            // instead of "watching" to make it clear clipboard is no longer
+            // being monitored — v3.13.39: now via recomputeBadge(), which
+            // derives the same watching/disconnected split from
+            // translationActive (see deriveBadgeStatus).
+            recomputeBadge();
 
             // When OCR is the input method, start/stop OCR session with the main toggle
             if (currentInputMethod === 'ocr') {
@@ -2001,6 +2066,9 @@
             // these guard).
             cliArchFallbackNotice = '';
             cliHasTerminalError = false;
+            // v3.13.39: a fresh launch hasn't proven anything yet — the
+            // badge must not stay green off a PREVIOUS process's proof.
+            cliEverExtracted = false;
             if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
 
             document.getElementById('btn-kill-cli').classList.remove('hidden');
@@ -2018,6 +2086,7 @@
                 cliRunning = true;
                 text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span> (PID: ' + gamePid + ')';
                 document.getElementById('cli-pid-text').innerText = 'CLI PID: ...';
+                recomputeBadge();
                 // Update CLI process PID after a short delay
                 setTimeout(async () => {
                     const s = await api.textractorCliStatus();
@@ -2029,6 +2098,8 @@
                 const t = translations[currentLang] || translations['en'];
                 text.innerHTML = '<span class="text-red-500">✗ Error: ' + (result.error || t.cli_unknown_error || 'Unknown') + '</span>';
                 document.getElementById('btn-kill-cli').classList.add('hidden');
+                cliRunning = false;
+                recomputeBadge();
                 setTimeout(() => status.classList.add('hidden'), 5000);
             }
         }
@@ -2057,6 +2128,8 @@
         async function killTextractorCli() {
             await api.textractorKill();
             cliRunning = false;
+            cliEverExtracted = false;
+            recomputeBadge();
             document.getElementById('btn-kill-cli').classList.add('hidden');
 
             const status = document.getElementById('cli-status-bar');
@@ -2077,6 +2150,9 @@
             switch (status) {
                 case 'launched':
                     cliRunning = true;
+                    // v3.13.39: a fresh 'launched' means a new process — it
+                    // hasn't proven it can extract real text yet.
+                    cliEverExtracted = false;
                     // v3.13.32: a relaunch (arch fallback) is now over —
                     // clear both the amber notice and any stale hide timer
                     // from the 'relaunching'/'exited' transitions that led
@@ -2104,6 +2180,9 @@
                     // the user can still cancel the handover if they want.
                     cliRunning = true;
                     cliHasTerminalError = false;
+                    // v3.13.39: the sibling architecture is a NEW process —
+                    // back to amber "searching" until it proves itself too.
+                    cliEverExtracted = false;
                     if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + (cliArchFallbackNotice || t.cli_relaunching_status || 'Switching architecture...') + '</span>';
                     errorDetail.classList.add('hidden');
@@ -2112,6 +2191,7 @@
                 case 'exited':
                 case 'killed':
                     cliRunning = false;
+                    cliEverExtracted = false;
                     stopSearchCountdown();
                     text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
                     document.getElementById('btn-kill-cli').classList.add('hidden');
@@ -2137,6 +2217,7 @@
                 case 'error':
                     cliRunning = false;
                     cliHasTerminalError = true;
+                    cliEverExtracted = false;
                     stopSearchCountdown();
                     if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
                     text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: ' + (t.cli_error_status || 'Error') + '</span>';
@@ -2144,12 +2225,23 @@
                     break;
                 case 'extracting':
                     cliRunning = true;
+                    // v3.13.39: THE signal the navbar badge was missing —
+                    // real, deduped game text reached the pipeline. Only
+                    // 'stdout-active' (textractor-launcher.js) drives this,
+                    // so the badge can't go green off mere process liveness.
+                    cliEverExtracted = true;
                     text.innerHTML = '<span class="text-emerald-500 pulse-dot">● TextractorCLI: ' + (t.cli_extracting_status || 'Extracting text') + '</span>';
                     errorDetail.classList.add('hidden');
                     break;
                 default:
                     text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + status + '</span>';
             }
+
+            // v3.13.39: one call site covers every case above, including
+            // 'configured' and any other value that falls to default —
+            // recomputeBadge() only reads cliRunning/cliEverExtracted, both
+            // already updated by the branch that ran.
+            recomputeBadge();
         }
 
         /**
@@ -2633,8 +2725,10 @@
                 if (currentInputMethod === 'xuat') {
                     translationActive = status.running;
                     updateToggleUI();
-                    // v3.11.3: Keep connection badge in sync with server status
-                    updateConnectionStatus(status.running ? 'xuat' : 'disconnected');
+                    // v3.11.3 / v3.13.39: xuatServerRunning was already
+                    // updated above (line ~2661) — recomputeBadge() derives
+                    // xuat/disconnected from it the same way this used to.
+                    recomputeBadge();
                 }
             } catch (err) {
                 console.error('[XUAT] Status check error:', err);
@@ -3144,4 +3238,9 @@
         }
 
         // ===== INIT =====
+        // v3.13.39: registered exactly once here — init() itself is
+        // re-invoked on resetSettingsToDefaults()/loadProfile() and must
+        // NOT re-register listeners each time (see registerIpcListeners's
+        // doc for the bug this fixes).
+        registerIpcListeners();
         init();

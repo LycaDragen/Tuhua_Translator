@@ -24,6 +24,24 @@
  *      harmless but usually means a locale drifted out of sync during a
  *      copy-paste and should be reconciled rather than silently ignored.
  *
+ *   3. BADGE STATUS VALUES ARE PAINTABLE (v3.13.39): every status string
+ *      deriveBadgeStatus() (src/services/badge-state.js) can return has a
+ *      matching `case` in updateConnectionStatus()'s switch
+ *      (renderer/main/renderer.js), and every `t.status_*` key that switch
+ *      reads exists in the reference locale. Catches the realistic
+ *      regression: adding a new derived status without a case (silently
+ *      falls to the red "Disconnected" default) or a typo'd i18n key
+ *      (silently renders undefined).
+ *
+ *   4. REPLAYABLE CHANNELS ARE ALLOWLISTED (v3.13.39): every channel in
+ *      window-manager.js's REPLAYABLE_CHANNELS is also in
+ *      ALLOWED_RECEIVE_CHANNELS. A replay on a non-allowlisted channel is
+ *      dropped by secureOn exactly as silently as the original
+ *      'textractor-cli-pid-warning' bug case 1 above documents — the
+ *      generic allowlist check already covers this in practice (anything
+ *      reachable via sendToMainWindow is checked), but this pins the
+ *      specific invariant the dom-ready replay depends on.
+ *
  *   node scripts/test-ipc-channels.js
  *   node scripts/test-ipc-channels.js --quiet
  *   node scripts/test-ipc-channels.js --json=PATH
@@ -197,12 +215,116 @@ function runI18nParityCheck() {
   };
 }
 
+/**
+ * v3.13.39: cross-checks deriveBadgeStatus's possible return values against
+ * updateConnectionStatus's switch cases, and that switch's t.status_* reads
+ * against the reference locale's actual keys.
+ */
+function runBadgeStatusValuesCheck() {
+  const badgeStatePath = path.join(ROOT, 'src', 'services', 'badge-state.js');
+  const badgeStateSrc = fs.readFileSync(badgeStatePath, 'utf8');
+  const returned = new Set();
+  {
+    const re = /return\s+'([a-z]+)'/g;
+    let m;
+    while ((m = re.exec(badgeStateSrc)) !== null) returned.add(m[1]);
+  }
+
+  const rendererPath = path.join(ROOT, 'renderer', 'main', 'renderer.js');
+  const rendererSrc = fs.readFileSync(rendererPath, 'utf8');
+  const switchStart = rendererSrc.indexOf('function updateConnectionStatus(status) {');
+  if (switchStart === -1) {
+    throw new Error('Could not find updateConnectionStatus(status) in renderer.js — has it been renamed?');
+  }
+  const switchBodyStart = rendererSrc.indexOf('switch (status) {', switchStart);
+  const switchBodyEnd = rendererSrc.indexOf('badge.className', switchBodyStart);
+  if (switchBodyStart === -1 || switchBodyEnd === -1) {
+    throw new Error('Could not locate updateConnectionStatus\'s switch body — has its structure changed?');
+  }
+  const switchBody = rendererSrc.slice(switchBodyStart, switchBodyEnd);
+
+  const cased = new Set();
+  {
+    const re = /case\s+'([a-z]+)':/g;
+    let m;
+    while ((m = re.exec(switchBody)) !== null) cased.add(m[1]);
+  }
+  // 'disconnected' is intentionally handled by `default:`, not an explicit
+  // case — it's the fallback for both a real disconnected state AND any
+  // future status nobody wrote a case for. Only count it as covered if
+  // that default branch actually exists (otherwise a switch with no
+  // default at all would wrongly pass).
+  if (/default:/.test(switchBody)) cased.add('disconnected');
+
+  const readKeys = new Set();
+  {
+    const re = /t\.(status_[a-zA-Z_]+)/g;
+    let m;
+    while ((m = re.exec(switchBody)) !== null) readKeys.add(m[1]);
+  }
+
+  const i18nPath = path.join(ROOT, 'renderer', 'main', 'i18n.js');
+  delete require.cache[require.resolve(i18nPath)];
+  const translations = require(i18nPath);
+  const enKeys = new Set(Object.keys(translations.en));
+
+  const unpaintable = [...returned].filter((s) => !cased.has(s)).sort();
+  const missingI18nKeys = [...readKeys].filter((k) => !enKeys.has(k)).sort();
+
+  return {
+    id: 'badge-status-values-are-paintable',
+    pass: unpaintable.length === 0 && missingI18nKeys.length === 0,
+    returnedByDeriveBadgeStatus: [...returned].sort(),
+    casedInUpdateConnectionStatus: [...cased].sort(),
+    unpaintable,
+    missingI18nKeys
+  };
+}
+
+/**
+ * v3.13.39: every REPLAYABLE_CHANNELS entry (window-manager.js) must be in
+ * ALLOWED_RECEIVE_CHANNELS (main-preload.js) — a replay on a channel
+ * secureOn drops is silently swallowed, same failure mode as case 1 above.
+ */
+function runReplayableChannelsCheck() {
+  const wmPath = path.join(ROOT, 'src', 'main', 'window-manager.js');
+  const wmSrc = fs.readFileSync(wmPath, 'utf8');
+  const anchor = 'REPLAYABLE_CHANNELS = new Set([';
+  const start = wmSrc.indexOf(anchor);
+  if (start === -1) {
+    throw new Error('Could not find REPLAYABLE_CHANNELS in window-manager.js — has it been renamed?');
+  }
+  const closeIdx = wmSrc.indexOf(']);', start);
+  const body = wmSrc.slice(start + anchor.length, closeIdx)
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const replayable = new Set();
+  {
+    const re = /['"]([^'"]+)['"]/g;
+    let m;
+    while ((m = re.exec(body)) !== null) replayable.add(m[1]);
+  }
+
+  const preloadPath = path.join(ROOT, 'src', 'preload', 'main-preload.js');
+  const allowed = extractAllowedChannels(fs.readFileSync(preloadPath, 'utf8'));
+
+  const missing = [...replayable].filter((ch) => !allowed.has(ch)).sort();
+
+  return {
+    id: 'replayable-channels-are-allowlisted',
+    pass: missing.length === 0,
+    replayable: [...replayable].sort(),
+    missing
+  };
+}
+
 function run() {
   const args = parseArgs(process.argv.slice(2));
   const all = [];
 
   if (!args.only || 'allowlist'.includes(args.only) || 'channels'.includes(args.only)) all.push(runAllowlistCheck());
   if (!args.only || 'i18n'.includes(args.only) || 'parity'.includes(args.only)) all.push(runI18nParityCheck());
+  if (!args.only || 'badge'.includes(args.only)) all.push(runBadgeStatusValuesCheck());
+  if (!args.only || 'replay'.includes(args.only)) all.push(runReplayableChannelsCheck());
 
   console.log(`${C.bold}IPC-channel / i18n-parity bench${C.reset} — ${all.length} case(s)\n`);
   let passed = 0;
