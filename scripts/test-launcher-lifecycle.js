@@ -1475,6 +1475,163 @@ function testStalenessPenalty() {
   return results;
 }
 
+// ─── Test: repetition penalty + terminal punctuation (v3.13.38) ─────────────
+// Every string here is verbatim from the real Nekopara Vol.1 / KiriKiriZ x86
+// session (session16.log) where the auto-selector picked the wrong hook.
+function testRepetitionAndTerminalPunct() {
+  const launcher = new TextractorLauncher();
+  const results = [];
+
+  // Mirrors HOOK_SWITCH_THRESHOLD in textractor-launcher.js, which is
+  // module-private. A challenger must beat the incumbent by MORE than this
+  // to take over while the incumbent is still fresh.
+  const SWITCH_THRESHOLD = 200;
+
+  const IDEO = String.fromCharCode(0x3000);
+  const DIALOGUE_LONG = '冠詞が『Le』ではなく『La』の『Soleil(太陽)』。';
+  const DIALOGUE_SHORT = '「…これからは一人で頑張らないとな」';
+  const MENU = 'ファイル(画面(テキスト言語(進行制御(ヘルプ(';
+  const KIRIKIRIZ = '冠冠冠冠冠冠冠冠詞詞冠詞冠冠詞詞がが冠詞が冠冠詞詞がが『『冠詞が『';
+  const PER_CHAR = '目目目目目標標標標標来来来来来人人人人人';
+
+  // THE new capability. Measured against HEAD before the change: this exact
+  // string scored 0 — rule 1's even-index pair test is diluted below 0.6 by
+  // the interleaving, and rule 7 needs the "<char>0" byte signature. It was
+  // the one garbage family with no signal at all, which is why it won.
+  {
+    const p = launcher._textQualityPenalty(KIRIKIRIZ);
+    results.push({ id: 'repeat-run-penalizes-kirikiriz-redraw', pass: p >= 900, p });
+  }
+
+  // Rule 8 must NOT stack on top of an earlier rule. Both of these already
+  // scored exactly 800 from rule 1 before v3.13.38 (verified against HEAD);
+  // if the "penalty === 0" guard were dropped they would jump to 1700.
+  {
+    const p = launcher._textQualityPenalty(PER_CHAR);
+    results.push({ id: 'repeat-run-does-not-stack-on-per-char-repeat', pass: p === 800, p });
+  }
+  {
+    // A Japanese stretched-vowel scream is LEGITIMATE dialogue with run
+    // coverage 0.905 — the case REPEAT_RUN_DISTINCT_MIN exists for. It has
+    // distinct 1, so rule 8 skips it on its own merits too. qualityPenalty
+    // is sticky (worst-seen), so a false positive would condemn a good hook
+    // for the whole session.
+    const p = launcher._textQualityPenalty('きゃああああああああああああああああああ');
+    results.push({ id: 'repeat-run-no-false-positive-on-stretched-vowel', pass: p === 800, p });
+  }
+
+  // Must stay completely clean: the CORRECT dialogue hook (which emits every
+  // sentence twice), and prose in both scripts.
+  {
+    const p = launcher._textQualityPenalty(DIALOGUE_LONG + IDEO + DIALOGUE_LONG);
+    results.push({ id: 'repeat-run-no-false-positive-on-doubled-dialogue', pass: p === 0, p });
+  }
+  {
+    const p = launcher._textQualityPenalty('She smiled and said nothing at all, letting the silence settle between us.');
+    results.push({ id: 'repeat-run-no-false-positive-on-english-prose', pass: p === 0, p });
+  }
+  {
+    const p = launcher._textQualityPenalty('今日はいい天気ですね');
+    results.push({ id: 'repeat-run-no-false-positive-on-japanese-prose', pass: p === 0, p });
+  }
+
+  const mk = (t) => ({
+    name: 'x.exe', isSystemHook: false, lastText: t, textCount: 1, emitCount: 1,
+    cjkChars: launcher._countCJK(t), scoredChars: t.length, totalTextLength: t.length,
+    qualityPenalty: launcher._textQualityPenalty(t)
+  });
+
+  // The reported bug, as one assertion: the menu hook was the incumbent at
+  // 1034 holding a fresh +200 hysteresis claim, so real dialogue had to clear
+  // 1234 to take over. Uses the SHORTER (worst-scoring) real dialogue line.
+  {
+    const dlg = launcher._scoreHook(mk(DIALOGUE_SHORT + IDEO + DIALOGUE_SHORT));
+    const menu = launcher._scoreHook(mk(MENU));
+    results.push({ id: 'terminal-punct-dialogue-beats-menu-past-threshold', pass: dlg - menu > SWITCH_THRESHOLD, dlg, menu, diff: dlg - menu });
+  }
+
+  // Terminal punctuation is a BONUS, never a penalty: the menu hook's score
+  // must be byte-identical to what it was before v3.13.38 (1034 in the log).
+  {
+    const menu = launcher._scoreHook(mk(MENU));
+    results.push({ id: 'terminal-punct-never-penalizes-menu', pass: menu === 1034, menu });
+  }
+
+  // The whole session in one case: all four real hook families side by side,
+  // scored exactly as _processHookLine would score them. The dialogue hook
+  // must beat every other one by more than the switch threshold.
+  {
+    const dlg = launcher._scoreHook(mk(DIALOGUE_SHORT + IDEO + DIALOGUE_SHORT));
+    const menu = launcher._scoreHook(mk(MENU));
+    const kiri = launcher._scoreHook(mk(KIRIKIRIZ.repeat(4)));
+    const perChar = launcher._scoreHook(mk(PER_CHAR));
+    results.push({
+      id: 'nekopara-session-picks-dialogue-hook',
+      pass: (dlg - menu) > SWITCH_THRESHOLD &&
+            (dlg - kiri) > SWITCH_THRESHOLD &&
+            (dlg - perChar) > SWITCH_THRESHOLD,
+      dlg, menu, kiri, perChar
+    });
+  }
+
+  // v3.13.38: the growing-buffer hole. _textQualityPenalty used to run ONLY
+  // under isNewContent, and a growing buffer is never "new" after its first
+  // emission — so the quality path only ever saw the first, shortest frame.
+  // Measured against HEAD: this fixture ended the loop with qualityPenalty 0
+  // even though the buffer it grew into scores 1400.
+  {
+    const l = new TextractorLauncher();
+    withSilencedConsole(() => {
+      let buf = '';
+      for (let i = 0; i < 30; i++) {
+        buf += 'k0n0';
+        l._processHookLine({
+          hookKey: 'g', hookName: 'g.exe', displayName: 'g.exe', text: buf, fullName: '',
+          hookCode: 'HB0@0', funcAddr: '', processName: 'g.exe', hookIndex: 1, isSystemHook: false
+        });
+      }
+    });
+    const h = l._hooks.get('g');
+    results.push({ id: 'quality-penalty-sees-grown-buffer', pass: h.qualityPenalty >= 1400, p: h.qualityPenalty, longest: h.longestScoredLength });
+  }
+
+  // lastNewTextAt must advance only on NEW content — a hook re-emitting one
+  // identical line forever kept its incumbency claim because lastTextAt
+  // advanced on every emission. Date.now() mocked (same pattern as
+  // testHysteresisAgeDiscount) rather than relying on real elapsed
+  // milliseconds between three back-to-back calls, which was flaky: three
+  // synchronous _processHookLine calls can land in the same millisecond,
+  // making lastNewTextAt === lastTextAt instead of strictly less.
+  {
+    const origDateNow = Date.now;
+    let virtualNow = 1_700_000_000_000;
+    Date.now = () => virtualNow;
+    let h;
+    try {
+      const l = new TextractorLauncher();
+      withSilencedConsole(() => {
+        for (let i = 0; i < 3; i++) {
+          l._processHookLine({
+            hookKey: 'm', hookName: 'm.exe', displayName: 'm.exe', text: MENU, fullName: '',
+            hookCode: 'HQ18@0', funcAddr: '', processName: 'm.exe', hookIndex: 1, isSystemHook: false
+          });
+          virtualNow += 1000;
+        }
+      });
+      h = l._hooks.get('m');
+    } finally {
+      Date.now = origDateNow;
+    }
+    results.push({
+      id: 'last-new-text-at-frozen-by-repeated-content',
+      pass: h.emitCount === 3 && h.textCount === 1 && h.lastNewTextAt < h.lastTextAt,
+      emitCount: h.emitCount, textCount: h.textCount, frozen: h.lastNewTextAt < h.lastTextAt
+    });
+  }
+
+  return results;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────
 
 function run() {
@@ -1507,6 +1664,7 @@ function run() {
   if (!args.only || 'single-byte'.includes(args.only)) all.push(...testAllRealHooksAreSingleByteType());
   if (!args.only || 'garbage'.includes(args.only) || 'utf16'.includes(args.only)) all.push(...testUtf16GarbageDetection());
   if (!args.only || 'staleness'.includes(args.only) || 'novelty'.includes(args.only)) all.push(...testStalenessPenalty());
+  if (!args.only || 'repetition'.includes(args.only) || 'terminal'.includes(args.only)) all.push(...testRepetitionAndTerminalPunct());
 
   console.log(`${C.bold}TextractorLauncher lifecycle bench${C.reset} — ${all.length} case(s)\n`);
   let passed = 0;

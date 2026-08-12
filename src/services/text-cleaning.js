@@ -144,6 +144,65 @@ function detectShrinkingSuffix(text) {
   return expected === text ? base : null;
 }
 
+// ─── Separator-joined duplicate (real Nekopara/KiriKiriZ HQ8@0 shape) ──────
+// v3.13.38: new. "A<sep>A" — the SAME sentence emitted twice in one line,
+// joined by a single whitespace character (U+3000 in the real capture). This
+// is what the CORRECT dialogue hook of Nekopara Vol.1 emits on every single
+// line, so it is not an edge case for that game: it is every line.
+//
+// Confirmed by direct execution that no existing step touches it:
+// collapseRepeatedLine needs unit.repeat(k) to fill the string exactly and
+// the separator breaks divisibility (fullRepeats lands on 1);
+// _exactRepeatedUnit needs n % unitLen === 0 for the same reason;
+// deduplicateSegments splits on /\d+/ and this text has no digits, so it
+// returns early at segments.length <= 1; detectGrowingPrefix and
+// detectShrinkingSuffix need an exact N(N+1)/2 triangular length.
+//
+// EXACT, in the same discipline as detectGrowingPrefix (see its comment on
+// why the fuzzy 80%-coverage predecessor was replaced): for k parts of
+// length m joined by k-1 separators, n = k*m + (k-1) pins m for each k, and
+// then every boundary character must be the SAME character and every part
+// must match exactly. There is no threshold to tune.
+//
+// Three guards, each earning its place:
+//   - separator must be WHITESPACE. Without it, "0I softly murmured.0I
+//     softly murmured.0" matches with '0' as the separator and this step
+//     silently takes over Strategy 4's job with different, untested
+//     semantics.
+//   - cjkOnly (default true, same as the other gated steps): without it
+//     "no no" -> "no" and "bye bye" -> "bye", destroying exactly the
+//     Latin-emphasis class the G2_scream_* rows exist to protect.
+//   - minimum part length: short Japanese emphasis ("はい　はい") is
+//     legitimate and structurally identical to the artifact; only length
+//     separates them. 4 is above the doubling-for-emphasis range and below
+//     every real dialogue line observed (29 and 18 characters).
+const SEPARATED_DUPLICATE_MIN_PART = 4;
+const SEPARATED_DUPLICATE_MAX_PARTS = 8;
+const SEPARATED_DUPLICATE_SEP_REGEX = /[ \t\n\u3000\u00a0]/;
+
+function detectSeparatedDuplicate(text, options = {}) {
+  const cjkOnly = options.cjkOnly !== false;
+  if (!text) return null;
+  const n = text.length;
+  for (let parts = 2; parts <= SEPARATED_DUPLICATE_MAX_PARTS; parts++) {
+    if ((n - (parts - 1)) % parts !== 0) continue;
+    const m = (n - (parts - 1)) / parts;
+    if (m < SEPARATED_DUPLICATE_MIN_PART) continue;
+    const first = text.substring(0, m);
+    const sep = text[m];
+    if (!SEPARATED_DUPLICATE_SEP_REGEX.test(sep)) continue;
+    let ok = true;
+    for (let i = 1; i < parts; i++) {
+      const off = i * (m + 1);
+      if (text[off - 1] !== sep || text.substring(off, off + m) !== first) { ok = false; break; }
+    }
+    if (!ok) continue;
+    if (cjkOnly && !CJK_CHAR_REGEX.test(first)) continue;
+    return first;
+  }
+  return null;
+}
+
 // ─── Variable-refresh multi-run pattern (Luna #10 shape) ───────────────────
 // v3.13.22 (Fase 3): new, and the hardest of the three — Luna's own docs
 // call the equivalent feature "complex deduplication logic" and expose a
@@ -377,6 +436,20 @@ function cleanHookText(text, options = {}) {
     }
   }
 
+  // v3.13.38: MUST run before deduplicateSegments. "HP:100　HP:100"
+  // reaches that step as ["HP:", "HP:"], hits duplicatesFound with
+  // unique.length === 1 and returns "HP:" — silently dropping the number,
+  // the exact data-loss class G2_stats_colon guards. Placed after the two
+  // whole-string strategies (they are symmetric across the parts, so they
+  // cannot break the equality this step tests) and before the doubled-text
+  // fix, for the same reason the comment above gives for the other three.
+  if (options.enableSeparatedDuplicate !== false && result.length > 10) {
+    const deduped = detectSeparatedDuplicate(result, { cjkOnly: options.separatedDuplicateCjkOnly });
+    if (deduped && deduped.length < result.length) {
+      result = deduped;
+    }
+  }
+
   if (options.enableShrinkingSuffix !== false && result.length > 10) {
     const shrinkingSuffix = detectShrinkingSuffix(result);
     if (shrinkingSuffix && shrinkingSuffix.length < result.length) {
@@ -445,6 +518,7 @@ module.exports = {
   collapseRepeatedLine,
   detectVariableRefreshRun,
   detectShrinkingSuffix,
+  detectSeparatedDuplicate,
   detectGrowingPrefix,
   isDoubledText,
   unDoubleText,

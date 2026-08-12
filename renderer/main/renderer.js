@@ -127,7 +127,6 @@
                 onFontFamilyChange();
             }
             if (settings.overlayOpacity) { document.getElementById('opacity-range').value = settings.overlayOpacity; document.getElementById('opacity-val').innerText = settings.overlayOpacity + '%'; }
-            if (settings.textractorPort) document.getElementById('textractor-port').value = settings.textractorPort;
             if (settings.textractorCliPath) document.getElementById('textractor-cli-path').value = settings.textractorCliPath;
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
             // v3.13.37: persisted so auto-launch has a PID to work with
@@ -1704,23 +1703,6 @@
             }
         }
 
-        // ===== TEST CONNECTION =====
-        async function testConnection() {
-            const port = parseInt(document.getElementById('textractor-port').value);
-            const result = await api.testConnection('127.0.0.1', port);
-            const span = document.getElementById('connection-test-result');
-            const t = translations[currentLang] || translations['en'];
-            if (result.success) {
-                span.innerHTML = `<span class="text-emerald-500">✓ ${t.connection_ok}</span>`;
-                // Auto-save the port when test succeeds so it's used on launch
-                api.saveSettings({ textractorPort: port });
-                console.log('[Tuhua] Port auto-saved after successful test:', port);
-            } else {
-                span.innerHTML = `<span class="text-red-500">✗ ${t.connection_fail}</span>`;
-            }
-            setTimeout(() => span.innerHTML = '', 3000);
-        }
-
         // ===== GATHER CONFIG =====
         function gatherConfig() {
             return {
@@ -1736,7 +1718,14 @@
                 overlayOpacity: parseInt(document.getElementById('opacity-range').value),
                 localEndpoint: document.getElementById('local-endpoint').value,
                 localModel: document.getElementById('local-model').value,
-                textractorPort: parseInt(document.getElementById('textractor-port').value),
+                // v3.13.38: textractorPort deliberately OMITTED — the input
+                // and the Advanced Settings section it lived in were removed.
+                // save-settings merges ({...currentSettings, ...data}) and
+                // gates the TCP reconnect on `if (data.textractorPort)`, so
+                // leaving the key out preserves whatever port is already
+                // stored (Lyca's install runs on 6677, not the 9251 default —
+                // sending a hardcoded default here would have silently
+                // overwritten it on the next Save).
                 textractorCliPath: document.getElementById('textractor-cli-path').value.trim(),
                 manualTextractorMode: document.getElementById('manual-textractor-mode').checked,
                 gamePid: parseInt(document.getElementById('game-pid').value) || 0,
@@ -2016,9 +2005,10 @@
 
             document.getElementById('btn-kill-cli').classList.remove('hidden');
 
-            // Pass the port from the UI to the backend (fix: port wasn't being used on launch)
-            const textractorPort = parseInt(document.getElementById('textractor-port').value);
-            const result = await api.textractorLaunch(cliPath, gamePid, textractorPort);
+            // v3.13.38: no port input left in the UI (see gatherConfig's
+            // comment) — pass undefined and let ipc-handlers.js's existing
+            // fallback chain resolve it: requestedPort || store.get('textractorPort') || 9251.
+            const result = await api.textractorLaunch(cliPath, gamePid, undefined);
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
             status.classList.remove('hidden');
@@ -2348,44 +2338,6 @@
             } else {
                 document.getElementById('hook-preview').classList.add('hidden');
             }
-        }
-
-        /**
-         * v3.13.24: send a hook code (e.g. found via the full Textractor
-         * GUI's manual hook search) to Tuhua's own running TextractorCLI
-         * session, so a working hook doesn't require keeping the separate
-         * GUI open. Confirmed real use case: the auto-inserted generic
-         * engine hook can target the right function with the wrong H-code
-         * type (e.g. HB0@0 vs the correct HQ8@0 for the same
-         * GetTextExtentPoint32W address), producing garbled text — this
-         * lets a user-supplied correct code be applied directly.
-         */
-        async function insertHookCode() {
-            const input = document.getElementById('hook-code-input');
-            const statusEl = document.getElementById('hook-insert-status');
-            const code = input.value.trim();
-            const t = translations[currentLang] || translations['en'];
-            if (!code) return;
-
-            statusEl.classList.remove('hidden');
-            statusEl.className = 'text-[9px] mt-1 text-gray-400';
-            statusEl.textContent = t.hook_insert_code_sending || 'Sending...';
-
-            try {
-                const result = await api.textractorInsertHookCode(code);
-                if (result.success) {
-                    statusEl.className = 'text-[9px] mt-1 text-emerald-500';
-                    statusEl.textContent = '✓ ' + (t.hook_insert_code_sent || 'Sent — watch the hook list above for a new entry.');
-                    input.value = '';
-                } else {
-                    statusEl.className = 'text-[9px] mt-1 text-red-500';
-                    statusEl.textContent = '✗ ' + (result.error || t.cli_unknown_error || 'Unknown error');
-                }
-            } catch (err) {
-                statusEl.className = 'text-[9px] mt-1 text-red-500';
-                statusEl.textContent = '✗ ' + (err.message || t.cli_unknown_error || 'Unknown error');
-            }
-            setTimeout(() => statusEl.classList.add('hidden'), 6000);
         }
 
         function updateHookPreview(hook, isAutoMode) {

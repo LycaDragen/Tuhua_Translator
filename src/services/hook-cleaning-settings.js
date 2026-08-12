@@ -54,13 +54,26 @@ const BUILT_IN_STEPS = [
     order: 3
   },
   {
+    // v3.13.38: "A<sep>A" — the same sentence twice in one line, joined by
+    // a single space. Runs BEFORE deduplicate-segments on purpose; see
+    // detectSeparatedDuplicate's comment for the data-loss case that pins
+    // the ordering.
+    id: 'detect-separated-duplicate',
+    name: 'hook_clean_step_separated',
+    description: 'hook_clean_step_separated_desc',
+    enabled: true,
+    supportsCjkOnly: true,
+    cjkOnly: true,
+    order: 4
+  },
+  {
     // v3.13.22 (Fase 3): Luna #11 shape.
     id: 'detect-shrinking-suffix',
     name: 'hook_clean_step_shrinking',
     description: 'hook_clean_step_shrinking_desc',
     enabled: true,
     supportsCjkOnly: false,
-    order: 4
+    order: 5
   },
   {
     id: 'detect-growing-prefix',
@@ -68,7 +81,7 @@ const BUILT_IN_STEPS = [
     description: 'hook_clean_step_growing_desc',
     enabled: true,
     supportsCjkOnly: false,
-    order: 5
+    order: 6
   },
   {
     id: 'undouble-text',
@@ -76,7 +89,7 @@ const BUILT_IN_STEPS = [
     description: 'hook_clean_step_doubled_desc',
     enabled: true,
     supportsCjkOnly: false,
-    order: 6
+    order: 7
   },
   {
     id: 'deduplicate-segments',
@@ -84,7 +97,7 @@ const BUILT_IN_STEPS = [
     description: 'hook_clean_step_segments_desc',
     enabled: true,
     supportsCjkOnly: false,
-    order: 7
+    order: 8
   }
 ];
 
@@ -181,6 +194,8 @@ class HookCleaningSettingsService {
       collapseRepeatedLineCjkOnly: byId['collapse-repeated-line']?.cjkOnly !== false,
       enableVariableRefresh: byId['detect-variable-refresh']?.enabled !== false,
       variableRefreshCjkOnly: byId['detect-variable-refresh']?.cjkOnly !== false,
+      enableSeparatedDuplicate: byId['detect-separated-duplicate']?.enabled !== false,
+      separatedDuplicateCjkOnly: byId['detect-separated-duplicate']?.cjkOnly !== false,
       enableShrinkingSuffix: byId['detect-shrinking-suffix']?.enabled !== false,
       enableGrowingPrefix: byId['detect-growing-prefix']?.enabled !== false,
       enableUndouble: byId['undouble-text']?.enabled !== false,

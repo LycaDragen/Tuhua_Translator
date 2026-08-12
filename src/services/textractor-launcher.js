@@ -198,6 +198,51 @@ const NOVELTY_MIN_EMITS = 4;
 const NOVELTY_RATIO_FLOOR = 0.5;
 const NOVELTY_STALENESS_PENALTY_MAX = 700;
 
+// v3.13.38: character-repetition garbage — the shape BOTH broken-hook
+// families in the real Nekopara/KiriKiriZ x86 session produced, and the one
+// thing _scoreHook had no signal for at all: the KiriKiriZ engine hook's
+// growing redraw buffer (冠冠冠冠冠冠冠冠詞詞冠詞冠冠詞詞がが...) and the
+// GetGlyphOutlineW per-character 5x repeat (目目目目目標標標標標来来来来来...).
+// Both collected the FULL +1000 CJK bonus (their characters are real kanji)
+// and then WON on avgLen, because garbage is longer than dialogue — the log
+// printed the correct dialogue hook at 1047-1069 losing to garbage at 1110.
+//
+// Metric = coverage of adjacent-duplicate runs, plus how many DISTINCT
+// characters participate in a run. Measured on the real samples:
+//   KiriKiriZ redraw buffer     coverage 0.727, distinct 4
+//   per-character 5x repeat     coverage 1.000, distinct 4
+//   real dialogue (doubled)     coverage 0.000
+//   menu label, plain JP prose  coverage 0.000
+//   English prose ("letting")   coverage 0.129, distinct 3
+//   doubled-char artifact       coverage 0.538 (rule 1 already owns it)
+//
+// An earlier candidate metric (unique chars / total chars) was REJECTED
+// after measuring it: real English prose lands at 0.306 and the correct
+// dialogue hook itself at 0.379, so any threshold that caught the garbage
+// also condemned good text.
+//
+// REPEAT_RUN_DISTINCT_MIN is not decoration: a Japanese stretched-vowel
+// scream ("きゃあああああああああああ", coverage 0.905) is legitimate dialogue
+// and has distinct 1. Requiring 3+ different characters to be repeating is
+// what separates "one long vowel" from "every character redrawn" — and
+// qualityPenalty is sticky (worst-seen), so a false positive here would
+// condemn a good hook for the rest of the session.
+const REPEAT_RUN_COVERAGE_MIN = 0.60;
+const REPEAT_RUN_DISTINCT_MIN = 3;
+const REPEAT_RUN_MIN_LEN = 20;
+const REPEAT_RUN_PENALTY = 900;
+
+// v3.13.38: a hook whose text ends in sentence-terminating punctuation is
+// emitting SENTENCES, not menu labels or a half-redrawn buffer. Checked
+// against every hook in the real session — perfect separation, no
+// exceptions: the dialogue hook ends in 。 or 」; the two menu hooks end in
+// "(" and "x"; another noise hook ends in "["; the KiriKiriZ buffer ends
+// mid-word. BONUS ONLY, never a penalty: a game or language that does not
+// terminate its lines simply does not collect it, and every hook is then
+// compared on exactly the terms that existed before.
+const TERMINAL_PUNCT_RE = /[。．.！!？?…‥」』】〉》”"']$/;
+const TERMINAL_PUNCT_BONUS = 250;
+
 // v3.13.36: recent-content memory per hook for dedup in
 // _isNewHookContent — bounded so a long session can't leak memory one
 // hash at a time.
@@ -1424,6 +1469,37 @@ class TextractorLauncher extends EventEmitter {
     if (garbageRatio >= UTF16_GARBAGE_RATIO_STRONG) penalty += 1400;
     else if (garbageRatio >= UTF16_GARBAGE_RATIO_WEAK) penalty += 900;
 
+    // 8. v3.13.38: character-repetition garbage — see REPEAT_RUN_* above for
+    //    the measured separation and why "distinct >= 3" is load-bearing.
+    //    Skipped once any earlier rule fired: a fully-doubled string
+    //    ("NNooww tthhaatt") satisfies rule 1 AND this one, and stacking
+    //    800 + 900 changes no ordering that rule 1's 800 has not already
+    //    settled — it only makes the resulting score harder to read.
+    //
+    //    Magnitude 900: a repetition hook that ALSO maxes volume reaches
+    //    1000 (CJK) + 500 (textCount cap) + 100 (avgLen cap) = 1600; minus
+    //    900 leaves 700, so a modest clean hook (about 1050) beats it by
+    //    350 > HOOK_SWITCH_THRESHOLD. Against the real numbers: the
+    //    KiriKiriZ hook drops 1110 -> 210 against dialogue at 1047. Kept
+    //    equal to rule 7's WEAK tier and below its STRONG 1400, preserving
+    //    that the UTF-16 signal is the stronger, more specific one.
+    if (penalty === 0) {
+      const dense = text.replace(/\s+/g, '');
+      if (dense.length >= REPEAT_RUN_MIN_LEN) {
+        let inRun = 0;
+        const runChars = new Set();
+        for (let i = 0; i < dense.length; i++) {
+          const prevSame = i > 0 && dense[i] === dense[i - 1];
+          const nextSame = i < dense.length - 1 && dense[i] === dense[i + 1];
+          if (prevSame || nextSame) { inRun++; runChars.add(dense[i]); }
+        }
+        const coverage = inRun / dense.length;
+        if (coverage >= REPEAT_RUN_COVERAGE_MIN && runChars.size >= REPEAT_RUN_DISTINCT_MIN) {
+          penalty += REPEAT_RUN_PENALTY;
+        }
+      }
+    }
+
     return penalty;
   }
 
@@ -1579,6 +1655,13 @@ class TextractorLauncher extends EventEmitter {
         qualityPenalty: 0,
         discoveredAt: Date.now(),
         lastTextAt: 0, // v3.13.29: set on first text below, used by the hysteresis age discount
+        // v3.13.38: like lastTextAt, but advanced ONLY by genuinely new
+        // content — see the hysteresis age discount in _autoSelectBestHook
+        // for why re-emitting the same buffer must not count as "producing".
+        lastNewTextAt: 0,
+        // v3.13.38: longest emission whose quality has actually been
+        // scored — see the update site below for the hole this closes.
+        longestScoredLength: 0,
         _recentHashes: new Set(),
         _recentHashOrder: []
       };
@@ -1604,6 +1687,29 @@ class TextractorLauncher extends EventEmitter {
         // v3.13.36: UI badge only — a much lower bar than the scoring
         // ratio in _scoreHook, kept generous on purpose (see CJK_RATIO_UI's doc).
         hook.hasCJK = hook.scoredChars > 0 && (hook.cjkChars / hook.scoredChars) >= CJK_RATIO_UI;
+        // v3.13.38: advanced only here, inside isNewContent — see the
+        // field's declaration and the hysteresis age discount.
+        hook.lastNewTextAt = Date.now();
+      }
+
+      // v3.13.38: quality signals are evaluated on new content OR on any
+      // emission LONGER than anything scored so far — deliberately NOT
+      // gated on isNewContent alone, which was a real hole. A growing
+      // redraw buffer is "not new" by construction (_isNewHookContent
+      // treats a prefix relationship as a repeat), so the entire quality
+      // path only ever saw the FIRST, shortest emission of exactly the
+      // hook class these penalties exist to catch. Confirmed against the
+      // bench's own fixture: _textQualityPenalty('k0n0') is 0 (below
+      // UTF16_GARBAGE_MIN_LEN), while the 120-character buffer it grows
+      // into is 1400 — a value v3.13.36's rule 7 had never once computed
+      // in that scenario.
+      //
+      // "Longer than the longest scored" rather than "every emission" on
+      // purpose: it can only ever admit MORE text to judge, so the
+      // short-text rules (rule 6's <3 meaningful chars, rule 4's pure
+      // repeat) cannot newly fire on a partial early frame.
+      if (isNewContent || text.length > hook.longestScoredLength) {
+        hook.longestScoredLength = Math.max(hook.longestScoredLength, text.length);
         // Update quality penalty (use worst seen)
         const penalty = this._textQualityPenalty(text);
         if (penalty > hook.qualityPenalty) {
@@ -1719,6 +1825,24 @@ class TextractorLauncher extends EventEmitter {
       }
     }
 
+    // v3.13.38: TERMINAL SENTENCE PUNCTUATION — see TERMINAL_PUNCT_* above.
+    // Measured on cleanPreview (already computed for the prose bonus), not
+    // raw lastText: the real dialogue hook this fixes emits "A<sep>A" (the
+    // same sentence twice), so the raw string happens to end in 。 here —
+    // but a hook whose artifact is a TRAILING one would not, and the
+    // preview is what the user sees in the hook selector anyway.
+    //
+    // Magnitude 250: the incumbent menu hook scored 1034 holding a fresh
+    // +200 hysteresis claim, so a challenger had to clear 1234. The
+    // dialogue hook's WORST observed single-line score is 1047, and
+    // 1047 + 250 = 1297 clears it with 63 points of margin on its FIRST
+    // line — no waiting for the incumbent to go stale, no accumulating
+    // 20 lines of textCount. Kept below the clean-prose bonus (400) so it
+    // cannot outweigh a full prose match on its own.
+    if (cleanPreview.length >= 6 && TERMINAL_PUNCT_RE.test(cleanPreview)) {
+      score += TERMINAL_PUNCT_BONUS;
+    }
+
     // Text count (more active = more likely the main text hook)
     score += Math.min(hook.textCount, 50) * 10;
 
@@ -1808,7 +1932,15 @@ class TextractorLauncher extends EventEmitter {
         const prevHook = this._hooks.get(prevAuto);
         if (prevHook) {
           const prevScore = this._scoreHook(prevHook);
-          const silentMs = Date.now() - (prevHook.lastTextAt || 0);
+          // v3.13.38: lastNewTextAt, not lastTextAt — lastTextAt advances on
+          // EVERY emission including deduped repeats, so a hook re-spamming
+          // one identical line never looked stale and kept its +200
+          // incumbency claim forever. Falls back to lastTextAt for hook
+          // objects built without the new field (the bench's hysteresis
+          // fixtures, and anything pre-v3.13.38) — same deliberate
+          // back-compat shape as _scoreHook's cjkRatio fallback; without it
+          // those fixtures read 0 and every incumbent looks infinitely stale.
+          const silentMs = Date.now() - (prevHook.lastNewTextAt || prevHook.lastTextAt || 0);
           let threshold = HOOK_SWITCH_THRESHOLD;
           if (silentMs > STALE_HOOK_GRACE_MS) {
             const decayProgress = Math.min(1, (silentMs - STALE_HOOK_GRACE_MS) / (STALE_HOOK_FULL_DECAY_MS - STALE_HOOK_GRACE_MS));

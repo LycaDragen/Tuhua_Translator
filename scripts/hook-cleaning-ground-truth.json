@@ -246,6 +246,96 @@
       ],
       "note": "cjkOnly-restriction gap, confirmed symmetric today: FAILS on both routes identically (same Strategy 2 code, same hasCJK gate). Only fixable in Fase 3 by relaxing cjkOnly for Strategy 2 specifically — and only if doing so doesn't break Group 2's Latin-scream rows (G2_scream_*). This is the OTHER half of L9_latin_gap in Group 1; kept as a separate row here because it's what \"does relaxing cjkOnly help\" gets scored against directly.",
       "hookPrefixed": false
+    },
+    {
+      "id": "L13_separated_duplicate_cjk",
+      "group": 1,
+      "input": "冠詞が『Le』ではなく『La』の『Soleil(太陽)』。　冠詞が『Le』ではなく『La』の『Soleil(太陽)』。",
+      "expected": "冠詞が『Le』ではなく『La』の『Soleil(太陽)』。",
+      "appliesTo": [
+        "detectSeparatedDuplicate"
+      ],
+      "hookPrefixed": false,
+      "note": "Real Nekopara Vol.1 / KiriKiriZ x86 capture (session16.log), hook #7 GetTextExtentPoint32W (HQ8@0) — the hook that WAS the correct dialogue hook. EVERY emission is the same sentence twice, joined by U+3000. Verified by direct execution that all seven pre-v3.13.38 steps left this byte-for-byte unchanged."
+    },
+    {
+      "id": "L13_separated_duplicate_quoted",
+      "group": 1,
+      "input": "「…これからは一人で頑張らないとな」　「…これからは一人で頑張らないとな」",
+      "expected": "「…これからは一人で頑張らないとな」",
+      "appliesTo": [
+        "detectSeparatedDuplicate"
+      ],
+      "hookPrefixed": false,
+      "note": "Same hook, quoted-dialogue shape — guards that the fix is not coincidentally correct for one exact string."
+    },
+    {
+      "id": "L13_separated_triple",
+      "group": 1,
+      "input": "「…これからは一人で頑張らないとな」　「…これからは一人で頑張らないとな」　「…これからは一人で頑張らないとな」",
+      "expected": "「…これからは一人で頑張らないとな」",
+      "appliesTo": [
+        "detectSeparatedDuplicate"
+      ],
+      "hookPrefixed": false,
+      "note": "k=3. Only k=2 was observed in the real session; this pins the generalization so it cannot drift silently."
+    },
+    {
+      "id": "L13_separated_duplicate_ascii_space",
+      "group": 1,
+      "input": "「…これからは一人で頑張らないとな」 「…これからは一人で頑張らないとな」",
+      "expected": "「…これからは一人で頑張らないとな」",
+      "appliesTo": [
+        "detectSeparatedDuplicate"
+      ],
+      "hookPrefixed": false,
+      "note": "ROUTE-PARITY case, not a duplicate of the row above. The launcher route joins lines with a plain space before cleanHookText runs, while the TCP route delivers the separator intact — this is what makes the routesAgree check meaningful for the new step."
+    },
+    {
+      "id": "G2_separated_latin_emphasis",
+      "group": 2,
+      "input": "no no no no no",
+      "expected": "no no no no no",
+      "appliesTo": [
+        "detectSeparatedDuplicate"
+      ],
+      "hookPrefixed": false,
+      "note": "cjkOnly guard. Without it this collapses to \"no\" — same regression class as the G2_scream_* rows."
+    },
+    {
+      "id": "G2_separated_stats",
+      "group": 2,
+      "input": "体力:100　体力:100",
+      "expected": "体力:100",
+      "appliesTo": [
+        "detectSeparatedDuplicate",
+        "deduplicateSegments"
+      ],
+      "hookPrefixed": false,
+      "note": "ORDERING guard for v3.13.38: detectSeparatedDuplicate must run BEFORE deduplicateSegments, which splits this on /\\d+/ into [\"体力:\",\"体力:\"] and returns \"体力:\", silently dropping the number — the G2_stats_colon data-loss class. CJK payload on purpose: the Latin equivalent cannot test the ordering, because the cjkOnly guard rejects it first (see G3d)."
+    },
+    {
+      "id": "G2_jp_short_emphasis",
+      "group": 2,
+      "input": "はい　はい　はい",
+      "expected": "はい　はい　はい",
+      "appliesTo": [
+        "detectSeparatedDuplicate"
+      ],
+      "hookPrefixed": false,
+      "note": "SEPARATED_DUPLICATE_MIN_PART guard: legitimate short Japanese emphasis is CJK and structurally identical to the artifact — only part length separates them."
+    },
+    {
+      "id": "G3d_separated_stats_latin",
+      "group": 3,
+      "input": "HP:100　HP:100",
+      "expected": "HP:100",
+      "appliesTo": [
+        "detectSeparatedDuplicate",
+        "deduplicateSegments"
+      ],
+      "hookPrefixed": false,
+      "note": "PRE-EXISTING gap, found while adding the v3.13.38 separated-duplicate step; verified against HEAD that cleanHookText already returned \"HP:\" before that step existed, so it is NOT a regression. Same cjkOnly-restriction class as G3b: detectSeparatedDuplicate would fix it with cjkOnly:false, but relaxing that guard collapses \"no no\" -> \"no\" and breaks the G2_scream_* / G2_separated_latin_emphasis class. Fixing it needs a Latin-safe rule, not a relaxed gate — same standard applied to Luna #10-12."
     }
   ]
 }
