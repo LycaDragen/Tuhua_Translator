@@ -6,6 +6,9 @@
     <title>Tuhua Translator</title>
     <link rel="icon" type="image/x-icon" href="assets/Tuhua.ico">
     <script src="i18n.js"></script>
+    <!-- v3.13.39: pure deriveBadgeStatus() decision table, shared with the
+         Node bench at scripts/test-badge-state.js — see that file's header. -->
+    <script src="../../src/services/badge-state.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -441,7 +444,7 @@
                     <!-- TextractorCLI Path -->
                     <div>
                         <div class="flex justify-between items-center mb-1.5">
-                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="cli_path_label">TextractorCLI</label>
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="cli_path_label">Textractor</label>
                             <div class="flex gap-2 items-center">
                                 <button onclick="testTextractorCli()" id="btn-test-cli" class="text-[10px] text-blue-500 hover:text-blue-400 font-medium flex items-center gap-0.5">
                                     <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
@@ -451,7 +454,7 @@
                             </div>
                         </div>
                         <div class="flex gap-2">
-                            <input type="text" id="textractor-cli-path" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[11px] font-mono" placeholder="C:\Textractor (carpeta) o C:\Textractor\x64\Textractor.exe" readonly>
+                            <input type="text" id="textractor-cli-path" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[11px] font-mono" data-i18n-placeholder="cli_path_placeholder" placeholder="C:\Textractor (carpeta) o C:\Textractor\x64\Textractor.exe" readonly>
                             <span id="cli-path-status" class="text-xs self-center"></span>
                         </div>
                         <p class="text-[9px] text-gray-400 mt-1" data-i18n="cli_path_help">Ruta a la carpeta de Textractor o al .exe. Se auto-detecta x64/x86.</p>
@@ -462,10 +465,7 @@
                         <div class="flex justify-between items-center mb-1.5">
                             <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="game_pid_label">PID del Juego</label>
                             <div class="flex gap-2 items-center">
-                                <button onclick="launchTextractorCli()" id="btn-launch-cli" class="text-[10px] font-medium px-2.5 py-1 rounded-md bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-900/50 transition flex items-center gap-1">
-                                    <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clip-rule="evenodd"/></svg>
-                                    <span data-i18n="launch_btn">Lanzar</span>
-                                </button>
+                                <span id="cli-search-status" class="hidden text-[10px] font-medium px-2.5 py-1 rounded-md bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 flex items-center gap-1"></span>
                                 <button onclick="killTextractorCli()" id="btn-kill-cli" class="hidden text-[10px] font-medium px-2.5 py-1 rounded-md bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 transition flex items-center gap-1">
                                     <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 001 1h4a1 1 0 001-1V8a1 1 0 00-1-1H8z" clip-rule="evenodd"/></svg>
                                     <span data-i18n="kill_btn">Detener</span>
@@ -486,6 +486,7 @@
                         <div id="cli-error-detail" class="hidden mt-2 p-2 rounded bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50">
                             <p id="cli-error-message" class="text-[10px] text-red-700 dark:text-red-300 font-medium"></p>
                             <p id="cli-error-hint" class="text-[9px] text-red-600 dark:text-red-400 mt-1"></p>
+                            <button onclick="maybeAutoLaunchTextractor()" class="text-[9px] text-red-600 dark:text-red-400 font-medium hover:underline mt-1" data-i18n="cli_retry_btn">Reintentar</button>
                             <details class="mt-1.5">
                                 <summary class="text-[8px] text-red-500 dark:text-red-400 cursor-pointer hover:underline">Detalles técnicos</summary>
                                 <div id="cli-error-technical" class="mt-1 text-[8px] font-mono text-red-600/80 dark:text-red-400/70 whitespace-pre-wrap break-all max-h-24 overflow-y-auto"></div>
@@ -499,41 +500,26 @@
                             <label class="block text-[10px] font-bold text-emerald-700 dark:text-emerald-400 uppercase">🪝 Hook Activo</label>
                             <span id="hook-count-badge" class="text-[9px] font-mono text-emerald-500">0 hooks</span>
                         </div>
+                        <div id="hook-no-real-warning" class="hidden p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800 text-[10px] text-amber-700 dark:text-amber-400" data-i18n="hook_no_real_warning">⚠ No se encontró un hook real del juego todavía (solo Consola/Portapapeles). No se está traduciendo nada hasta que aparezca uno.</div>
                         <select id="hook-selector" onchange="onHookSelected(this.value)" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-emerald-200 dark:border-emerald-800 text-xs font-mono">
                             <option value="">🔄 Auto (seleccionar mejor hook)</option>
                         </select>
                         <div id="hook-preview" class="hidden p-2 rounded bg-white/50 dark:bg-dark-800/50 border border-emerald-200/50 dark:border-emerald-800/50">
                             <p class="text-[9px] text-gray-400 mb-1">Último texto:</p>
                             <p id="hook-preview-text" class="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed"></p>
+                            <p id="hook-preview-score" class="hidden text-[9px] text-gray-400 mt-1.5 pt-1.5 border-t border-emerald-200/50 dark:border-emerald-800/50"></p>
                         </div>
-                        <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
+                        <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60" data-i18n="hook_selector_help">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
                     </div>
 
-                    <!-- TCP Port (Advanced) -->
-                    <details class="group">
-                        <summary class="text-[10px] text-gray-400 cursor-pointer hover:text-gray-600 dark:hover:text-gray-300 flex items-center gap-1">
-                            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd"/></svg>
-                            <span data-i18n="advanced_settings">Configuración Avanzada</span>
-                        </summary>
-                        <div class="mt-2 space-y-2 pl-1">
-                            <div>
-                                <div class="flex justify-between items-center mb-1">
-                                    <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="port_label">Puerto TCP</label>
-                                    <button onclick="testConnection()" class="text-[10px] text-emerald-500 hover:text-emerald-400 font-medium" data-i18n="test_connection">Probar</button>
-                                </div>
-                                <div class="flex gap-2">
-                                    <input type="number" id="textractor-port" value="9251" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 font-mono font-bold text-center text-emerald-600 dark:text-emerald-400 text-sm">
-                                    <span id="connection-test-result" class="text-xs self-center"></span>
-                                </div>
-                                <p class="text-[9px] text-gray-400 mt-1" data-i18n="port_help">Default: 9251. Solo cambia si usas Textractor GUI con otro puerto.</p>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <label class="text-[10px] text-gray-400" data-i18n="manual_mode_label">Modo Manual (sin CLI)</label>
-                                <input type="checkbox" id="manual-textractor-mode" onchange="toggleManualMode(this.checked)" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
-                            </div>
-                            <p class="text-[9px] text-gray-400" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
-                        </div>
-                    </details>
+                    <!-- v3.13.38: Manual Mode, moved out of the removed Advanced
+                         Settings/TCP-port container — still the fallback for
+                         running Textractor GUI manually instead of the CLI. -->
+                    <div class="flex items-center gap-2">
+                        <label class="text-[10px] text-gray-400" data-i18n="manual_mode_label">Modo Manual (sin CLI)</label>
+                        <input type="checkbox" id="manual-textractor-mode" onchange="toggleManualMode(this.checked)" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                    </div>
+                    <p class="text-[9px] text-gray-400" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
                 </div>
             </div>
 
@@ -974,6 +960,22 @@
                                     </div>
                                     <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
                                         <input type="checkbox" id="hook-clean-cjk-detect-variable-refresh" onchange="toggleHookCleanCjkOnly('detect-variable-refresh', this.checked)" class="w-3 h-3" checked>
+                                        <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
+                                    </label>
+                                </div>
+                                <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1 min-w-0 pr-2">
+                                            <span class="text-[10px] font-medium" data-i18n="hook_clean_step_separated">Duplicado separado</span>
+                                            <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_separated_desc">Colapsa una frase emitida dos veces, unida por un solo espacio (A A→A).</p>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer shrink-0">
+                                            <input type="checkbox" id="hook-clean-detect-separated-duplicate" onchange="toggleHookCleanStep('detect-separated-duplicate', this.checked)" class="sr-only peer" checked>
+                                            <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                        </label>
+                                    </div>
+                                    <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
+                                        <input type="checkbox" id="hook-clean-cjk-detect-separated-duplicate" onchange="toggleHookCleanCjkOnly('detect-separated-duplicate', this.checked)" class="w-3 h-3" checked>
                                         <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
                                     </label>
                                 </div>

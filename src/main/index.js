@@ -137,6 +137,51 @@ app.whenReady().then(() => {
     windowManager.sendToMainWindow('textractor-cli-status-changed', status);
   });
 
+  // v3.13.23: x64<->x86 auto-fallback — log it clearly (not just a silent
+  // retry) and let the renderer show a toast, same pattern as the existing
+  // 'ocr-engine-fallback' notification.
+  textractorLauncher.on('arch-fallback', ({ from, to, reason }) => {
+    log.info(`[TextractorLauncher] Arch fallback: ${from} -> ${to} (reason: ${reason})`);
+    windowManager.sendToMainWindow('textractor-cli-arch-fallback', { from, to, reason });
+  });
+
+  // v3.13.31: same pattern as 'arch-fallback' above — log clearly so a
+  // stale/wrong PID isn't mistaken for an architecture mismatch during
+  // diagnosis (attach fails exactly as silently either way).
+  textractorLauncher.on('pid-warning', ({ pid, message }) => {
+    log.warn(`[TextractorLauncher] PID warning: ${message}`);
+    windowManager.sendToMainWindow('textractor-cli-pid-warning', { pid, message });
+  });
+
+  // v3.13.37: same pattern as 'arch-fallback'/'pid-warning' above — lets
+  // the renderer show a live countdown instead of a dead "Launch" button
+  // during the up-to-60s hook discovery window (fresh launch or an
+  // internal arch-fallback retry, launch() emits it either way).
+  textractorLauncher.on('search-started', ({ arch, durationMs }) => {
+    log.info(`[TextractorLauncher] Search started: arch=${arch || 'unknown'} durationMs=${durationMs}`);
+    windowManager.sendToMainWindow('textractor-cli-search-started', { arch, durationMs });
+  });
+
+  // v3.13.32: a fallback just discovered which architecture actually
+  // works for this Textractor install — see TextractorLauncher's
+  // _markArchSuccess doc for why nothing persisted this before. Only
+  // rewrite the saved path when this came FROM a fallback (viaFallback) —
+  // launch() itself already prefers the resolved arch in-session without
+  // needing settings touched, so this is specifically about surviving a
+  // Tuhua restart — and only within the SAME install the user already had
+  // configured, so an explicit choice of a different Textractor folder is
+  // never silently overwritten.
+  textractorLauncher.on('arch-resolved', ({ cliPath, installKey, viaFallback }) => {
+    if (!viaFallback) return;
+    const stored = store.get('textractorCliPath', '');
+    const sameInstall = stored && textractorLauncher._archInstallKey(stored) === installKey;
+    if (!stored || sameInstall) {
+      store.set({ ...store.get(), textractorCliPath: cliPath });
+      log.info(`[TextractorLauncher] Persisted proven architecture: ${cliPath}`);
+    }
+    windowManager.sendToMainWindow('textractor-cli-arch-resolved', { cliPath });
+  });
+
   textractorLauncher.on('error', (err) => {
     // v3.8.23: err is now a structured object with { message, code, severity, hint, stderr, stdout }
     // If it's an old-style Error object, convert it
@@ -223,8 +268,17 @@ app.whenReady().then(() => {
     // background state while using a different input method. This was causing the
     // "Reconnecting..." yellow badge to appear even when OCR was working fine.
     const currentInputMethod = ipcHandlers._getCurrentInputMethod();
+    // v3.13.39: 'error' and 'connected' added to the suppression list. The
+    // TCP socket used to never actually connect (a broken readyState guard —
+    // fixed this version), so these two were unreachable in practice. Now
+    // that the socket connects for real, an OCR/XUAT/clipboard user with
+    // Textractor's "Start Server" extension running in the background would
+    // otherwise see up to 15 red 'error' paints from ECONNREFUSED retries,
+    // or the badge flipping from "OCR Mode" to green "Connected" — neither
+    // has anything to do with the input method they're actually using.
     if ((currentInputMethod === 'ocr' || currentInputMethod === 'xuat' || currentInputMethod === 'clipboard') &&
-        (status === 'reconnecting' || status === 'disconnected' || status === 'timeout')) {
+        (status === 'reconnecting' || status === 'disconnected' || status === 'timeout' ||
+         status === 'error' || status === 'connected')) {
       log.info(`[Textractor] Suppressing '${status}' status — current input method is '${currentInputMethod}'`);
       return;
     }
@@ -233,6 +287,16 @@ app.whenReady().then(() => {
 
   textractor.on('error', (err) => {
     log.error('[Textractor] Error:', err.message);
+    // v3.13.39: same suppression as the 'status' handler above — this event
+    // bypassed it entirely, and with the socket now actually connecting
+    // (and therefore actually able to ECONNREFUSED), it would otherwise
+    // paint OCR/XUAT/clipboard users red from a background socket they
+    // don't use.
+    const currentInputMethod = ipcHandlers._getCurrentInputMethod();
+    if (currentInputMethod === 'ocr' || currentInputMethod === 'xuat' || currentInputMethod === 'clipboard') {
+      log.info(`[Textractor] Suppressing 'error' — current input method is '${currentInputMethod}'`);
+      return;
+    }
     windowManager.sendToMainWindow('textractor-status', 'error');
   });
 

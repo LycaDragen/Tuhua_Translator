@@ -11,6 +11,26 @@ const axios = require('axios');
 const XuatInstaller = require('../services/xuat-installer');
 const VndbService = require('../services/vndb');
 const textCleaning = require('../services/text-cleaning');
+// v3.13.29: renderer/main/i18n.js exports its `translations` object via
+// module.exports whenever it's available (see its own bottom-of-file
+// check), so it's requirable here too — used for the few strings the
+// MAIN process needs translated (native dialog titles), which the
+// renderer's own changeLanguage()/data-i18n machinery can't reach since
+// those dialogs are drawn by Electron itself, not the DOM.
+const translations = require('../../renderer/main/i18n.js');
+
+/**
+ * Look up a translated string for a main-process-only UI surface (native
+ * dialogs) using the same `uiLanguage` setting the renderer persists via
+ * saveSettings — falls back to 'es' (this app's original default) then to
+ * the key itself if nothing matches, so a missing translation degrades to
+ * a visible key rather than a crash.
+ */
+function mainT(store, key) {
+  const lang = (store && typeof store.get === 'function' && store.get('uiLanguage')) || 'es';
+  const dict = translations[lang] || translations.es || translations.en || {};
+  return dict[key] || key;
+}
 
 class IpcHandlers {
   constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings) {
@@ -387,7 +407,7 @@ class IpcHandlers {
 
     ipcMain.handle('textractor-browse-cli', async () => {
       const result = await dialog.showOpenDialog({
-        title: 'Seleccionar carpeta de Textractor o TextractorCLI.exe',
+        title: mainT(this.store, 'dialog_browse_textractor_title'),
         filters: [
           { name: 'Executable', extensions: ['exe'] },
           { name: 'All Files', extensions: ['*'] }
@@ -474,7 +494,7 @@ class IpcHandlers {
 
     // ===== TextractorCLI Test (v3.8.23) =====
     ipcMain.handle('textractor-test-cli', async (event, cliPath) => {
-      if (typeof cliPath !== 'string') return { canStart: false, hint: 'Ruta inválida' };
+      if (typeof cliPath !== 'string') return { canStart: false, hintKey: 'hint_invalid_path', hint: 'Invalid path' };
       console.log(`[Tuhua] Testing TextractorCLI: ${cliPath}`);
       const result = await this.textractorLauncher.testLaunch(cliPath);
       console.log(`[Tuhua] Test result: canStart=${result.canStart}, hint="${result.hint}"`);

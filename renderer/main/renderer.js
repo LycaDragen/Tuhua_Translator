@@ -17,6 +17,11 @@
         // Staged profile changes — profiles created/deleted before save
         let stagedProfileCreates = [];  // { name } — profiles to create on save
         let stagedProfileDeletes = [];  // profile names to delete on save
+        // v3.13.39: was declared inside init()'s listener block, where
+        // registerIpcListeners() (see its own doc) used to live inline —
+        // hoisted to module scope so the extraction doesn't change its
+        // lifetime (still exactly one counter for the process's lifetime).
+        let xuatTranslationCount = 0;
 
         // v3.13.12: Normalize language codes that may come from translation APIs.
         // Google Translate sometimes returns 'izh' (Izhorian) when misidentifying
@@ -31,6 +36,135 @@
             if (!code) return 'auto';
             const lower = code.toLowerCase();
             return SOURCE_LANG_NORMALIZE[lower] || code;
+        }
+
+        // v3.13.39: extracted out of init()'s body. init() is re-invoked on
+        // resetSettingsToDefaults() and loadProfile() (a full settings
+        // reload), and secureOn (src/preload/main-preload.js) is a bare
+        // ipcRenderer.on with no dedup — every one of those re-runs used to
+        // register a SECOND copy of every listener below, so a profile
+        // switch mid-session would double (then triple, ...) every status
+        // update, toast, and countdown reset. registerIpcListeners() is now
+        // called exactly once, right before the FIRST init() call, at the
+        // bottom of this file.
+        function registerIpcListeners() {
+            api.onTextractorStatus((status) => { tcpStatus = status; recomputeBadge(); });
+            api.onTranslationResult((data) => {
+                // v3.13.37: the first real translation result IS the "found
+                // dialogue" signal the search countdown is waiting for —
+                // gated to textractor so switching to clipboard/OCR/xuat
+                // mid-search doesn't stop a countdown that isn't showing.
+                if (currentInputMethod === 'textractor') stopSearchCountdown();
+                updateLiveTranslation(data);
+            });
+            api.onTranslationError((data) => updateLiveError(data));
+            api.onShortcutPressed((data) => handleShortcut(data));
+            api.onTextractorCliStatusChanged((status) => updateCliStatus(status));
+            api.onTextractorCliOutput((text) => appendCliOutput(text));
+            api.onTextractorCliError((errorData) => showCliError(errorData));
+            // v3.13.37: backend told us a hook-discovery window just
+            // started (fresh launch or an internal arch-fallback retry) —
+            // show a live countdown instead of a dead "Launch" button.
+            api.onTextractorCliSearchStarted(({ arch, durationMs }) => startSearchCountdown(arch, durationMs));
+            // v3.13.23: x64<->x86 auto-fallback — same "toast + status text"
+            // pattern already used for onOcrEngineFallback below.
+            api.onTextractorCliArchFallback(({ from, to, reason }) => {
+                const t = translations[currentLang] || translations['en'];
+                const template = t.textractor_arch_fallback_toast || '{from} sin resultado, probando {to}...';
+                const notice = template.replace('{from}', from).replace('{to}', to);
+                showToast(notice);
+                // v3.13.32: also remembered here (not just painted once) so
+                // the 'relaunching' case in updateCliStatus can re-show it
+                // across the killed/exited -> relaunching -> launched
+                // sequence the handover actually produces.
+                cliArchFallbackNotice = notice;
+                const text = document.getElementById('cli-status-text');
+                if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + notice + '</span>';
+            });
+            // v3.13.32: was emitted by the launcher (src/main/index.js) but
+            // missing from main-preload.js's ALLOWED_RECEIVE_CHANNELS, so
+            // this listener could never actually fire — a warning meant to
+            // tell the user their PID isn't a running process (which fails
+            // exactly as silently as an architecture mismatch) never
+            // reached the UI. Non-blocking: just a status-text hint.
+            api.onTextractorCliPidWarning(({ pid, message }) => {
+                const text = document.getElementById('cli-status-text');
+                const statusBar = document.getElementById('cli-status-bar');
+                if (text && statusBar) {
+                    statusBar.classList.remove('hidden');
+                    text.innerHTML = '<span class="text-amber-500">⚠ ' + message + '</span>';
+                }
+            });
+            // v3.13.32: a fallback proved which architecture actually works
+            // for this install — see TextractorLauncher's _markArchSuccess
+            // doc. Must update the PATH INPUT itself, not just settings:
+            // maybeAutoLaunchTextractor()/doLaunchTextractor() read
+            // `#textractor-cli-path`'s current DOM value directly, not the
+            // persisted setting, so without this the next auto-launch
+            // would still send the old (proven-broken) path and the whole
+            // discovery would be lost.
+            api.onTextractorCliArchResolved(({ cliPath }) => {
+                const input = document.getElementById('textractor-cli-path');
+                if (input) input.value = cliPath;
+                const t = translations[currentLang] || translations['en'];
+                showToast((t.cli_arch_resolved_toast || 'This architecture works — Tuhua will use it from now on.'));
+            });
+            api.onHooksDiscovered((data) => updateHookSelector(data));
+            api.onOcrStatus((status) => updateOcrStatus(status));
+
+            // v3.13.01-fix: Handle PaddleOCR fallback to Tesseract
+            api.onOcrEngineFallback(({ engine, reason }) => {
+                const t = translations[currentLang] || translations['en'];
+                const selectEl = document.getElementById('ocr-engine-select');
+                const descEl = document.getElementById('ocr-engine-desc');
+                const warningEl = document.getElementById('ocr-paddle-warning');
+                // Update selector to reflect actual engine
+                if (selectEl) selectEl.value = engine;
+                // Show fallback message
+                if (descEl) descEl.textContent = t.ocr_paddle_fallback || `PaddleOCR falló, usando Tesseract: ${reason}`;
+                if (warningEl) warningEl.classList.add('hidden');
+                // Show toast notification
+                showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
+            });
+
+            // XUAT events
+            // v3.11.2: Pass error data to updateXuatStatus for proper error display
+            api.onXuatStatus((data) => {
+                // Update local tracking variable from event data
+                if (data && data.running !== undefined) {
+                    xuatServerRunning = data.running;
+                }
+                updateXuatStatus();
+            });
+            api.onXuatInstallProgress((data) => {
+                if (data.percent && data.percent >= 0) {
+                    document.getElementById('xuat-install-bar').style.width = data.percent + '%';
+                }
+                if (data.status) {
+                    document.getElementById('xuat-install-status').textContent = data.status;
+                }
+                if (data.error) {
+                    document.getElementById('xuat-install-status').textContent = 'Error: ' + data.error;
+                }
+            });
+
+            // XUAT game connected event
+            api.onXuatGameConnected((data) => {
+                if (data && data.name) {
+                    updateXuatConnectedGame(data.name, data.path);
+                }
+            });
+
+            // XUAT translation request event — update counter in real time
+            api.onXuatTranslationRequest((data) => {
+                xuatTranslationCount++;
+                const counterEl = document.getElementById('xuat-translation-counter');
+                const countEl = document.getElementById('xuat-translation-count');
+                if (counterEl && countEl) {
+                    counterEl.classList.remove('hidden');
+                    countEl.textContent = xuatTranslationCount;
+                }
+            });
         }
 
         // ===== INITIALIZATION =====
@@ -127,9 +261,11 @@
                 onFontFamilyChange();
             }
             if (settings.overlayOpacity) { document.getElementById('opacity-range').value = settings.overlayOpacity; document.getElementById('opacity-val').innerText = settings.overlayOpacity + '%'; }
-            if (settings.textractorPort) document.getElementById('textractor-port').value = settings.textractorPort;
             if (settings.textractorCliPath) document.getElementById('textractor-cli-path').value = settings.textractorCliPath;
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
+            // v3.13.37: persisted so auto-launch has a PID to work with
+            // right after Tuhua restarts, without the user re-typing it.
+            if (settings.gamePid) document.getElementById('game-pid').value = settings.gamePid;
             if (settings.debounceMs) { document.getElementById('debounce-range').value = settings.debounceMs; document.getElementById('debounce-val').innerText = settings.debounceMs + 'ms'; }
             if (settings.systemPrompt) document.getElementById('system-prompt').value = settings.systemPrompt;
             if (settings.maxContextHistory !== undefined) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
@@ -164,86 +300,19 @@
 
             // Input method - apply from saved settings
             const savedInputMethod = settings.inputMethod || 'textractor';
+            // v3.13.39: setInputMethod() now ends with recomputeBadge(), so
+            // the immediate 'watching'/'ocr' badge paint that used to live
+            // here is redundant — removing it also removes a stale-code
+            // path that painted the badge WITHOUT going through the derived
+            // state (it would have shown 'ocr' even if translationActive
+            // were false, for example).
             setInputMethod(savedInputMethod);
-
-            // If starting in clipboard mode, update the status badge immediately
-            if (savedInputMethod === 'clipboard') {
-                updateConnectionStatus('watching');
-            } else if (savedInputMethod === 'ocr') {
-                updateConnectionStatus('ocr');
-            }
 
             // Load tabs data
             loadGlossary();
             loadProfiles();
             loadRegexFilters();
             loadHookCleaningSteps();
-
-            // Listen for events
-            api.onTextractorStatus((status) => updateConnectionStatus(status));
-            api.onTranslationResult((data) => updateLiveTranslation(data));
-            api.onTranslationError((data) => updateLiveError(data));
-            api.onShortcutPressed((data) => handleShortcut(data));
-            api.onTextractorCliStatusChanged((status) => updateCliStatus(status));
-            api.onTextractorCliOutput((text) => appendCliOutput(text));
-            api.onTextractorCliError((errorData) => showCliError(errorData));
-            api.onHooksDiscovered((data) => updateHookSelector(data));
-            api.onOcrStatus((status) => updateOcrStatus(status));
-
-            // v3.13.01-fix: Handle PaddleOCR fallback to Tesseract
-            api.onOcrEngineFallback(({ engine, reason }) => {
-                const t = translations[currentLang] || translations['en'];
-                const selectEl = document.getElementById('ocr-engine-select');
-                const descEl = document.getElementById('ocr-engine-desc');
-                const warningEl = document.getElementById('ocr-paddle-warning');
-                // Update selector to reflect actual engine
-                if (selectEl) selectEl.value = engine;
-                // Show fallback message
-                if (descEl) descEl.textContent = t.ocr_paddle_fallback || `PaddleOCR falló, usando Tesseract: ${reason}`;
-                if (warningEl) warningEl.classList.add('hidden');
-                // Show toast notification
-                showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
-            });
-
-            // XUAT events
-            // v3.11.2: Pass error data to updateXuatStatus for proper error display
-            api.onXuatStatus((data) => {
-                // Update local tracking variable from event data
-                if (data && data.running !== undefined) {
-                    xuatServerRunning = data.running;
-                }
-                updateXuatStatus();
-            });
-            api.onXuatInstallProgress((data) => {
-                if (data.percent && data.percent >= 0) {
-                    document.getElementById('xuat-install-bar').style.width = data.percent + '%';
-                }
-                if (data.status) {
-                    document.getElementById('xuat-install-status').textContent = data.status;
-                }
-                if (data.error) {
-                    document.getElementById('xuat-install-status').textContent = 'Error: ' + data.error;
-                }
-            });
-
-            // XUAT game connected event
-            api.onXuatGameConnected((data) => {
-                if (data && data.name) {
-                    updateXuatConnectedGame(data.name, data.path);
-                }
-            });
-
-            // XUAT translation request event — update counter in real time
-            let xuatTranslationCount = 0;
-            api.onXuatTranslationRequest((data) => {
-                xuatTranslationCount++;
-                const counterEl = document.getElementById('xuat-translation-counter');
-                const countEl = document.getElementById('xuat-translation-count');
-                if (counterEl && countEl) {
-                    counterEl.classList.remove('hidden');
-                    countEl.textContent = xuatTranslationCount;
-                }
-            });
 
             // Restore XUAT port from settings
             if (settings.xuatPort) {
@@ -323,6 +392,15 @@
                 if (t[key]) el.innerText = t[key];
             });
 
+            // v3.13.23: Same pattern as [data-i18n], but for the placeholder
+            // attribute of inputs — needed because placeholder text isn't
+            // covered by innerText and was previously stuck hardcoded in
+            // whatever language was typed into the HTML.
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                const key = el.getAttribute('data-i18n-placeholder');
+                if (t[key]) el.placeholder = t[key];
+            });
+
             // Update language selector options (native name + translated name)
             const FLAGS = { auto: '🌐', ja: '🇯🇵', en: '🇺🇸', es: '🇪🇸', zh: '🇨🇳', lzh: '📜', ko: '🇰🇷', ru: '🇷🇺', pt: '🇧🇷', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹', ar: '🇸🇦', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩', tr: '🇹🇷', nl: '🇳🇱', pl: '🇵🇱', uk: '🇺🇦', hi: '🇮🇳' };
             const NATIVE_NAMES = { auto: 'Auto-detect', ja: '日本語', en: 'English', es: 'Español', zh: '中文', lzh: '文言文', ko: '한국어', ru: 'Русский', pt: 'Português', fr: 'Français', de: 'Deutsch', it: 'Italiano', ar: 'العربية', th: 'ไทย', vi: 'Tiếng Việt', id: 'Bahasa Indonesia', tr: 'Türkçe', nl: 'Nederlands', pl: 'Polski', uk: 'Українська', hi: 'हिन्दी' };
@@ -360,6 +438,14 @@
 
             // Update the translation toggle button status text
             updateToggleUI();
+
+            // v3.13.39: updateConnectionStatus() replaces the badge's
+            // innerHTML with a plain span carrying no data-i18n attribute
+            // (see its own comment), so without this the navbar/footer
+            // badges stopped following language changes after their first
+            // paint. recomputeBadge() also repaints with the CURRENT
+            // language's label, not whatever was cached from the last event.
+            recomputeBadge();
 
             api.saveSettings({ uiLanguage: lang });
         }
@@ -693,6 +779,7 @@
             }
             previousInputMethod = method;
             inputMethodInitialized = true;
+            recomputeBadge();
         }
 
         // ===== ENGINE FIELDS =====
@@ -831,14 +918,60 @@
                     label = t.status_xuat || 'XUAT Mode';
                     colorClass = 'bg-purple-50 dark:bg-purple-900/20 text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800/50';
                     break;
+                case 'searching':
+                    // v3.13.39: the up-to-60s window between TextractorCLI
+                    // launching and the first real game text — distinct from
+                    // 'reconnecting' on purpose (nothing is retrying here,
+                    // Textractor is looking). #cli-search-status carries the
+                    // numeric countdown; this is the always-visible summary.
+                    label = t.status_searching || 'Searching for text…';
+                    colorClass = 'bg-amber-50 dark:bg-amber-900/20 text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800/50';
+                    break;
                 default:
                     label = t.status_disconnected;
                     colorClass = 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border-red-200 dark:border-red-800/50';
             }
 
             badge.className = `flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${colorClass}`;
-            const dot = status === 'connected' ? '<span class="w-1.5 h-1.5 rounded-full bg-current pulse-dot"></span>' : '<span class="w-1.5 h-1.5 rounded-full bg-current"></span>';
+            const dot = (status === 'connected' || status === 'searching') ? '<span class="w-1.5 h-1.5 rounded-full bg-current pulse-dot"></span>' : '<span class="w-1.5 h-1.5 rounded-full bg-current"></span>';
             badge.innerHTML = `${dot} <span>${label}</span>`;
+
+            // v3.13.39: #connection-badge-bottom used to be referenced by no
+            // JavaScript at all — it kept the markup's hardcoded gray
+            // "Disconnected" for the whole session, in the footer, directly
+            // under a navbar badge that could say something completely
+            // different. Keeps the footer's muted typography; only the dot
+            // carries colour.
+            const bottom = document.getElementById('connection-badge-bottom');
+            if (bottom) {
+                const DOT = {
+                    connected: 'bg-emerald-500', searching: 'bg-amber-500',
+                    reconnecting: 'bg-yellow-500', watching: 'bg-blue-500',
+                    ocr: 'bg-purple-500', xuat: 'bg-purple-500'
+                };
+                bottom.innerHTML = `<span class="w-1.5 h-1.5 rounded-full ${DOT[status] || 'bg-red-500'}"></span> <span>${label}</span>`;
+            }
+        }
+
+        // v3.13.39: derived badge state — see src/services/badge-state.js
+        // for the full rationale and the decision table itself. Nothing
+        // here paints the badge directly anymore; every call site that used
+        // to call updateConnectionStatus(status) now updates the relevant
+        // piece of state and calls recomputeBadge(), so the badge is always
+        // a pure function of "what's actually happening" rather than
+        // "whatever event arrived last".
+        let tcpStatus = '';
+        let cliEverExtracted = false;
+
+        function recomputeBadge() {
+            updateConnectionStatus(deriveBadgeStatus({
+                currentInputMethod,
+                translationActive,
+                xuatServerRunning,
+                cliRunning,
+                cliEverExtracted,
+                tcpStatus
+            }));
         }
 
         // ===== LIVE TRANSLATION =====
@@ -1638,23 +1771,6 @@
             }
         }
 
-        // ===== TEST CONNECTION =====
-        async function testConnection() {
-            const port = parseInt(document.getElementById('textractor-port').value);
-            const result = await api.testConnection('127.0.0.1', port);
-            const span = document.getElementById('connection-test-result');
-            const t = translations[currentLang] || translations['en'];
-            if (result.success) {
-                span.innerHTML = `<span class="text-emerald-500">✓ ${t.connection_ok}</span>`;
-                // Auto-save the port when test succeeds so it's used on launch
-                api.saveSettings({ textractorPort: port });
-                console.log('[Tuhua] Port auto-saved after successful test:', port);
-            } else {
-                span.innerHTML = `<span class="text-red-500">✗ ${t.connection_fail}</span>`;
-            }
-            setTimeout(() => span.innerHTML = '', 3000);
-        }
-
         // ===== GATHER CONFIG =====
         function gatherConfig() {
             return {
@@ -1670,9 +1786,17 @@
                 overlayOpacity: parseInt(document.getElementById('opacity-range').value),
                 localEndpoint: document.getElementById('local-endpoint').value,
                 localModel: document.getElementById('local-model').value,
-                textractorPort: parseInt(document.getElementById('textractor-port').value),
+                // v3.13.38: textractorPort deliberately OMITTED — the input
+                // and the Advanced Settings section it lived in were removed.
+                // save-settings merges ({...currentSettings, ...data}) and
+                // gates the TCP reconnect on `if (data.textractorPort)`, so
+                // leaving the key out preserves whatever port is already
+                // stored (Lyca's install runs on 6677, not the 9251 default —
+                // sending a hardcoded default here would have silently
+                // overwritten it on the next Save).
                 textractorCliPath: document.getElementById('textractor-cli-path').value.trim(),
                 manualTextractorMode: document.getElementById('manual-textractor-mode').checked,
+                gamePid: parseInt(document.getElementById('game-pid').value) || 0,
                 inputMethod: currentInputMethod,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
                 systemPrompt: document.getElementById('system-prompt').value,
@@ -1733,6 +1857,12 @@
             // 7. Mark as saved (remove visual indicator)
             markSaved();
 
+            // v3.13.37: Save is a "real trigger" for Textractor auto-launch —
+            // covers both a fresh path/PID entry and retrying after a Kill
+            // (see maybeAutoLaunchTextractor's doc for why Kill itself
+            // doesn't auto-retry).
+            maybeAutoLaunchTextractor();
+
             // Update cached settings
             window._lastSettings = await api.getSettings();
 
@@ -1783,15 +1913,12 @@
             api.saveSettings({ translationActive: translationActive });
             updateToggleUI();
 
-            // v3.11.22: When clipboard is paused, show disconnected status instead of "watching"
-            // to make it clear clipboard is no longer being monitored
-            if (currentInputMethod === 'clipboard') {
-                if (translationActive) {
-                    updateConnectionStatus('watching');
-                } else {
-                    updateConnectionStatus('disconnected');
-                }
-            }
+            // v3.11.22: When clipboard is paused, show disconnected status
+            // instead of "watching" to make it clear clipboard is no longer
+            // being monitored — v3.13.39: now via recomputeBadge(), which
+            // derives the same watching/disconnected split from
+            // translationActive (see deriveBadgeStatus).
+            recomputeBadge();
 
             // When OCR is the input method, start/stop OCR session with the main toggle
             if (currentInputMethod === 'ocr') {
@@ -1800,6 +1927,14 @@
                 } else {
                     stopOcrSession();
                 }
+            }
+
+            // v3.13.37: resuming (play) is a "real trigger" for Textractor
+            // auto-launch, same as Save — see maybeAutoLaunchTextractor's
+            // doc. Pausing deliberately does NOT kill the CLI: Kill remains
+            // the only manual stop control.
+            if (currentInputMethod === 'textractor' && translationActive) {
+                maybeAutoLaunchTextractor();
             }
         }
 
@@ -1829,6 +1964,61 @@
 
         // ===== TExtractorCLI FUNCTIONS =====
         let cliRunning = false;
+        // v3.13.32: the amber "x64 sin resultado, probando x86..." text set
+        // by onTextractorCliArchFallback below, re-shown by the
+        // 'relaunching' case in updateCliStatus() so it survives the
+        // status transitions the handover produces (see that function's
+        // doc for why 'relaunching' exists at all).
+        let cliArchFallbackNotice = '';
+        // v3.13.32: latched by the 'error' case, cleared by 'launched' and
+        // by a fresh manual Launch — see updateCliStatus()'s 'exited'/
+        // 'killed' case for the bug this guards (the error panel used to
+        // auto-hide itself 2s after ANY stop, even one carrying a terminal
+        // error the user hadn't had a chance to read).
+        let cliHasTerminalError = false;
+        // v3.13.32: handle for the 2s auto-hide timer scheduled by
+        // 'exited'/'killed' below, so a status that arrives before it
+        // fires (an error, or the relaunch's own 'launched') can cancel it
+        // instead of it unconditionally hiding the bar/error panel later.
+        let cliStatusHideTimer = null;
+
+        // v3.13.37: live countdown for the up-to-ARCH_FALLBACK_CHECK_MAX_MS
+        // (60s) hook-discovery window, driven by the backend's
+        // 'search-started' event. Purely a local 1s ticker — the backend
+        // already told us the total duration, no need to poll it further.
+        let _searchCountdownInterval = null;
+        let _searchCountdownDeadline = 0;
+        let _searchCountdownArch = null;
+
+        function startSearchCountdown(arch, durationMs) {
+            stopSearchCountdown();
+            _searchCountdownArch = arch;
+            _searchCountdownDeadline = Date.now() + durationMs;
+            const el = document.getElementById('cli-search-status');
+            if (!el) return;
+            el.classList.remove('hidden');
+            updateSearchCountdownUI();
+            _searchCountdownInterval = setInterval(updateSearchCountdownUI, 1000);
+        }
+
+        function updateSearchCountdownUI() {
+            const el = document.getElementById('cli-search-status');
+            if (!el) return;
+            const secondsLeft = Math.max(0, Math.round((_searchCountdownDeadline - Date.now()) / 1000));
+            const t = translations[currentLang] || translations['en'];
+            const template = t.cli_search_status || 'Searching {arch} — {seconds}s left';
+            el.textContent = template.replace('{arch}', _searchCountdownArch || '?').replace('{seconds}', secondsLeft);
+            if (secondsLeft <= 0) stopSearchCountdown();
+        }
+
+        function stopSearchCountdown() {
+            if (_searchCountdownInterval) {
+                clearInterval(_searchCountdownInterval);
+                _searchCountdownInterval = null;
+            }
+            const el = document.getElementById('cli-search-status');
+            if (el) el.classList.add('hidden');
+        }
 
         async function browseTextractorCli() {
             const result = await api.textractorBrowseCli();
@@ -1842,7 +2032,8 @@
 
             if (result.valid) {
                 if (result.autoResolved) {
-                    status.innerHTML = '<span class="text-blue-500">✓ Auto-detectado</span>';
+                    const t = translations[currentLang] || translations['en'];
+                    status.innerHTML = '<span class="text-blue-500">✓ ' + (t.cli_auto_detected || 'Auto-detected') + '</span>';
                 } else {
                     status.innerHTML = '<span class="text-emerald-500">✓</span>';
                 }
@@ -1862,39 +2053,40 @@
             api.saveSettings({ textractorCliPath: result.path });
         }
 
-        async function launchTextractorCli() {
-            const cliPath = document.getElementById('textractor-cli-path').value.trim();
-            const gamePid = parseInt(document.getElementById('game-pid').value);
+        // v3.13.37: extracted from the old manual launchTextractorCli() so
+        // both the auto-launch path (maybeAutoLaunchTextractor, below) and
+        // any future manual trigger share one implementation. cliPath/
+        // gamePid are passed in rather than re-read from the DOM so a
+        // caller can validate them first (see maybeAutoLaunchTextractor).
+        async function doLaunchTextractor(cliPath, gamePid) {
+            // v3.13.32: a fresh launch starts clean — don't carry over an
+            // amber arch-fallback notice or a latched terminal-error flag
+            // from whatever the previous session ended with (see
+            // updateCliStatus's 'launched'/'error'/'exited' cases for what
+            // these guard).
+            cliArchFallbackNotice = '';
+            cliHasTerminalError = false;
+            // v3.13.39: a fresh launch hasn't proven anything yet — the
+            // badge must not stay green off a PREVIOUS process's proof.
+            cliEverExtracted = false;
+            if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
 
-            if (!cliPath) {
-                await browseTextractorCli();
-                return;
-            }
-
-            if (!gamePid || gamePid <= 0) {
-                const status = document.getElementById('cli-status-bar');
-                const text = document.getElementById('cli-status-text');
-                status.classList.remove('hidden');
-                text.innerHTML = '<span class="text-red-500">⚠ PID requerido</span>';
-                setTimeout(() => status.classList.add('hidden'), 3000);
-                return;
-            }
-
-            // Disable launch button, show kill button
-            document.getElementById('btn-launch-cli').classList.add('hidden');
             document.getElementById('btn-kill-cli').classList.remove('hidden');
 
-            // Pass the port from the UI to the backend (fix: port wasn't being used on launch)
-            const textractorPort = parseInt(document.getElementById('textractor-port').value);
-            const result = await api.textractorLaunch(cliPath, gamePid, textractorPort);
+            // v3.13.38: no port input left in the UI (see gatherConfig's
+            // comment) — pass undefined and let ipc-handlers.js's existing
+            // fallback chain resolve it: requestedPort || store.get('textractorPort') || 9251.
+            const result = await api.textractorLaunch(cliPath, gamePid, undefined);
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
             status.classList.remove('hidden');
 
             if (result.success) {
+                const t = translations[currentLang] || translations['en'];
                 cliRunning = true;
-                text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: Ejecutándose</span> (PID: ' + gamePid + ')';
+                text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span> (PID: ' + gamePid + ')';
                 document.getElementById('cli-pid-text').innerText = 'CLI PID: ...';
+                recomputeBadge();
                 // Update CLI process PID after a short delay
                 setTimeout(async () => {
                     const s = await api.textractorCliStatus();
@@ -1903,22 +2095,47 @@
                     }
                 }, 1000);
             } else {
-                text.innerHTML = '<span class="text-red-500">✗ Error: ' + (result.error || 'Desconocido') + '</span>';
-                document.getElementById('btn-launch-cli').classList.remove('hidden');
+                const t = translations[currentLang] || translations['en'];
+                text.innerHTML = '<span class="text-red-500">✗ Error: ' + (result.error || t.cli_unknown_error || 'Unknown') + '</span>';
                 document.getElementById('btn-kill-cli').classList.add('hidden');
+                cliRunning = false;
+                recomputeBadge();
                 setTimeout(() => status.classList.add('hidden'), 5000);
             }
+        }
+
+        // v3.13.37: replaces the manual "Lanzar" button — Textractor now
+        // launches itself whenever there's something real to react to
+        // (Save, resuming from pause, leaving manual mode), as long as
+        // Tuhua isn't already running it. Silent no-ops (missing path/PID,
+        // manual mode, paused, already running) are intentional: this is
+        // called opportunistically from several places, not from a single
+        // explicit user action, so it shouldn't surface an error for
+        // "nothing to do yet". Kill remains the only manual stop control,
+        // and — deliberately — killing does NOT block a future auto-launch
+        // here; it just means none of these triggers have fired again yet.
+        async function maybeAutoLaunchTextractor() {
+            if (currentInputMethod !== 'textractor') return;
+            if (document.getElementById('manual-textractor-mode').checked) return;
+            if (!translationActive) return;
+            if (cliRunning) return;
+            const cliPath = document.getElementById('textractor-cli-path').value.trim();
+            const gamePid = parseInt(document.getElementById('game-pid').value);
+            if (!cliPath || !gamePid || gamePid <= 0) return;
+            await doLaunchTextractor(cliPath, gamePid);
         }
 
         async function killTextractorCli() {
             await api.textractorKill();
             cliRunning = false;
-            document.getElementById('btn-launch-cli').classList.remove('hidden');
+            cliEverExtracted = false;
+            recomputeBadge();
             document.getElementById('btn-kill-cli').classList.add('hidden');
 
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
-            text.innerHTML = '<span class="text-gray-400">TextractorCLI: Detenido</span>';
+            const t = translations[currentLang] || translations['en'];
+            text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
             document.getElementById('cli-pid-text').innerText = '';
             setTimeout(() => status.classList.add('hidden'), 2000);
         }
@@ -1927,24 +2144,71 @@
             const text = document.getElementById('cli-status-text');
             const statusBar = document.getElementById('cli-status-bar');
             const errorDetail = document.getElementById('cli-error-detail');
+            const t = translations[currentLang] || translations['en'];
             statusBar.classList.remove('hidden');
 
             switch (status) {
                 case 'launched':
                     cliRunning = true;
-                    text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: Ejecutándose</span>';
+                    // v3.13.39: a fresh 'launched' means a new process — it
+                    // hasn't proven it can extract real text yet.
+                    cliEverExtracted = false;
+                    // v3.13.32: a relaunch (arch fallback) is now over —
+                    // clear both the amber notice and any stale hide timer
+                    // from the 'relaunching'/'exited' transitions that led
+                    // here, so this 'launched' reads as an honest running
+                    // state, not a fallback still in progress.
+                    cliArchFallbackNotice = '';
+                    cliHasTerminalError = false;
+                    if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
+                    text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span>';
                     errorDetail.classList.add('hidden');
-                    document.getElementById('btn-launch-cli').classList.add('hidden');
+                    document.getElementById('btn-kill-cli').classList.remove('hidden');
+                    break;
+                case 'relaunching':
+                    // v3.13.32: NOT a stop. The launcher killed the current
+                    // process on purpose and is spawning the sibling
+                    // architecture ~300ms later — see _emitStatus()'s doc
+                    // in textractor-launcher.js. This used to arrive as
+                    // plain 'killed'/'exited', which the case below maps
+                    // to "user stopped it": the Launch button reappeared
+                    // and the whole status bar hid itself 2s later,
+                    // erasing the amber "probando x86..." notice and
+                    // inviting the click that restarted the entire 2x60s
+                    // discovery cycle from scratch (a real, reported loop).
+                    // Kept the Stop button showing and cliRunning true so
+                    // the user can still cancel the handover if they want.
+                    cliRunning = true;
+                    cliHasTerminalError = false;
+                    // v3.13.39: the sibling architecture is a NEW process —
+                    // back to amber "searching" until it proves itself too.
+                    cliEverExtracted = false;
+                    if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
+                    text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + (cliArchFallbackNotice || t.cli_relaunching_status || 'Switching architecture...') + '</span>';
+                    errorDetail.classList.add('hidden');
                     document.getElementById('btn-kill-cli').classList.remove('hidden');
                     break;
                 case 'exited':
                 case 'killed':
                     cliRunning = false;
-                    text.innerHTML = '<span class="text-gray-400">TextractorCLI: Detenido</span>';
-                    document.getElementById('btn-launch-cli').classList.remove('hidden');
+                    cliEverExtracted = false;
+                    stopSearchCountdown();
+                    text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + (t.cli_stopped_status || 'Stopped') + '</span>';
                     document.getElementById('btn-kill-cli').classList.add('hidden');
-                    setTimeout(() => {
-                        if (!cliRunning) {
+                    // v3.13.32: cancelable now, and gated on !cliHasTerminalError
+                    // — this timer used to unconditionally hide
+                    // #cli-error-detail 2s after ANY stop, including one
+                    // that just carried a terminal error the user hadn't
+                    // had a chance to read yet (showCliError's OWN 15s
+                    // auto-hide never got a chance to run: this 2s one
+                    // always won the race). A previous investigation
+                    // relied on the "silent failure" this caused as
+                    // evidence something was un-diagnosable — it wasn't
+                    // silent, it was erased.
+                    if (cliStatusHideTimer) clearTimeout(cliStatusHideTimer);
+                    cliStatusHideTimer = setTimeout(() => {
+                        cliStatusHideTimer = null;
+                        if (!cliRunning && !cliHasTerminalError) {
                             errorDetail.classList.add('hidden');
                             statusBar.classList.add('hidden');
                         }
@@ -1952,23 +2216,57 @@
                     break;
                 case 'error':
                     cliRunning = false;
-                    text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: Error</span>';
-                    document.getElementById('btn-launch-cli').classList.remove('hidden');
+                    cliHasTerminalError = true;
+                    cliEverExtracted = false;
+                    stopSearchCountdown();
+                    if (cliStatusHideTimer) { clearTimeout(cliStatusHideTimer); cliStatusHideTimer = null; }
+                    text.innerHTML = '<span class="text-red-500">✗ TextractorCLI: ' + (t.cli_error_status || 'Error') + '</span>';
                     document.getElementById('btn-kill-cli').classList.add('hidden');
                     break;
                 case 'extracting':
                     cliRunning = true;
-                    text.innerHTML = '<span class="text-emerald-500 pulse-dot">● TextractorCLI: Extrayendo texto</span>';
+                    // v3.13.39: THE signal the navbar badge was missing —
+                    // real, deduped game text reached the pipeline. Only
+                    // 'stdout-active' (textractor-launcher.js) drives this,
+                    // so the badge can't go green off mere process liveness.
+                    cliEverExtracted = true;
+                    text.innerHTML = '<span class="text-emerald-500 pulse-dot">● TextractorCLI: ' + (t.cli_extracting_status || 'Extracting text') + '</span>';
                     errorDetail.classList.add('hidden');
                     break;
                 default:
                     text.innerHTML = '<span class="text-gray-400">TextractorCLI: ' + status + '</span>';
             }
+
+            // v3.13.39: one call site covers every case above, including
+            // 'configured' and any other value that falls to default —
+            // recomputeBadge() only reads cliRunning/cliEverExtracted, both
+            // already updated by the branch that ran.
+            recomputeBadge();
+        }
+
+        /**
+         * v3.13.24: textractor-launcher.js's hint/message strings used to
+         * ship hardcoded in Spanish regardless of UI language. The backend
+         * now sends a stable `xKey` (+ optional `xParams` for dynamic bits
+         * like a PID or path) alongside the English-fallback string —
+         * this looks the key up in the current language's dictionary and
+         * substitutes `{param}` placeholders, falling back to the raw
+         * string from the backend if the key is missing or untranslated.
+         */
+        function translateHintKey(key, params, fallback) {
+            const t = translations[currentLang] || translations['en'];
+            let text = (key && t[key]) || fallback || '';
+            if (params) {
+                for (const [k, v] of Object.entries(params)) {
+                    text = text.split('{' + k + '}').join(v);
+                }
+            }
+            return text;
         }
 
         /**
          * Show detailed CLI error information (v3.8.23)
-         * errorData = { message, code, severity, hint, stderr, stdout, gamePid, cliPath, timestamp }
+         * errorData = { message, messageKey, messageParams, code, severity, hint, hintKey, hintParams, stderr, stdout, gamePid, cliPath, timestamp }
          */
         function showCliError(errorData) {
             const errorDetail = document.getElementById('cli-error-detail');
@@ -1981,11 +2279,12 @@
             errorDetail.classList.remove('hidden');
 
             // Main error message
-            errorMessage.textContent = errorData.message || 'Error desconocido';
+            errorMessage.textContent = translateHintKey(errorData.messageKey, errorData.messageParams, errorData.message) || 'Unknown error';
 
             // Helpful hint
-            if (errorData.hint) {
-                errorHint.textContent = '💡 ' + errorData.hint;
+            const hintText = translateHintKey(errorData.hintKey, errorData.hintParams, errorData.hint);
+            if (hintText) {
+                errorHint.textContent = '💡 ' + hintText;
                 errorHint.classList.remove('hidden');
             } else {
                 errorHint.classList.add('hidden');
@@ -2036,19 +2335,21 @@
             const errorDetail = document.getElementById('cli-error-detail');
 
             // Show testing state
+            const t = translations[currentLang] || translations['en'];
             btn.disabled = true;
             btn.innerHTML = '<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Test...</span>';
             statusBar.classList.remove('hidden');
-            statusText.innerHTML = '<span class="text-blue-500">⏳ Probando TextractorCLI...</span>';
+            statusText.innerHTML = '<span class="text-blue-500">⏳ ' + (t.cli_testing_status || 'Testing TextractorCLI...') + '</span>';
             errorDetail.classList.add('hidden');
 
             try {
                 const result = await api.textractorTestCli(cliPath);
 
                 if (result.canStart) {
-                    statusText.innerHTML = '<span class="text-emerald-500">✓ TextractorCLI funciona correctamente</span>';
-                    if (result.hint) {
-                        statusText.innerHTML += '<span class="text-[9px] text-gray-400 ml-1">(' + result.hint + ')</span>';
+                    statusText.innerHTML = '<span class="text-emerald-500">✓ ' + (t.cli_works_correctly || 'TextractorCLI works correctly') + '</span>';
+                    const okHint = translateHintKey(result.hintKey, result.hintParams, result.hint);
+                    if (okHint) {
+                        statusText.innerHTML += '<span class="text-[9px] text-gray-400 ml-1">(' + okHint + ')</span>';
                     }
                     // Save the resolved path on successful test (folder -> x64/Textractor.exe)
                     const pathToSave = result.resolvedPath || cliPath;
@@ -2058,19 +2359,22 @@
                         if (!cliRunning) statusBar.classList.add('hidden');
                     }, 3000);
                 } else {
-                    statusText.innerHTML = '<span class="text-red-500">✗ TextractorCLI no pudo iniciar</span>';
+                    statusText.innerHTML = '<span class="text-red-500">✗ ' + (t.cli_failed_to_start_status || 'TextractorCLI failed to start') + '</span>';
                     // Show detailed error
                     showCliError({
-                        message: 'TextractorCLI no pudo iniciar',
+                        message: 'TextractorCLI failed to start',
+                        messageKey: 'hint_cli_failed_to_start',
                         code: result.exitCode,
                         severity: 'error',
-                        hint: result.hint || 'Verifica que el archivo exista y las DLLs estén presentes.',
+                        hintKey: result.hintKey,
+                        hintParams: result.hintParams,
+                        hint: result.hint || 'Verify the file exists and the DLLs are present.',
                         stderr: result.stderr || '',
                         stdout: result.stdout || ''
                     });
                 }
             } catch (err) {
-                statusText.innerHTML = '<span class="text-red-500">✗ Error al probar: ' + (err.message || 'Desconocido') + '</span>';
+                statusText.innerHTML = '<span class="text-red-500">✗ ' + (t.cli_test_error_prefix || 'Error testing') + ': ' + (err.message || t.cli_unknown_error || 'Unknown') + '</span>';
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg><span>Test</span>';
@@ -2085,7 +2389,6 @@
         function toggleManualMode(enabled) {
             const cliPathInput = document.getElementById('textractor-cli-path');
             const gamePidInput = document.getElementById('game-pid');
-            const launchBtn = document.getElementById('btn-launch-cli');
             const killBtn = document.getElementById('btn-kill-cli');
 
             if (enabled) {
@@ -2094,8 +2397,6 @@
                 cliPathInput.classList.add('opacity-50');
                 gamePidInput.disabled = true;
                 gamePidInput.classList.add('opacity-50');
-                launchBtn.disabled = true;
-                launchBtn.classList.add('opacity-50');
                 killBtn.disabled = true;
                 killBtn.classList.add('opacity-50');
                 // Connect directly to TCP
@@ -2105,11 +2406,12 @@
                 cliPathInput.classList.remove('opacity-50');
                 gamePidInput.disabled = false;
                 gamePidInput.classList.remove('opacity-50');
-                launchBtn.disabled = false;
-                launchBtn.classList.remove('opacity-50');
                 killBtn.disabled = false;
                 killBtn.classList.remove('opacity-50');
                 api.saveSettings({ manualTextractorMode: false });
+                // v3.13.37: leaving manual mode is a "real trigger" for
+                // auto-launch — see maybeAutoLaunchTextractor's doc.
+                maybeAutoLaunchTextractor();
             }
         }
 
@@ -2130,27 +2432,52 @@
             }
         }
 
-        function updateHookPreview(hook) {
+        function updateHookPreview(hook, isAutoMode) {
             const previewDiv = document.getElementById('hook-preview');
             const previewText = document.getElementById('hook-preview-text');
+            const scoreEl = document.getElementById('hook-preview-score');
             if (hook && hook.lastText) {
                 previewDiv.classList.remove('hidden');
                 previewText.textContent = hook.lastText;
+                // v3.13.23: show _autoSelectBestHook's score so the user can
+                // see why this hook was picked instead of only finding out
+                // from the log — only makes sense in Auto mode, since a
+                // manually-selected hook wasn't scored to reach that state.
+                if (isAutoMode && scoreEl && hook.score !== null && hook.score !== undefined) {
+                    const t = translations[currentLang] || translations['en'];
+                    const label = t.hook_auto_score_label || 'Auto-seleccionado — puntaje';
+                    let detail = `🎯 ${label}: ${hook.score}`;
+                    if (hook.hasCJK) detail += ' · CJK';
+                    if (hook.qualityPenalty > 0) detail += ` · -${hook.qualityPenalty} ${t.hook_quality_penalty_label || 'calidad'}`;
+                    scoreEl.textContent = detail;
+                    scoreEl.classList.remove('hidden');
+                } else if (scoreEl) {
+                    scoreEl.classList.add('hidden');
+                }
             } else {
                 previewDiv.classList.add('hidden');
             }
         }
 
         function updateHookSelector(data) {
-            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks }
+            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks, noRealHookFound }
             _discoveredHooks = data.hooks || [];
             const section = document.getElementById('hook-selector-section');
             const selector = document.getElementById('hook-selector');
             const countBadge = document.getElementById('hook-count-badge');
+            const noRealWarning = document.getElementById('hook-no-real-warning');
 
             // Show section if there are hooks
             if (_discoveredHooks.length > 0) {
                 section.classList.remove('hidden');
+            }
+
+            // v3.13.24: only Console/Clipboard seen so far — Tuhua isn't
+            // silently translating that as if it were game text (see
+            // _autoSelectBestHook's guard), so make that visible instead of
+            // the panel just looking idle with no explanation.
+            if (noRealWarning) {
+                noRealWarning.classList.toggle('hidden', !data.noRealHookFound);
             }
 
             countBadge.textContent = _discoveredHooks.length + ' hook' + (_discoveredHooks.length !== 1 ? 's' : '');
@@ -2210,7 +2537,7 @@
             // Update preview for active hook
             const activeHook = _discoveredHooks.find(h => h.key === data.activeHookKey);
             if (activeHook) {
-                updateHookPreview(activeHook);
+                updateHookPreview(activeHook, !data.selectedHookKey);
             }
         }
 
@@ -2398,8 +2725,10 @@
                 if (currentInputMethod === 'xuat') {
                     translationActive = status.running;
                     updateToggleUI();
-                    // v3.11.3: Keep connection badge in sync with server status
-                    updateConnectionStatus(status.running ? 'xuat' : 'disconnected');
+                    // v3.11.3 / v3.13.39: xuatServerRunning was already
+                    // updated above (line ~2661) — recomputeBadge() derives
+                    // xuat/disconnected from it the same way this used to.
+                    recomputeBadge();
                 }
             } catch (err) {
                 console.error('[XUAT] Status check error:', err);
@@ -2909,4 +3238,9 @@
         }
 
         // ===== INIT =====
+        // v3.13.39: registered exactly once here — init() itself is
+        // re-invoked on resetSettingsToDefaults()/loadProfile() and must
+        // NOT re-register listeners each time (see registerIpcListeners's
+        // doc for the bug this fixes).
+        registerIpcListeners();
         init();

@@ -26,27 +26,48 @@ class TextractorConnector extends EventEmitter {
     this.baseReconnectDelay = 1000;
     this.lastTextHash = '';
     this.buffer = Buffer.alloc(0);
+    // v3.13.39: incremented on every _createSocket() call — see the
+    // generation guard in that method for why this exists.
+    this._socketGeneration = 0;
 
     this._createSocket();
   }
 
   _createSocket() {
-    this.client = new net.Socket();
-    this.client.setKeepAlive(true, 10000);
-    this.client.setTimeout(0); // No idle timeout for persistent connections
+    // v3.13.39: every handler below closes over `this`, not over the
+    // specific socket it was registered on. Before this generation guard
+    // existed, a PREVIOUS socket's async 'close' event drove the CURRENT
+    // connector's state machine — reproduced directly: reconfigure()
+    // destroys the old socket and creates a new one via this method, calls
+    // connect() on the new one, and only THEN does the dead socket's
+    // 'close' land, wiping isConnecting and arming a reconnect for a
+    // connection that was already in flight — a real EALREADY, measured
+    // against a live net.createServer listener. Same fix, same shape, as
+    // TextractorLauncher's _launchGeneration (v3.13.32).
+    const generation = ++this._socketGeneration;
+    const sock = new net.Socket();
+    this.client = sock;
+    sock.setKeepAlive(true, 10000);
+    sock.setTimeout(0); // No idle timeout for persistent connections
 
-    this.client.on('connect', () => {
+    sock.on('connect', () => {
+      if (generation !== this._socketGeneration) return;
       this.isConnected = true;
       this.isConnecting = false;
       this.reconnectAttempts = 0;
       this.emit('status', 'connected');
     });
 
-    this.client.on('data', (data) => {
+    sock.on('data', (data) => {
+      if (generation !== this._socketGeneration) return;
       this._processData(data);
     });
 
-    this.client.on('close', (hadError) => {
+    sock.on('close', (hadError) => {
+      if (generation !== this._socketGeneration) {
+        console.log(`[Textractor] Ignoring 'close' from superseded socket #${generation} (current #${this._socketGeneration})`);
+        return;
+      }
       this.isConnected = false;
       this.isConnecting = false;
       this.emit('status', 'disconnected');
@@ -55,7 +76,8 @@ class TextractorConnector extends EventEmitter {
       }
     });
 
-    this.client.on('error', (err) => {
+    sock.on('error', (err) => {
+      if (generation !== this._socketGeneration) return;
       this.isConnected = false;
       this.isConnecting = false;
       // EISCONN means we tried to connect a socket that's already connected.
@@ -68,7 +90,8 @@ class TextractorConnector extends EventEmitter {
       this.emit('error', err);
     });
 
-    this.client.on('timeout', () => {
+    sock.on('timeout', () => {
+      if (generation !== this._socketGeneration) return;
       this.emit('status', 'timeout');
     });
   }
@@ -80,16 +103,19 @@ class TextractorConnector extends EventEmitter {
     // This prevents EISCONN errors when multiple connect() calls overlap.
     if (this.isConnecting) return;
 
-    // Check if the socket is already connected or connecting before calling connect()
-    if (this.client && !this.client.destroyed) {
-      const state = this.client.readyState;
-      if (state === 'open' || state === 'opening') {
-        // Socket is already connected or connecting — skip
-        this.isConnected = (state === 'open');
-        this.isConnecting = (state === 'opening');
-        return;
-      }
-    }
+    // v3.13.39: a readyState pre-check used to live here, and it was the
+    // reason the TCP channel never connected for anyone. A freshly
+    // constructed net.Socket() reports readyState === 'open' on Node 18/20
+    // (readable && writable, connecting false) — measured — so that guard
+    // matched on EVERY new socket, set isConnected = true (a lie), and
+    // returned WITHOUT ever calling client.connect(). No SYN was ever sent.
+    // Its stated purpose (avoiding EISCONN from overlapping connect()
+    // calls) is already fully covered by the isConnected/isConnecting
+    // checks above: connect-while-connected returns at the isConnected
+    // guard, connect-while-connecting returns at the isConnecting guard.
+    // What actually produced an overlapping call was a stale socket's
+    // 'close' resetting isConnecting on the current connector — fixed by
+    // the generation guard in _createSocket(), not by a readyState check.
 
     try {
       this.isConnecting = true;
@@ -112,6 +138,10 @@ class TextractorConnector extends EventEmitter {
       }
     }
     this.isConnected = false;
+    // v3.13.39: reconfigure() already clears isConnecting, but the
+    // textractor-kill IPC handler calls disconnect() alone and used to
+    // leave a stale true behind, blocking any future connect() attempt.
+    this.isConnecting = false;
     this.emit('status', 'disconnected');
   }
 

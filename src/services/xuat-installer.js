@@ -635,6 +635,16 @@ class XuatInstaller extends EventEmitter {
    */
   async runFullInstall(exePath, port, sourceLang = 'ja', targetLang = 'en') {
     try {
+      // v3.13.29: same check _extractZip already had (kept there too, as
+      // defense in depth for any other caller), but moved up here first —
+      // before this method downloads BepInEx and XUnity.AutoTranslator
+      // from GitHub, writes them to a temp dir, and starts extracting.
+      // Guarding only inside _extractZip meant a macOS/Linux user paid for
+      // the full download before ever hitting the platform check.
+      if (os.platform() !== 'win32') {
+        throw new Error('XUAT installer only supports Windows (Unity games require Windows).');
+      }
+
       // Step 1: Detect Unity game
       this.emit('status', 'Detecting game...');
       this.emit('progress', { stage: 'detect', percent: 5 });
