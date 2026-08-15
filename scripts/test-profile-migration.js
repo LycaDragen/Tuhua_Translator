@@ -259,11 +259,11 @@ check('already-v1-store-changed-is-false', () => {
 
 // ─── Dead settings stripped ─────────────────────────────────────────
 check('dead-settings-are-stripped', () => {
-  const settings = { perProfileGlossary: true, enableGlossary: true, enableCache: true, autoApplyGlossary: true, deeplKey: 'x' };
+  const settings = { perProfileGlossary: true, enableGlossary: true, enableCache: true, autoApplyGlossary: true, showSourceTextInOverlay: true, deeplKey: 'x' };
   const result = migrateProfiles({ profiles: [], settings, globalGlossaryEntries: [], activeProfile: 'Por Defecto' });
-  const stillPresent = ['perProfileGlossary', 'enableGlossary', 'enableCache', 'autoApplyGlossary'].filter((k) => Object.prototype.hasOwnProperty.call(result.settings, k));
+  const stillPresent = ['perProfileGlossary', 'enableGlossary', 'enableCache', 'autoApplyGlossary', 'showSourceTextInOverlay'].filter((k) => Object.prototype.hasOwnProperty.call(result.settings, k));
   return { pass: stillPresent.length === 0, actual: stillPresent };
-});
+}, 'showSourceTextInOverlay added in step 8 (v3.13.44) — looked legitimate (translated label across 8 locales) but had zero actual wiring, same dead-setting class as the original four.');
 
 // ─── ProfileStore#migrate() wrapper: version gate + one write ─────────
 check('profile-store-migrate-runs-once-and-gates-by-version', () => {

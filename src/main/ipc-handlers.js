@@ -83,62 +83,23 @@ class IpcHandlers {
     this.registered = true;
 
     // ===== Settings =====
+    // v3.13.44 (profiles Phase 1, step 8): this used to migrate old
+    // dot-notation keys (glossary.perProfile, glossary.autoApply,
+    // overlay.showSourceText) into flat keys (perProfileGlossary,
+    // autoApplyGlossary, showSourceTextInOverlay) — all three flat keys
+    // are now gone, dead themselves: declared as store defaults but never
+    // read by any pipeline/UI code. showSourceTextInOverlay in particular
+    // looked legitimate (translated UI label + description in all 8
+    // locales) but had zero wiring — update-output's payload to the
+    // output overlay is always just {text, targetLang}, never the
+    // original text, and no checkbox in index.html ever referenced the
+    // show_source_text i18n key (removed alongside it, see i18n.js).
+    // profile-migrations.js's DEAD_SETTING_KEYS already strips all five
+    // from existing users' persisted settings on the one-time v0→v1
+    // profile migration, so this handler needs no migration logic at all
+    // anymore.
     ipcMain.handle('get-settings', () => {
-      const settings = this.store.get() || {};
-      // Migration: convert old dot-notation keys to flat keys
-      // electron-store's set() with dot-notation keys creates nested objects,
-      // but get() with dot-notation reads nested paths — causing mismatch.
-      // We migrate to flat keys (perProfileGlossary, autoApplyGlossary, showSourceTextInOverlay).
-      let migrated = false;
-      if (settings.glossary && typeof settings.glossary === 'object' && !Array.isArray(settings.glossary)) {
-        if (settings.glossary.perProfile !== undefined && settings.perProfileGlossary === undefined) {
-          settings.perProfileGlossary = settings.glossary.perProfile;
-          delete settings.glossary.perProfile;
-          migrated = true;
-        }
-        if (settings.glossary.autoApply !== undefined && settings.autoApplyGlossary === undefined) {
-          settings.autoApplyGlossary = settings.glossary.autoApply;
-          delete settings.glossary.autoApply;
-          migrated = true;
-        }
-        // If glossary object is now empty (no more nested keys), remove it
-        if (Object.keys(settings.glossary).length === 0) {
-          delete settings.glossary;
-          migrated = true;
-        }
-      }
-      // Also check for flat dot-key stored by old code
-      if (settings['glossary.perProfile'] !== undefined && settings.perProfileGlossary === undefined) {
-        settings.perProfileGlossary = settings['glossary.perProfile'];
-        delete settings['glossary.perProfile'];
-        migrated = true;
-      }
-      if (settings['glossary.autoApply'] !== undefined && settings.autoApplyGlossary === undefined) {
-        settings.autoApplyGlossary = settings['glossary.autoApply'];
-        delete settings['glossary.autoApply'];
-        migrated = true;
-      }
-      if (settings.overlay && typeof settings.overlay === 'object') {
-        if (settings.overlay.showSourceText !== undefined && settings.showSourceTextInOverlay === undefined) {
-          settings.showSourceTextInOverlay = settings.overlay.showSourceText;
-          delete settings.overlay.showSourceText;
-          migrated = true;
-        }
-        if (Object.keys(settings.overlay).length === 0) {
-          delete settings.overlay;
-          migrated = true;
-        }
-      }
-      if (settings['overlay.showSourceText'] !== undefined && settings.showSourceTextInOverlay === undefined) {
-        settings.showSourceTextInOverlay = settings['overlay.showSourceText'];
-        delete settings['overlay.showSourceText'];
-        migrated = true;
-      }
-      if (migrated) {
-        this.store.set(settings);
-        console.log('[Tuhua] Settings migrated: dot-notation keys converted to flat keys');
-      }
-      return settings;
+      return this.store.get() || {};
     });
 
     ipcMain.handle('save-settings', async (event, data) => {
