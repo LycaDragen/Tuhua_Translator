@@ -1,7 +1,12 @@
         const api = window.tuhuaAPI;
         let currentLang = 'es';
         let currentInputMethod = 'textractor';
+        // v3.13.40: two layers — global (glossaryEntries) and the active
+        // profile's own (profileGlossaryEntries). currentGlossaryScope
+        // picks which one the Glosario tab is currently showing/editing.
         let glossaryEntries = [];
+        let profileGlossaryEntries = [];
+        let currentGlossaryScope = 'global';
         let historyEntries = [];
         let profileList = [];
         let translationActive = true;
@@ -14,9 +19,13 @@
         // Staged glossary changes — entries added/deleted before save
         let stagedGlossaryAdds = [];    // entries to add on save
         let stagedGlossaryDeletes = []; // entry IDs to delete on save
-        // Staged profile changes — profiles created/deleted before save
-        let stagedProfileCreates = [];  // { name } — profiles to create on save
-        let stagedProfileDeletes = [];  // profile names to delete on save
+        // v3.13.40: profile create/rename/duplicate/delete are no longer
+        // staged — they're immediate IPC calls (see the Profiles section
+        // below). Staging them was what caused create-profile's silent
+        // "clone the active profile" default in the first place: the
+        // staged {name} object carried no memory of what the user saw on
+        // screen, so the backend had to guess a source profile at flush
+        // time.
         // v3.13.39: was declared inside init()'s listener block, where
         // registerIpcListeners() (see its own doc) used to live inline —
         // hoisted to module scope so the extraction doesn't change its
@@ -171,6 +180,15 @@
         async function init() {
             if (!api) { console.error('API not available - running outside Electron?'); return; }
 
+            // v3.13.40: was a hardcoded "v3.13.14" string in index.html,
+            // stale for many releases (real version was 3.13.39). Reads
+            // package.json via api.version instead — see main-preload.js's
+            // comment for why it reads the file directly rather than
+            // process.env.npm_package_version, so this stays correct in a
+            // packaged build too, not only under `pnpm start`.
+            const versionBadge = document.getElementById('app-version-badge');
+            if (versionBadge && api.version) versionBadge.textContent = 'v' + api.version;
+
             const settings = await api.getSettings();
 
             // Apply saved settings
@@ -276,10 +294,6 @@
                 document.getElementById('click-through-toggle').checked = settings.clickThrough;
             }
 
-            // Per-Profile Glossary toggle - restore from saved settings
-            if (settings.perProfileGlossary !== undefined) {
-                document.getElementById('per-profile-glossary-toggle').checked = settings.perProfileGlossary;
-            }
 
             // Cache settings for modal restore
             window._lastSettings = settings;
@@ -366,8 +380,6 @@
             hasUnsavedChanges = false;
             stagedGlossaryAdds = [];
             stagedGlossaryDeletes = [];
-            stagedProfileCreates = [];
-            stagedProfileDeletes = [];
             // v3.11.33: Clear staged regex filter changes
             stagedRegexToggles = {};
             stagedRegexAdds = [];
@@ -447,6 +459,14 @@
             // language's label, not whatever was cached from the last event.
             recomputeBadge();
 
+            // v3.13.40: same reason as recomputeBadge() above — the
+            // profile cards' default-name label and "Default" badge are
+            // computed strings (displayProfileName()), not static
+            // data-i18n text, so they need an explicit repaint to follow
+            // a language change instead of staying stuck in whatever
+            // language they were first rendered in.
+            if (profileList.length) renderProfiles();
+
             api.saveSettings({ uiLanguage: lang });
         }
 
@@ -499,10 +519,6 @@
             stagedGlossaryAdds = [];
             stagedGlossaryDeletes = [];
 
-            // Clear staged profile changes
-            stagedProfileCreates = [];
-            stagedProfileDeletes = [];
-
             // v3.11.33: Clear staged regex filter changes
             stagedRegexToggles = {};
             stagedEnableRegexFilter = null;
@@ -510,7 +526,8 @@
             // Reload glossary from backend (removes locally-added entries)
             await loadGlossary();
 
-            // Reload profiles from backend (removes locally-created, restores locally-deleted)
+            // v3.13.40: profile changes are immediate now (no staging), so
+            // this just re-syncs the list — nothing to "restore".
             await loadProfiles();
 
             // v3.11.33: Reload regex filters from backend (restores toggled states)
@@ -577,12 +594,6 @@
             if (settings.historyLimit) { document.getElementById('history-limit-range').value = settings.historyLimit; document.getElementById('history-limit-val').innerText = settings.historyLimit; }
         }
 
-        // Per-Profile Glossary Toggle
-        function togglePerProfileGlossary(enabled) {
-            // v3.10.8: Don't auto-save — mark as unsaved
-            markUnsaved();
-        }
-
         // Reset System Prompt to default
         function resetSystemPrompt() {
             document.getElementById('system-prompt').value = '';
@@ -604,8 +615,7 @@
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
                 systemPrompt: document.getElementById('system-prompt').value,
                 maxContextHistory: parseInt(document.getElementById('context-range').value),
-                historyLimit: parseInt(document.getElementById('history-limit-range').value),
-                perProfileGlossary: document.getElementById('per-profile-glossary-toggle').checked
+                historyLimit: parseInt(document.getElementById('history-limit-range').value)
             };
 
             // v3.11.33: Include staged regex filter toggle
@@ -615,18 +625,17 @@
 
             await api.saveSettings(config);
 
-            // v3.10.10: Also apply staged glossary and profile changes
+            // v3.10.10: Also apply staged glossary changes (profile
+            // create/rename/duplicate/delete are immediate now, see the
+            // Profiles section — nothing to flush for them here). Each
+            // staged record carries its own scope (v3.13.40, two-layer
+            // glossary) — a term staged under "Este perfil" while add-form
+            // was in that mode must be saved to the profile layer, not global.
             for (const entry of stagedGlossaryAdds) {
-                await api.saveGlossaryEntry({ source: entry.source, target: entry.target, mode: entry.mode });
+                await api.saveGlossaryEntry({ source: entry.source, target: entry.target, mode: entry.mode }, entry.scope);
             }
-            for (const id of stagedGlossaryDeletes) {
-                await api.deleteGlossaryEntry(id);
-            }
-            for (const p of stagedProfileCreates) {
-                await api.createProfile({ name: p.name });
-            }
-            for (const name of stagedProfileDeletes) {
-                await api.deleteProfile(name);
+            for (const item of stagedGlossaryDeletes) {
+                await api.deleteGlossaryEntry(item.id, item.scope);
             }
 
             // v3.11.33: Apply staged regex filter toggle changes
@@ -635,7 +644,7 @@
             }
 
             // Update active profile with new data
-            await api.saveProfile({ name: activeProfile });
+            if (activeProfileId) await api.saveProfile(activeProfileId);
             loadProfiles();
             await loadGlossary();
             // Reload regex filters to reflect staged toggle changes
@@ -670,7 +679,6 @@
                 historyLimit: 5,
                 systemPrompt: '',
                 clickThrough: false,
-                perProfileGlossary: false,
                 enableRegexFilter: true
             };
 
@@ -1466,20 +1474,50 @@
         // ===== GLOSSARY =====
         async function loadGlossary() {
             try {
-                glossaryEntries = await api.getGlossary();
+                const result = await api.getGlossary();
+                glossaryEntries = result.global || [];
+                profileGlossaryEntries = result.profile || [];
                 renderGlossary();
             } catch (e) { console.error('Failed to load glossary:', e); }
         }
 
+        // v3.13.40: which array the Glosario tab is currently showing/
+        // editing. The list itself (not just its length) is what
+        // addGlossaryEntry/deleteGlossaryEntry mutate, so this always
+        // returns a live reference, not a copy.
+        function currentGlossaryList() {
+            return currentGlossaryScope === 'profile' ? profileGlossaryEntries : glossaryEntries;
+        }
+
+        function setGlossaryScope(scope) {
+            currentGlossaryScope = scope;
+            renderGlossary();
+        }
+
+        function updateGlossaryScopeButtons() {
+            const activeCls = ['bg-white', 'dark:bg-dark-700', 'text-emerald-600', 'dark:text-emerald-400', 'shadow-sm'];
+            const inactiveCls = ['text-gray-500', 'dark:text-gray-400'];
+            const globalBtn = document.getElementById('glossary-scope-global');
+            const profileBtn = document.getElementById('glossary-scope-profile');
+            if (!globalBtn || !profileBtn) return;
+            const [activeBtn, inactiveBtn] = currentGlossaryScope === 'profile' ? [profileBtn, globalBtn] : [globalBtn, profileBtn];
+            inactiveBtn.classList.remove(...activeCls);
+            inactiveBtn.classList.add(...inactiveCls);
+            activeBtn.classList.remove(...inactiveCls);
+            activeBtn.classList.add(...activeCls);
+        }
+
         function renderGlossary() {
+            updateGlossaryScopeButtons();
             const list = document.getElementById('glossary-list');
-            if (!glossaryEntries.length) {
+            const entries = currentGlossaryList();
+            if (!entries.length) {
                 const t = translations[currentLang] || translations['en'];
                 list.innerHTML = `<p class="text-xs text-gray-400 text-center py-4">${t.glossary_empty}</p>`;
                 return;
             }
 
-            list.innerHTML = glossaryEntries.map(entry => `
+            list.innerHTML = entries.map(entry => `
                 <div class="flex items-center gap-2 p-2 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 text-xs">
                     <div class="flex-1 min-w-0">
                         <span class="font-mono text-gray-700 dark:text-gray-200 truncate block">${escapeHtml(entry.source)}</span>
@@ -1498,15 +1536,18 @@
             const target = document.getElementById('glossary-target').value.trim();
             const mode = document.getElementById('glossary-mode').value;
             if (!source || !target) return;
+            const scope = currentGlossaryScope;
 
             // v3.10.10: Stage the entry — only persisted on "Aplicar y Guardar"
             const tempId = 'staged_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
-            // Check if same entry already staged to prevent duplicates
-            const alreadyStaged = stagedGlossaryAdds.some(e => e.source === source && e.target === target && e.mode === mode);
+            // Check if same entry already staged IN THIS SCOPE to prevent
+            // duplicates — the same term can legitimately exist staged in
+            // both layers at once (that's the whole point of two layers).
+            const alreadyStaged = stagedGlossaryAdds.some(e => e.scope === scope && e.source === source && e.target === target && e.mode === mode);
             if (!alreadyStaged) {
-                stagedGlossaryAdds.push({ id: tempId, source, target, mode, enabled: true, createdAt: Date.now() });
+                stagedGlossaryAdds.push({ id: tempId, source, target, mode, enabled: true, createdAt: Date.now(), scope });
                 // Show in UI immediately (local render)
-                glossaryEntries.push({ id: tempId, source, target, mode, enabled: true, createdAt: Date.now() });
+                currentGlossaryList().push({ id: tempId, source, target, mode, enabled: true, createdAt: Date.now() });
                 renderGlossary();
             }
             document.getElementById('glossary-source').value = '';
@@ -1515,38 +1556,50 @@
         }
 
         async function deleteGlossaryEntry(id) {
+            const scope = currentGlossaryScope;
             // v3.10.8: Stage the deletion — only persisted on "Aplicar y Guardar"
             // If it's a staged add, just remove from staged adds and local list
-            const stagedIdx = stagedGlossaryAdds.findIndex(e => e.id === id);
+            const stagedIdx = stagedGlossaryAdds.findIndex(e => e.id === id && e.scope === scope);
             if (stagedIdx >= 0) {
                 stagedGlossaryAdds.splice(stagedIdx, 1);
             } else {
                 // It's a persisted entry — stage for deletion
-                stagedGlossaryDeletes.push(id);
+                stagedGlossaryDeletes.push({ id, scope });
             }
             // Remove from local display immediately
-            glossaryEntries = glossaryEntries.filter(e => e.id !== id);
+            if (scope === 'profile') {
+                profileGlossaryEntries = profileGlossaryEntries.filter(e => e.id !== id);
+            } else {
+                glossaryEntries = glossaryEntries.filter(e => e.id !== id);
+            }
             renderGlossary();
             markUnsaved();
         }
 
         async function importGlossary() {
-            // Trigger file dialog via main process
-            // For now, prompt for file path
-            const path = prompt('Enter JSON file path to import:');
-            if (path) {
-                const result = await api.importGlossary(path);
-                if (result.success) loadGlossary();
-                else alert('Import failed: ' + result.error);
-            }
+            const t = translations[currentLang] || translations['en'];
+            // v3.13.40-fix (round 2): first fix replaced window.prompt()
+            // (silently did nothing at all — not implemented by Electron's
+            // renderer) with showTextPrompt(), asking the user to TYPE a
+            // full file path. Real feedback: that reads as "type the
+            // filename you want," not "type where the file already is,"
+            // and typing a path by hand is worse UX than a real file
+            // picker anyway — every other file-choosing flow in this app
+            // already has one (see textractorBrowseCli). Native picker now.
+            const browse = await api.browseOpenFile({ title: t.glossary_import });
+            if (browse.canceled || !browse.path) return;
+            const result = await api.importGlossary(browse.path, currentGlossaryScope);
+            if (result.success) loadGlossary();
+            else showToast((t.glossary_import_failed || 'Import failed: ') + result.error);
         }
 
         async function exportGlossary() {
-            const path = prompt('Enter file path to export:');
-            if (path) {
-                const result = await api.exportGlossary(path);
-                if (result.success) alert(`Exported ${result.exported} entries`);
-            }
+            const t = translations[currentLang] || translations['en'];
+            const defaultFileName = currentGlossaryScope === 'profile' ? 'tuhua-glosario-perfil.json' : 'tuhua-glosario-global.json';
+            const browse = await api.browseSaveFile({ title: t.glossary_export, defaultFileName });
+            if (browse.canceled || !browse.path) return;
+            const result = await api.exportGlossary(browse.path, currentGlossaryScope);
+            if (result.success) showToast((t.glossary_export_success || 'Exportadas {count} entradas').replace('{count}', result.exported));
         }
 
         // ===== HISTORY =====
@@ -1595,24 +1648,124 @@
         }
 
         async function exportHistory() {
-            const path = prompt('Enter file path to export:');
-            if (path) {
-                const result = await api.exportHistory(path);
-                if (result.success) alert(`Exported ${result.count} entries`);
-            }
+            // v3.13.40-fix (round 2): "type the full path" (showTextPrompt)
+            // replaced by a real native save picker, same reasoning as
+            // exportGlossary/importGlossary above.
+            const t = translations[currentLang] || translations['en'];
+            const browse = await api.browseSaveFile({ title: t.history_export, defaultFileName: 'tuhua-historial.json' });
+            if (browse.canceled || !browse.path) return;
+            const result = await api.exportHistory(browse.path);
+            if (result.success) showToast((t.history_export_success || 'Exportadas {count} entradas').replace('{count}', result.count));
+        }
+
+        // v3.13.40-fix: window.prompt() is not implemented by Electron's
+        // default renderer (window.alert()/confirm() ARE — they map to a
+        // native dialog — but prompt() silently returns null with no
+        // dialog shown at all). renameProfile/duplicateProfile used
+        // prompt() and were consequently dead buttons in the real app —
+        // found via Lyca's real Windows testing, not by running Electron
+        // (can't, in this environment). This is a minimal in-page
+        // replacement, Promise-based so call sites read the same as
+        // `await prompt(...)` would have.
+        function showTextPrompt(message, defaultValue = '') {
+            return new Promise((resolve) => {
+                const overlay = document.createElement('div');
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+                overlay.innerHTML = `
+                    <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-80 space-y-3 shadow-xl border border-gray-200 dark:border-dark-600">
+                        <p class="text-xs font-medium text-gray-700 dark:text-gray-200">${escapeHtml(message)}</p>
+                        <input type="text" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" />
+                        <div class="flex justify-end gap-2">
+                            <button data-action="cancel" class="px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-md transition">Cancelar</button>
+                            <button data-action="ok" class="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-md transition">OK</button>
+                        </div>
+                    </div>`;
+                const input = overlay.querySelector('input');
+                input.value = defaultValue;
+                const cleanup = (value) => { overlay.remove(); resolve(value); };
+                overlay.querySelector('[data-action="cancel"]').onclick = () => cleanup(null);
+                overlay.querySelector('[data-action="ok"]').onclick = () => cleanup(input.value);
+                overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(null); });
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') cleanup(input.value);
+                    if (e.key === 'Escape') cleanup(null);
+                });
+                document.body.appendChild(overlay);
+                input.focus();
+                input.select();
+            });
+        }
+
+        // v3.13.40-fix (round 2): the first fix for the confirm() focus
+        // bug routed confirmations through a NATIVE OS dialog
+        // (dialog.showMessageBox via IPC) — that fixed the focus loss but
+        // introduced a different problem: a native Windows dialog cannot
+        // be restyled at all, so it showed up as a plain system box with
+        // "tuhua-translator |" in the title, nothing like the rest of the
+        // app. An in-page modal (same family as showTextPrompt above)
+        // solves both at once — it never touches the native blocking
+        // dialog APIs in the first place, so the focus bug never applied
+        // to it, and it's just HTML/CSS so it matches Tuhua's theme.
+        // Default focus is the Cancel button, matching the native
+        // dialog's old defaultId:0 — Enter shouldn't confirm a
+        // destructive action by accident.
+        function showConfirm(message, confirmLabel = 'Confirm', cancelLabel = 'Cancel') {
+            return new Promise((resolve) => {
+                const overlay = document.createElement('div');
+                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+                overlay.innerHTML = `
+                    <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-80 space-y-3 shadow-xl border border-gray-200 dark:border-dark-600">
+                        <p class="text-xs font-medium text-gray-700 dark:text-gray-200">${escapeHtml(message)}</p>
+                        <div class="flex justify-end gap-2">
+                            <button data-action="cancel" class="px-3 py-1.5 text-xs text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded-md transition">${escapeHtml(cancelLabel)}</button>
+                            <button data-action="ok" class="px-3 py-1.5 text-xs bg-red-600 hover:bg-red-500 text-white font-bold rounded-md transition">${escapeHtml(confirmLabel)}</button>
+                        </div>
+                    </div>`;
+                const cancelBtn = overlay.querySelector('[data-action="cancel"]');
+                const okBtn = overlay.querySelector('[data-action="ok"]');
+                const onKeydown = (e) => { if (e.key === 'Escape') cleanup(false); };
+                const cleanup = (value) => {
+                    document.removeEventListener('keydown', onKeydown);
+                    overlay.remove();
+                    resolve(value);
+                };
+                cancelBtn.onclick = () => cleanup(false);
+                okBtn.onclick = () => cleanup(true);
+                overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(false); });
+                document.addEventListener('keydown', onKeydown);
+                document.body.appendChild(overlay);
+                cancelBtn.focus();
+            });
         }
 
         // ===== PROFILES =====
-        let activeProfile = 'Por Defecto';
+        // v3.13.40: keyed by id, not name (id is what makes rename
+        // possible — name used to BE the primary key). Create/rename/
+        // duplicate/delete are immediate IPC calls, not staged — see the
+        // comment above stagedGlossaryAdds for why staging created the
+        // silent-clone-on-create surprise in the first place.
+        let activeProfileId = null;
 
         async function loadProfiles() {
             try {
                 const result = await api.getProfiles();
-                // v3.10.7: get-profiles now returns { profiles, activeProfile }
-                profileList = result.profiles || result;
-                activeProfile = result.activeProfile || 'Por Defecto';
+                profileList = result.profiles || [];
+                activeProfileId = result.activeProfileId || null;
                 renderProfiles();
             } catch (e) { console.error('Failed to load profiles:', e); }
+        }
+
+        // v3.13.40-fix: "Por Defecto" was a literal Spanish string baked
+        // into every profile's stored `name` (pre-dates this refactor —
+        // profile-store.js still seeds it that way, since `name` is now
+        // pure display data with no structural role). Shown localized
+        // UNLESS the user has explicitly renamed it — renaming away from
+        // the literal seed value is treated as an explicit choice to keep.
+        function displayProfileName(profile, t) {
+            if (profile.isDefault && profile.name === 'Por Defecto') {
+                return t.profile_default_name || 'Por Defecto';
+            }
+            return profile.name;
         }
 
         function renderProfiles() {
@@ -1630,32 +1783,46 @@
                 const historyCount = profile.history ? profile.history.length : 0;
                 const savedDate = profile.savedAt ? new Date(profile.savedAt).toLocaleDateString() : '';
                 const engineName = profile.engine || 'google-free';
-                const langPair = (profile.sourceLang || 'auto') + ' → ' + (profile.targetLang || 'es');
+                // v3.13.40: targetLang is global now (the reader's own
+                // language, not the game's) — only sourceLang is still
+                // profile-scoped, so the badge shows one language, not a pair.
+                const sourceLang = profile.sourceLang || 'auto';
                 const inputMethod = profile.inputMethod || 'textractor';
-                const isActive = profile.name === activeProfile;
-                const isDefault = profile.isDefault || profile.name === 'Por Defecto';
-                const isStaged = profile._staged === true;
-                const borderClass = isStaged ? 'border-amber-400 dark:border-amber-600 border-dashed' : (isActive ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-dark-600');
-                const bgClass = isStaged ? 'bg-amber-50 dark:bg-amber-900/10' : (isActive ? 'bg-emerald-50 dark:bg-emerald-900/10' : 'bg-gray-50 dark:bg-dark-900/50');
+                const isActive = profile.id === activeProfileId;
+                const isDefault = profile.isDefault === true;
+                const hasHook = !!(profile.hook && profile.hook.hookCode);
+                const borderClass = isActive ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-dark-600';
+                const bgClass = isActive ? 'bg-emerald-50 dark:bg-emerald-900/10' : 'bg-gray-50 dark:bg-dark-900/50';
+                const id = escapeHtml(profile.id);
+                const displayName = escapeHtml(displayProfileName(profile, t));
+
+                // v3.13.40-fix: clicking anywhere on a non-active card now
+                // switches to it (feedback: depending on a small "Cargar"
+                // button felt unnecessary). The button row below stops the
+                // click from bubbling up (event.stopPropagation()) so
+                // Duplicar/Renombrar/Eliminar don't ALSO trigger a switch.
+                const cardOnClick = !isActive ? ` onclick="loadProfile('${id}')"` : '';
+                const cardCursor = !isActive ? 'cursor-pointer hover:border-emerald-300 dark:hover:border-emerald-700' : '';
 
                 return `
-                <div class="p-2.5 rounded-lg ${bgClass} border ${borderClass} space-y-1.5">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-1.5">
-                            ${isActive ? '<span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot"></span>' : ''}
-                            <span class="text-sm font-medium ${isActive ? 'text-emerald-700 dark:text-emerald-300' : ''}">${escapeHtml(profile.name)}</span>
-                            ${isDefault ? '<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase">Default</span>' : ''}
-                            ${isStaged ? '<span class="text-[8px] bg-amber-200 dark:bg-amber-800 text-amber-700 dark:text-amber-300 px-1 py-0.5 rounded font-bold uppercase">Nuevo</span>' : ''}
+                <div class="p-2.5 rounded-lg ${bgClass} border ${borderClass} ${cardCursor} space-y-1.5 transition"${cardOnClick}>
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="flex items-center gap-1.5 min-w-0">
+                            ${isActive ? '<span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot flex-shrink-0"></span>' : ''}
+                            <span class="text-sm font-medium truncate ${isActive ? 'text-emerald-700 dark:text-emerald-300' : ''}" title="${displayName}">${displayName}</span>
+                            ${isDefault ? `<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase flex-shrink-0">${escapeHtml(t.profile_default_name || 'Default')}</span>` : ''}
+                            ${hasHook ? '<span class="text-[8px] flex-shrink-0" title="Hook guardado">🎯</span>' : ''}
                         </div>
-                        <div class="flex gap-1">
-                            ${!isActive && !isStaged ? `<button onclick="loadProfile('${escapeHtml(profile.name)}')" class="px-2.5 py-1 text-[10px] font-medium text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded transition" data-i18n="profile_load">Cargar</button>` : ''}
-                            ${!isDefault ? `<button onclick="deleteProfile('${escapeHtml(profile.name)}')" class="px-2.5 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
+                        <div class="flex gap-1 flex-shrink-0" onclick="event.stopPropagation()">
+                            <button onclick="duplicateProfile('${id}')" class="px-2.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
+                            <button onclick="renameProfile('${id}')" class="px-2.5 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
+                            ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-2.5 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
                         </div>
                     </div>
                     <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-gray-400">
                         ${glossaryCount > 0 ? `<span class="bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded">📖 ${glossaryCount}</span>` : ''}
                         ${historyCount > 0 ? `<span class="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded">📋 ${historyCount}</span>` : ''}
-                        <span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">${langPair}</span>
+                        <span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">${sourceLang}</span>
                         <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${engineName}</span>
                         <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${inputMethod}</span>
                         ${savedDate ? `<span>${savedDate}</span>` : ''}
@@ -1669,7 +1836,9 @@
         function updateActiveProfileIndicator() {
             const indicator = document.getElementById('active-profile-indicator');
             if (indicator) {
-                indicator.textContent = activeProfile;
+                const t = translations[currentLang] || translations['en'];
+                const active = profileList.find(p => p.id === activeProfileId);
+                indicator.textContent = active ? displayProfileName(active, t) : '';
             }
         }
 
@@ -1680,83 +1849,167 @@
             await saveConfig();
         }
 
-        async function createNewProfile() {
-            const name = document.getElementById('profile-name').value.trim();
-            if (!name) return;
+        // v3.13.40-fix: replaces the toast for profile-name validation —
+        // feedback requested it live next to the field it's about
+        // (a toast at the bottom of the screen was too far from where the
+        // user was actually looking/typing), plus a red outline on the
+        // input itself until the user edits it again.
+        function showProfileNameError(message) {
+            const nameInput = document.getElementById('profile-name');
+            const errorEl = document.getElementById('profile-name-error');
+            nameInput.classList.add('border-red-500', 'dark:border-red-500');
+            errorEl.textContent = message;
+            errorEl.classList.remove('hidden');
+            nameInput.focus();
+        }
 
-            // v3.10.10: Stage the profile creation — only persisted on "Aplicar y Guardar"
-            // Check if name already exists in real profiles or staged creates
-            const existsInBackend = profileList.some(p => p.name === name);
-            const existsInStaged = stagedProfileCreates.some(p => p.name === name);
-            if (existsInBackend || existsInStaged) {
-                const t = translations[currentLang] || translations['en'];
-                showToast(t.profile_name_exists || 'Ya existe un perfil con ese nombre');
+        function clearProfileNameError() {
+            const nameInput = document.getElementById('profile-name');
+            const errorEl = document.getElementById('profile-name-error');
+            nameInput.classList.remove('border-red-500', 'dark:border-red-500');
+            errorEl.classList.add('hidden');
+        }
+
+        async function createNewProfile() {
+            const nameInput = document.getElementById('profile-name');
+            const name = nameInput.value.trim();
+            const t = translations[currentLang] || translations['en'];
+            if (!name) {
+                // v3.13.40-fix: traced with real user testing (DevTools
+                // console showed "name read from input: ''") — clicking
+                // with an empty field silently no-op'd with zero feedback,
+                // reading as "the button doesn't work" when it was
+                // actually working exactly as coded, just mute about it.
+                showProfileNameError(t.profile_name_required || 'Escribí un nombre primero');
                 return;
             }
 
-            stagedProfileCreates.push({ name });
-
-            // Show in UI immediately as a local-only profile card
-            profileList.push({
-                name,
-                isDefault: false,
-                sourceLang: document.getElementById('source-lang').value,
-                targetLang: document.getElementById('target-lang').value,
-                inputMethod: currentInputMethod,
-                engine: document.getElementById('engine-select').value,
-                glossary: [],
-                history: [],
-                savedAt: null,  // null = not yet saved
-                _staged: true
-            });
-            renderProfiles();
-            document.getElementById('profile-name').value = '';
-            markUnsaved();
+            try {
+                // v3.13.40: immediate — and no cloneFromId, so the new
+                // profile is genuinely blank. Use "Duplicar" on an
+                // existing card to clone one explicitly.
+                const result = await api.createProfile({ name });
+                if (!result.success) {
+                    if (result.error === 'Profile name already exists') {
+                        showProfileNameError(t.profile_name_exists || 'Ya existe un perfil con ese nombre');
+                    } else {
+                        showToast(result.error);
+                    }
+                    return;
+                }
+                nameInput.value = '';
+                await loadProfiles();
+            } catch (e) {
+                // v3.13.40-fix: was silently swallowing exceptions before —
+                // a rejected api.* call (or a preload validation throw)
+                // looked identical to "the button does nothing" from the
+                // user's side. Log + toast so a real failure is visible
+                // instead of indistinguishable from a UI wiring bug.
+                console.error('createNewProfile failed:', e);
+                showToast(e.message || String(e));
+            }
         }
 
         // v3.10.10: saveCurrentProfile removed — "Guardar Actual" button removed.
         // All saving is now done via "Aplicar y Guardar" (saveConfig).
 
-        async function loadProfile(name) {
-            const result = await api.loadProfile(name);
-            if (result.success) {
-                activeProfile = result.activeProfile || name;
-                // v3.10.8: Clear staged changes when switching profiles
-                // (init() re-reads from backend, so staged changes are discarded)
-                stagedGlossaryAdds = [];
-                stagedGlossaryDeletes = [];
-                markSaved();
-                // Re-apply settings to UI and refresh all tabs
-                await init();
-                loadGlossary();
-                loadHistory();
+        async function loadProfile(id) {
+            try {
+                const result = await api.loadProfile(id);
+                if (result.success) {
+                    activeProfileId = result.activeProfileId || id;
+                    // v3.10.8: Clear staged changes when switching profiles
+                    // (init() re-reads from backend, so staged changes are discarded)
+                    stagedGlossaryAdds = [];
+                    stagedGlossaryDeletes = [];
+                    markSaved();
+                    // Re-apply settings to UI and refresh all tabs
+                    await init();
+                    loadGlossary();
+                    loadHistory();
+                }
+            } catch (e) {
+                console.error('loadProfile failed:', e);
+                showToast(e.message || String(e));
             }
         }
 
-        async function deleteProfile(name) {
-            if (name === 'Por Defecto') {
-                const t = translations[currentLang] || translations['en'];
+        async function renameProfile(id) {
+            const profile = profileList.find(p => p.id === id);
+            if (!profile) return;
+            const t = translations[currentLang] || translations['en'];
+            try {
+                // v3.13.40-fix: window.prompt() replaced with showTextPrompt()
+                // (see its doc comment above the Profiles section) — this is
+                // why Renombrar/Duplicar did nothing before: prompt() isn't
+                // implemented by Electron's default renderer, so it returned
+                // null instantly with no dialog ever appearing.
+                const newName = await showTextPrompt(t.profile_rename_prompt || 'Nuevo nombre:', profile.name);
+                if (!newName || !newName.trim() || newName.trim() === profile.name) return;
+                const result = await api.renameProfile(id, newName.trim());
+                if (!result.success) {
+                    showToast(result.error);
+                    return;
+                }
+                await loadProfiles();
+            } catch (e) {
+                console.error('renameProfile failed:', e);
+                showToast(e.message || String(e));
+            }
+        }
+
+        async function duplicateProfile(id) {
+            const profile = profileList.find(p => p.id === id);
+            if (!profile) return;
+            const t = translations[currentLang] || translations['en'];
+            try {
+                const newName = await showTextPrompt(t.profile_duplicate_prompt || 'Nombre para la copia:', `${profile.name} (2)`);
+                if (!newName || !newName.trim()) return;
+                const result = await api.duplicateProfile(id, newName.trim());
+                if (!result.success) {
+                    showToast(result.error);
+                    return;
+                }
+                await loadProfiles();
+            } catch (e) {
+                console.error('duplicateProfile failed:', e);
+                showToast(e.message || String(e));
+            }
+        }
+
+        async function deleteProfile(id) {
+            const profile = profileList.find(p => p.id === id);
+            if (!profile) return;
+            const t = translations[currentLang] || translations['en'];
+            if (profile.isDefault) {
                 showToast(t.cannot_delete_default || 'No se puede eliminar el perfil por defecto');
                 return;
             }
-
-            // v3.10.10: Stage the deletion — only persisted on "Aplicar y Guardar"
-            // If it's a staged create, just remove from staged creates and local list
-            const stagedIdx = stagedProfileCreates.findIndex(p => p.name === name);
-            if (stagedIdx >= 0) {
-                stagedProfileCreates.splice(stagedIdx, 1);
-            } else {
-                // It's a persisted profile — stage for deletion
-                stagedProfileDeletes.push(name);
+            // v3.13.40-fix: confirmation requested after real testing.
+            // Round 1 used window.confirm() — real testing found it left
+            // the renderer's keyboard focus broken afterward (typing
+            // stopped responding anywhere until the window lost and
+            // regained OS focus), a known Electron quirk with the
+            // renderer-blocking confirm()/alert() dialogs. Round 2 routed
+            // it through a native OS dialog instead, which fixed the focus
+            // bug but couldn't be restyled at all (showed up as a plain
+            // Windows message box, nothing like the rest of the app).
+            // showConfirm() (in-page modal, see its own doc comment) is
+            // round 3 — fixes both at once.
+            const message = (t.profile_delete_confirm || 'Delete profile "{name}"? This cannot be undone.').replace('{name}', profile.name);
+            const confirmed = await showConfirm(message, t.profile_delete || 'Eliminar', t.dialog_cancel || 'Cancelar');
+            if (!confirmed) return;
+            try {
+                const result = await api.deleteProfile(id);
+                if (!result.success) {
+                    showToast(result.error);
+                    return;
+                }
+                await loadProfiles();
+            } catch (e) {
+                console.error('deleteProfile failed:', e);
+                showToast(e.message || String(e));
             }
-
-            // Remove from local display immediately
-            profileList = profileList.filter(p => p.name !== name);
-            if (activeProfile === name) {
-                activeProfile = 'Por Defecto';
-            }
-            renderProfiles();
-            markUnsaved();
         }
 
         // ===== GUIDE MODAL =====
@@ -1809,7 +2062,6 @@
                 customMTResponsePath: document.getElementById('custom-mt-response').value,
                 customMTAuthHeader: document.getElementById('custom-mt-auth').value,
                 clickThrough: document.getElementById('click-through-toggle').checked,
-                perProfileGlossary: document.getElementById('per-profile-glossary-toggle').checked,
                 uiLanguage: currentLang,
                 xuatPort: parseInt(document.getElementById('xuat-port').value) || 8419
             };
@@ -1826,35 +2078,28 @@
             // 1. Save all settings
             await api.saveSettings(config);
 
-            // 2. Apply staged glossary changes
+            // 2. Apply staged glossary changes (each staged record carries
+            // its own scope — v3.13.40, two-layer glossary)
             for (const entry of stagedGlossaryAdds) {
-                await api.saveGlossaryEntry({ source: entry.source, target: entry.target, mode: entry.mode });
+                await api.saveGlossaryEntry({ source: entry.source, target: entry.target, mode: entry.mode }, entry.scope);
             }
-            for (const id of stagedGlossaryDeletes) {
-                await api.deleteGlossaryEntry(id);
+            for (const item of stagedGlossaryDeletes) {
+                await api.deleteGlossaryEntry(item.id, item.scope);
             }
             stagedGlossaryAdds = [];
             stagedGlossaryDeletes = [];
 
-            // 3. Apply staged profile creates
-            for (const p of stagedProfileCreates) {
-                await api.createProfile({ name: p.name });
-            }
-            // 4. Apply staged profile deletes
-            for (const name of stagedProfileDeletes) {
-                await api.deleteProfile(name);
-            }
-            stagedProfileCreates = [];
-            stagedProfileDeletes = [];
-
-            // 5. Save current profile data (updates glossary count, history, etc.)
-            await api.saveProfile({ name: activeProfile });
+            // 3. Save current profile data (updates glossary count, history, etc.)
+            // v3.13.40: profile create/rename/duplicate/delete are immediate
+            // IPC calls now (see the Profiles section) — nothing staged to
+            // flush here anymore.
+            if (activeProfileId) await api.saveProfile(activeProfileId);
             loadProfiles();
 
-            // 6. Reload glossary from store to sync IDs
+            // 4. Reload glossary from store to sync IDs
             await loadGlossary();
 
-            // 7. Mark as saved (remove visual indicator)
+            // 5. Mark as saved (remove visual indicator)
             markSaved();
 
             // v3.13.37: Save is a "real trigger" for Textractor auto-launch —
@@ -3061,7 +3306,7 @@
             const isCaseSensitive = document.getElementById('regex-add-case').checked;
 
             if (!pattern) {
-                alert(translate('regex_filter_error_no_pattern') || 'Pattern is required');
+                showToast(translate('regex_filter_error_no_pattern') || 'Pattern is required');
                 return;
             }
 
@@ -3070,7 +3315,7 @@
                 try {
                     new RegExp(pattern);
                 } catch (e) {
-                    alert(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
+                    showToast(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
                     return;
                 }
             }
@@ -3147,7 +3392,7 @@
             const isCaseSensitive = document.getElementById('regex-edit-case').checked;
 
             if (!pattern) {
-                alert(translate('regex_filter_error_no_pattern') || 'Pattern is required');
+                showToast(translate('regex_filter_error_no_pattern') || 'Pattern is required');
                 return;
             }
 
@@ -3156,7 +3401,7 @@
                 try {
                     new RegExp(pattern);
                 } catch (e) {
-                    alert(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
+                    showToast(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
                     return;
                 }
             }
@@ -3179,14 +3424,21 @@
         }
 
         async function deleteRegexFilterEntry(id) {
-            if (!confirm(translate('regex_filter_confirm_delete') || 'Delete this filter?')) return;
+            // v3.13.40-fix: window.confirm() → showConfirm() — same
+            // Electron focus-loss bug documented on the profile delete
+            // confirmation (see showConfirm's doc comment).
+            const t = translations[currentLang] || translations['en'];
+            const confirmed = await showConfirm(translate('regex_filter_confirm_delete') || 'Delete this filter?', t.dialog_confirm, t.dialog_cancel);
+            if (!confirmed) return;
             // v3.11.33: Save immediately — deleting a filter is a concrete action
             await api.deleteRegexFilter(id);
             await loadRegexFilters();
         }
 
         async function resetRegexFilters() {
-            if (!confirm(translate('regex_filter_confirm_reset') || 'Reset all filters to defaults? Custom filters will be removed.')) return;
+            const t = translations[currentLang] || translations['en'];
+            const confirmed = await showConfirm(translate('regex_filter_confirm_reset') || 'Reset all filters to defaults? Custom filters will be removed.', t.dialog_confirm, t.dialog_cancel);
+            if (!confirmed) return;
             await api.resetRegexFilters();
             await loadRegexFilters();
         }

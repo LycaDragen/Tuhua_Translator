@@ -10,6 +10,8 @@ const axios = require('axios');
 
 const XuatInstaller = require('../services/xuat-installer');
 const VndbService = require('../services/vndb');
+const { profileToSettings, settingsToProfile } = require('../services/profiles/profile-schema');
+const glossaryEntries = require('../services/translation/glossary-entries');
 const textCleaning = require('../services/text-cleaning');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
@@ -33,10 +35,11 @@ function mainT(store, key) {
 }
 
 class IpcHandlers {
-  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings) {
+  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings, profileStore) {
     this.store = store;
     this.pipeline = pipeline;
     this.glossary = glossary;
+    this.profileStore = profileStore;
     this.regexFilter = regexFilter;
     this.hookCleaningSettings = hookCleaningSettings || null;
     this.windowManager = windowManager;
@@ -502,13 +505,40 @@ class IpcHandlers {
     });
 
     // ===== Glossary =====
+    // v3.13.40 (profiles Phase 1, step 5): two layers. `this.glossary`
+    // (glossary.json) is the GLOBAL layer, unchanged. The PROFILE layer is
+    // just `activeProfile.glossary[]`, mutated through profileStore.update()
+    // — there's no separate store for it. Every profile-scope mutation
+    // below re-calls this.glossary.setProfileLayer() with the fresh array
+    // so the pipeline's merged view (getEffective()) is correct for the
+    // very next translation, not just after the next profile switch.
     ipcMain.handle('get-glossary', () => {
-      return this.glossary.getAll();
+      const active = this.profileStore.getActive();
+      return {
+        global: this.glossary.getAll(),
+        profile: active ? active.glossary : [],
+        effective: this.glossary.getEffective(),
+        activeProfileId: active ? active.id : null
+      };
     });
 
-    ipcMain.handle('save-glossary', (event, entry) => {
+    ipcMain.handle('save-glossary', (event, { entry, scope } = {}) => {
       if (!entry || typeof entry.source !== 'string' || typeof entry.target !== 'string') {
         return { success: false, error: 'Invalid glossary entry' };
+      }
+      if (scope === 'profile') {
+        const active = this.profileStore.getActive();
+        if (!active) return { success: false, error: 'No active profile' };
+        let savedEntry = null;
+        this.profileStore.update(active.id, (current) => {
+          const result = entry.id
+            ? glossaryEntries.updateEntry(current.glossary, entry.id, entry)
+            : glossaryEntries.addEntry(current.glossary, entry);
+          savedEntry = result.entry;
+          return { glossary: result.list };
+        });
+        this.glossary.setProfileLayer(this.profileStore.getById(active.id).glossary);
+        return { success: true, entry: savedEntry };
       }
       if (entry.id) {
         this.glossary.update(entry.id, entry);
@@ -518,14 +548,35 @@ class IpcHandlers {
       return { success: true };
     });
 
-    ipcMain.handle('delete-glossary-entry', (event, id) => {
+    ipcMain.handle('delete-glossary-entry', (event, { id, scope } = {}) => {
       if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
+      if (scope === 'profile') {
+        const active = this.profileStore.getActive();
+        if (!active) return { success: false, error: 'No active profile' };
+        this.profileStore.update(active.id, (current) => ({ glossary: glossaryEntries.removeEntry(current.glossary, id) }));
+        this.glossary.setProfileLayer(this.profileStore.getById(active.id).glossary);
+        return { success: true };
+      }
       this.glossary.delete(id);
       return { success: true };
     });
 
-    ipcMain.handle('import-glossary', async (event, filePath) => {
+    ipcMain.handle('import-glossary', async (event, { filePath, scope } = {}) => {
       try {
+        if (scope === 'profile') {
+          const active = this.profileStore.getActive();
+          if (!active) return { success: false, error: 'No active profile' };
+          const fs = require('fs');
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          let imported = 0;
+          this.profileStore.update(active.id, (current) => {
+            const result = glossaryEntries.importEntries(current.glossary, data);
+            imported = result.imported;
+            return { glossary: result.list };
+          });
+          this.glossary.setProfileLayer(this.profileStore.getById(active.id).glossary);
+          return { success: true, imported };
+        }
         const count = this.glossary.importFromFile(filePath);
         return { success: true, imported: count };
       } catch (e) {
@@ -533,13 +584,58 @@ class IpcHandlers {
       }
     });
 
-    ipcMain.handle('export-glossary', async (event, filePath) => {
+    ipcMain.handle('export-glossary', async (event, { filePath, scope } = {}) => {
       try {
+        if (scope === 'profile') {
+          const active = this.profileStore.getActive();
+          if (!active) return { success: false, error: 'No active profile' };
+          const fs = require('fs');
+          const entries = active.glossary || [];
+          fs.writeFileSync(filePath, JSON.stringify(entries, null, 2), 'utf8');
+          return { success: true, exported: entries.length };
+        }
         const count = this.glossary.exportToFile(filePath);
         return { success: true, exported: count };
       } catch (e) {
         return { success: false, error: e.message };
       }
+    });
+
+    // v3.13.40-fix: glossary/history import-export used to prompt the user
+    // to TYPE a full file path (via showTextPrompt) — real feedback found
+    // this genuinely unclear (Lyca first read it as "type a filename",
+    // not "type a full path", and even once understood, typing a path by
+    // hand instead of picking one is a worse experience than every other
+    // file-choosing flow in this app already has — see
+    // textractor-browse-cli just above, same dialog module). Generic
+    // save/open pickers, reused by glossary export, glossary import, and
+    // history export (three call sites already, the exact point this
+    // project's own convention treats a shared helper as earned rather
+    // than premature).
+    ipcMain.handle('browse-save-json', async (event, { title, defaultFileName } = {}) => {
+      const result = await dialog.showSaveDialog({
+        title: title || 'Export JSON',
+        defaultPath: defaultFileName || 'export.json',
+        filters: [
+          { name: 'JSON', extensions: ['json'] },
+          { name: 'All Files', extensions: ['*'] }
+        ]
+      });
+      if (result.canceled || !result.filePath) return { canceled: true, path: '' };
+      return { canceled: false, path: result.filePath };
+    });
+
+    ipcMain.handle('browse-open-json', async (event, { title } = {}) => {
+      const result = await dialog.showOpenDialog({
+        title: title || 'Import JSON',
+        filters: [
+          { name: 'JSON', extensions: ['json'] },
+          { name: 'All Files', extensions: ['*'] }
+        ],
+        properties: ['openFile']
+      });
+      if (result.canceled || result.filePaths.length === 0) return { canceled: true, path: '' };
+      return { canceled: false, path: result.filePaths[0] };
     });
 
     // ===== Regex Filter (v3.11.30) =====
@@ -697,256 +793,144 @@ class IpcHandlers {
     });
 
     // ===== Profiles =====
-    // v3.10.7: Complete profile system rewrite.
-    // - Default profile "Por Defecto" is always present and cannot be deleted
-    // - Profiles store ONLY profile-scoped data (not global settings)
-    // - Active profile is tracked in store.activeProfile
-    // - Loading a profile saves current profile data first, then loads new profile
-    // - Glossary per-profile toggle is GLOBAL and never changes with profile
+    // v3.13.40 (profiles Phase 1, step 4): rewritten on top of
+    // src/services/profiles/profile-store.js + profile-schema.js — the
+    // four hand-written literals that used to build a profile object here
+    // (one per handler) had already drifted from each other (apiKey was
+    // written by save-profile and never restored by load-profile). Every
+    // profile is now keyed by `id`, not `name` — this is what makes
+    // rename possible, since name used to BE the primary key.
+    //
+    // What changed in behavior:
+    // - create-profile no longer clones the active profile by default.
+    //   Pass cloneFromId explicitly (see duplicate-profile) to get the old
+    //   "inherit my current setup" behavior — previously that happened
+    //   silently even though the UI showed an empty card.
+    // - Credentials (deeplKey/openaiKey/apiKey), targetLang, and
+    //   textractorCliPath/Port are no longer read from or written to a
+    //   profile at all — they're promoted to global settings (Phase 1
+    //   step 3's migration). profileToSettings()/settingsToProfile() are
+    //   the only two places that translate between a profile and the
+    //   global settings object, replacing every hand-rolled field list
+    //   that used to live in this file.
+    // - The glossary is two layers now (step 5): settingsToProfile() never
+    //   reads or writes profile.glossary — the outgoing profile's layer is
+    //   left exactly as the glossary IPC handlers last set it — but
+    //   load-profile DOES call glossary.setProfileLayer(incoming.glossary)
+    //   below, since the INCOMING profile's layer must become active for
+    //   translation immediately, not just its stored snapshot.
 
     ipcMain.handle('get-profiles', () => {
-      const profiles = this.store.get('profiles', []);
-      const activeProfile = this.store.get('activeProfile', 'Por Defecto');
-      // Ensure default profile always exists
-      const hasDefault = profiles.some(p => p.name === 'Por Defecto');
-      if (!hasDefault) {
-        const currentSettings = this.store.get();
-        profiles.unshift({
-          name: 'Por Defecto',
-          isDefault: true,
-          sourceLang: currentSettings.sourceLang || 'auto',
-          targetLang: currentSettings.targetLang || 'es',
-          inputMethod: currentSettings.inputMethod || 'textractor',
-          engine: currentSettings.engine || 'google-free',
-          deeplKey: currentSettings.deeplKey || '',
-          openaiKey: currentSettings.openaiKey || '',
-          customEndpoint: currentSettings.customEndpoint || '',
-          customModel: currentSettings.customModel || '',
-          libretranslateEndpoint: currentSettings.libretranslateEndpoint || '',
-          customMTEndpoint: currentSettings.customMTEndpoint || '',
-          customMTMethod: currentSettings.customMTMethod || '',
-          customMTBody: currentSettings.customMTBody || '',
-          customMTResponsePath: currentSettings.customMTResponsePath || '',
-          customMTAuthHeader: currentSettings.customMTAuthHeader || '',
-          textractorCliPath: currentSettings.textractorCliPath || '',
-          textractorPort: currentSettings.textractorPort || 9251,
-          manualTextractorMode: currentSettings.manualTextractorMode || false,
-          glossary: this.glossary.getAll(),
-          history: this.pipeline.getHistory(),
-          savedAt: Date.now()
-        });
-        this.store.set('profiles', profiles);
-      }
-      return { profiles, activeProfile };
+      const profiles = this.profileStore.list();
+      const activeProfileId = this.profileStore.getActiveId();
+      return { profiles, activeProfileId };
     });
 
-    ipcMain.handle('save-profile', (event, profile) => {
-      if (!profile || typeof profile.name !== 'string') {
-        return { success: false, error: 'Invalid profile' };
+    ipcMain.handle('save-profile', (event, profileId) => {
+      if (typeof profileId !== 'string' || !profileId) {
+        return { success: false, error: 'Invalid profile id' };
       }
-      const profiles = this.store.get('profiles', []);
-      const idx = profiles.findIndex(p => p.name === profile.name);
-
-      // Profiles ONLY store profile-scoped data (not global settings)
       const currentSettings = this.store.get();
-      const profileData = {
-        name: profile.name,
-        isDefault: profile.name === 'Por Defecto',
-        // Language preferences
-        sourceLang: currentSettings.sourceLang,
-        targetLang: currentSettings.targetLang,
-        // Input method
-        inputMethod: currentSettings.inputMethod,
-        // Translation engine + config
-        engine: currentSettings.engine,
-        deeplKey: currentSettings.deeplKey || '',
-        openaiKey: currentSettings.openaiKey || '',
-        apiKey: currentSettings.apiKey || '',
-        customEndpoint: currentSettings.customEndpoint || '',
-        customModel: currentSettings.customModel || '',
-        libretranslateEndpoint: currentSettings.libretranslateEndpoint || '',
-        customMTEndpoint: currentSettings.customMTEndpoint || '',
-        customMTMethod: currentSettings.customMTMethod || '',
-        customMTBody: currentSettings.customMTBody || '',
-        customMTResponsePath: currentSettings.customMTResponsePath || '',
-        customMTAuthHeader: currentSettings.customMTAuthHeader || '',
-        // Glossary (only saved to profile if glossary.perProfile is enabled)
-        glossary: this.glossary.getAll(),
-        // Translation history
-        history: this.pipeline.getHistory(),
-        // Textractor config
-        textractorCliPath: currentSettings.textractorCliPath || '',
-        textractorPort: currentSettings.textractorPort || 9251,
-        manualTextractorMode: currentSettings.manualTextractorMode || false,
-        savedAt: Date.now()
-      };
-
-      if (idx >= 0) {
-        profileData.isDefault = profiles[idx].isDefault || profile.name === 'Por Defecto';
-        profiles[idx] = profileData;
-      } else {
-        profiles.push(profileData);
-      }
-      this.store.set('profiles', profiles);
-
-      // Update active profile if this is the current one
-      const activeProfile = this.store.get('activeProfile', 'Por Defecto');
-      if (activeProfile === profile.name) {
-        // Already active, just saved
-      }
-
-      return { success: true };
+      const updated = this.profileStore.update(profileId, (current) => ({
+        ...settingsToProfile(currentSettings, current),
+        history: this.pipeline.getHistory()
+      }));
+      if (!updated) return { success: false, error: 'Profile not found' };
+      return { success: true, profile: updated };
     });
 
-    ipcMain.handle('create-profile', (event, { name, cloneFrom }) => {
-      if (!name || typeof name !== 'string') {
-        return { success: false, error: 'Invalid profile name' };
+    ipcMain.handle('create-profile', (event, { name, cloneFromId } = {}) => {
+      try {
+        const created = this.profileStore.create({ name, cloneFromId });
+        return { success: true, profile: created };
+      } catch (e) {
+        return { success: false, error: e.message };
       }
-      const profiles = this.store.get('profiles', []);
-      if (profiles.some(p => p.name === name)) {
-        return { success: false, error: 'Profile name already exists' };
-      }
-
-      // Clone from current active profile or specified profile
-      const sourceName = cloneFrom || this.store.get('activeProfile', 'Por Defecto');
-      const sourceProfile = profiles.find(p => p.name === sourceName);
-
-      const newProfile = sourceProfile
-        ? { ...sourceProfile, name, isDefault: false, savedAt: Date.now() }
-        : {
-            name,
-            isDefault: false,
-            sourceLang: this.store.get('sourceLang', 'auto'),
-            targetLang: this.store.get('targetLang', 'es'),
-            inputMethod: this.store.get('inputMethod', 'textractor'),
-            engine: this.store.get('engine', 'google-free'),
-            deeplKey: '', openaiKey: '', apiKey: '',
-            customEndpoint: '', customModel: '',
-            libretranslateEndpoint: '',
-            customMTEndpoint: '', customMTMethod: '',
-            customMTBody: '', customMTResponsePath: '', customMTAuthHeader: '',
-            textractorCliPath: this.store.get('textractorCliPath', ''),
-            textractorPort: this.store.get('textractorPort', 9251),
-            manualTextractorMode: this.store.get('manualTextractorMode', false),
-            glossary: this.glossary.getAll(),
-            history: [],
-            savedAt: Date.now()
-          };
-
-      profiles.push(newProfile);
-      this.store.set('profiles', profiles);
-      return { success: true };
     });
 
-    ipcMain.handle('delete-profile', (event, name) => {
-      if (name === 'Por Defecto') {
-        return { success: false, error: 'Cannot delete the default profile' };
+    ipcMain.handle('rename-profile', (event, { id, newName } = {}) => {
+      try {
+        const updated = this.profileStore.rename(id, newName);
+        return { success: true, profile: updated };
+      } catch (e) {
+        return { success: false, error: e.message };
       }
-      let profiles = this.store.get('profiles', []);
-      profiles = profiles.filter(p => p.name !== name);
-      this.store.set('profiles', profiles);
-      // If deleting the active profile, switch to default
-      const activeProfile = this.store.get('activeProfile', 'Por Defecto');
-      if (activeProfile === name) {
-        this.store.set('activeProfile', 'Por Defecto');
-      }
-      return { success: true };
     });
 
-    ipcMain.handle('load-profile', (event, name) => {
-      const profiles = this.store.get('profiles', []);
-      const profile = profiles.find(p => p.name === name);
-      if (!profile) return { success: false, error: 'Profile not found' };
+    ipcMain.handle('duplicate-profile', (event, { id, newName } = {}) => {
+      try {
+        const created = this.profileStore.duplicate(id, newName);
+        return { success: true, profile: created };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
 
-      // v3.10.7: Save current profile data BEFORE loading new one
-      const currentActiveProfile = this.store.get('activeProfile', 'Por Defecto');
-      if (currentActiveProfile !== name) {
-        const currentProfileIdx = profiles.findIndex(p => p.name === currentActiveProfile);
-        if (currentProfileIdx >= 0) {
-          const currentSettings = this.store.get();
-          profiles[currentProfileIdx] = {
-            ...profiles[currentProfileIdx],
-            sourceLang: currentSettings.sourceLang,
-            targetLang: currentSettings.targetLang,
-            inputMethod: currentSettings.inputMethod,
-            engine: currentSettings.engine,
-            deeplKey: currentSettings.deeplKey || '',
-            openaiKey: currentSettings.openaiKey || '',
-            customEndpoint: currentSettings.customEndpoint || '',
-            customModel: currentSettings.customModel || '',
-            libretranslateEndpoint: currentSettings.libretranslateEndpoint || '',
-            customMTEndpoint: currentSettings.customMTEndpoint || '',
-            customMTMethod: currentSettings.customMTMethod || '',
-            customMTBody: currentSettings.customMTBody || '',
-            customMTResponsePath: currentSettings.customMTResponsePath || '',
-            customMTAuthHeader: currentSettings.customMTAuthHeader || '',
-            textractorCliPath: currentSettings.textractorCliPath || '',
-            textractorPort: currentSettings.textractorPort || 9251,
-            manualTextractorMode: currentSettings.manualTextractorMode || false,
-            glossary: this.glossary.getAll(),
-            history: this.pipeline.getHistory(),
-            savedAt: Date.now()
-          };
-        }
+    ipcMain.handle('delete-profile', (event, id) => {
+      try {
+        const removed = this.profileStore.remove(id);
+        if (!removed) return { success: false, error: 'Profile not found' };
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: e.message };
+      }
+    });
+
+    ipcMain.handle('load-profile', (event, id) => {
+      const incoming = this.profileStore.getById(id);
+      if (!incoming) return { success: false, error: 'Profile not found' };
+
+      // Save the OUTGOING profile's current settings before switching —
+      // same intent as before ("a profile switch snapshots what you were
+      // doing"), now via settingsToProfile() instead of a hand-written
+      // field list. Deliberately does NOT touch glossary here — the
+      // outgoing profile's glossary layer is only ever mutated through the
+      // glossary IPC handlers (save/delete/import above), never implicitly
+      // by switching away from it.
+      const activeId = this.profileStore.getActiveId();
+      if (activeId && activeId !== id) {
+        const currentSettings = this.store.get();
+        this.profileStore.update(activeId, (current) => ({
+          ...settingsToProfile(currentSettings, current),
+          history: this.pipeline.getHistory()
+        }));
       }
 
-      // ONLY restore profile-scoped data. Global settings are NOT touched.
-      const profileSettings = {};
-      if (profile.sourceLang !== undefined) profileSettings.sourceLang = profile.sourceLang;
-      if (profile.targetLang !== undefined) profileSettings.targetLang = profile.targetLang;
-      if (profile.inputMethod !== undefined) profileSettings.inputMethod = profile.inputMethod;
-      if (profile.engine !== undefined) profileSettings.engine = profile.engine;
-      if (profile.deeplKey !== undefined) profileSettings.deeplKey = profile.deeplKey;
-      if (profile.openaiKey !== undefined) profileSettings.openaiKey = profile.openaiKey;
-      if (profile.customEndpoint !== undefined) profileSettings.customEndpoint = profile.customEndpoint;
-      if (profile.customModel !== undefined) profileSettings.customModel = profile.customModel;
-      if (profile.libretranslateEndpoint !== undefined) profileSettings.libretranslateEndpoint = profile.libretranslateEndpoint;
-      if (profile.customMTEndpoint !== undefined) profileSettings.customMTEndpoint = profile.customMTEndpoint;
-      if (profile.customMTMethod !== undefined) profileSettings.customMTMethod = profile.customMTMethod;
-      if (profile.customMTBody !== undefined) profileSettings.customMTBody = profile.customMTBody;
-      if (profile.customMTResponsePath !== undefined) profileSettings.customMTResponsePath = profile.customMTResponsePath;
-      if (profile.customMTAuthHeader !== undefined) profileSettings.customMTAuthHeader = profile.customMTAuthHeader;
-      if (profile.textractorCliPath !== undefined) profileSettings.textractorCliPath = profile.textractorCliPath;
-      if (profile.textractorPort !== undefined) profileSettings.textractorPort = profile.textractorPort;
-      if (profile.manualTextractorMode !== undefined) profileSettings.manualTextractorMode = profile.manualTextractorMode;
-
-      // Apply profile-scoped settings (preserving ALL global settings)
-      const mergedSettings = { ...this.store.get(), ...profileSettings };
-      this.store.set(mergedSettings);
+      const profileSettings = profileToSettings(incoming);
+      this.store.set(profileSettings);
       this.pipeline.updateSettings(profileSettings);
+
+      // v3.13.40 (step 5): the INCOMING profile's glossary layer becomes
+      // the active one — this is the other half of the two-layer glossary
+      // (see setProfileLayer's own doc comment in glossary.js). Without
+      // this, a profile switch would silently keep applying the PREVIOUS
+      // profile's terms.
+      this.glossary.setProfileLayer(incoming.glossary);
 
       // v3.13.19: A profile switch is the closest thing this app has to
       // "changed games" — the previous game's dialogue context must not
       // bleed into the new one.
       this.pipeline.clearContext();
 
-      // Restore glossary: only if glossary.perProfile is enabled
-      const perProfileGlossary = this.store.get('perProfileGlossary', false);
-      if (perProfileGlossary && profile.glossary && Array.isArray(profile.glossary)) {
-        this.glossary.replaceAll(profile.glossary);
-      }
-      // If per-profile glossary is OFF, don't touch the glossary (it's global)
-
-      // Restore history (always per-profile)
       const historyLimit = this.store.get('historyLimit', 5);
-      if (profile.history && Array.isArray(profile.history)) {
-        const limitedHistory = historyLimit > 0 ? profile.history.slice(0, historyLimit) : [];
-        this.pipeline.replaceHistory(limitedHistory);
-      } else {
-        this.pipeline.replaceHistory([]);
-      }
+      const limitedHistory = Array.isArray(incoming.history)
+        ? (historyLimit > 0 ? incoming.history.slice(0, historyLimit) : [])
+        : [];
+      this.pipeline.replaceHistory(limitedHistory);
 
-      // Update active profile
-      this.store.set('activeProfile', name);
+      this.profileStore.setActive(id);
 
-      // Save updated profiles (with previous profile data saved)
-      this.store.set('profiles', profiles);
-
-      return { success: true, settings: profileSettings, activeProfile: name, hasGlossary: !!(profile.glossary && profile.glossary.length), hasHistory: !!(profile.history && profile.history.length) };
+      return {
+        success: true,
+        settings: profileSettings,
+        activeProfileId: id,
+        hasGlossary: !!(incoming.glossary && incoming.glossary.length),
+        hasHistory: !!(incoming.history && incoming.history.length)
+      };
     });
 
     ipcMain.handle('get-active-profile', () => {
-      return this.store.get('activeProfile', 'Por Defecto');
+      return this.profileStore.getActiveId();
     });
 
     // ===== API Key Validation =====
@@ -1195,6 +1179,23 @@ class IpcHandlers {
       if (typeof text !== 'string' || text.length === 0) return;
       this._handleText(text);
     });
+
+    // v3.13.40-fix: sendSync (not invoke/handle) — main-preload.js calls
+    // this synchronously while building the `api` object, so app.getVersion()
+    // needs to be available before contextBridge.exposeInMainWorld runs.
+    ipcMain.on('get-app-version', (event) => {
+      event.returnValue = app.getVersion();
+    });
+
+    // v3.13.40-fix: confirm-dialog/alert-dialog (native dialog.showMessageBox
+    // over IPC) briefly lived here, as the fix for window.confirm()/alert()
+    // leaving the renderer's keyboard focus broken after they closed (a
+    // known Electron quirk — see git history if curious). Removed again:
+    // a native OS dialog fixed the focus bug but can't be restyled at all
+    // (showed up as a plain Windows message box), so it was replaced by
+    // showConfirm()/showToast() in renderer.js — an in-page modal that
+    // never touches the native blocking dialog APIs, so the focus bug
+    // never applied to it either. Nothing calls these IPC channels anymore.
 
     // ===== OCR =====
     ipcMain.handle('ocr-start', async () => {
@@ -1970,9 +1971,10 @@ class IpcHandlers {
     const channels = [
       'get-settings', 'save-settings',
       'get-glossary', 'save-glossary', 'delete-glossary-entry',
-      'import-glossary', 'export-glossary',
+      'import-glossary', 'export-glossary', 'browse-save-json', 'browse-open-json',
       'get-history', 'clear-history', 'export-history', 'clear-context',
-      'get-profiles', 'save-profile', 'delete-profile', 'load-profile',
+      'get-profiles', 'save-profile', 'create-profile', 'delete-profile', 'load-profile',
+      'get-active-profile', 'rename-profile', 'duplicate-profile',
       'validate-api-key', 'test-connection', 'detect-font-family',
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-set-language',
       'ocr-set-interval', 'ocr-set-preprocessing', 'ocr-set-min-confidence', 'ocr-status',
@@ -1982,10 +1984,23 @@ class IpcHandlers {
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
       'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game', 'xuat-set-port',
-      'xuat-test-endpoint'
+      'xuat-test-endpoint', 'xuat-update-language', 'xuat-clear-cache',
+      // v3.11.27: VNDB glossary import
+      'vndb-search', 'vndb-import',
+      // v3.11.28: DeepL feature detection
+      'deepl-fetch-features', 'deepl-fetch-translation-memories',
+      // v3.11.30: Regex text filter
+      'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
+      'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',
+      // v3.13.21: HOOK cleaning step settings
+      'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
+      'reset-hook-cleaning-steps',
+      // v3.13.01: PaddleOCR engine selection
+      'set-ocr-engine', 'get-ocr-engine-status'
     ];
     channels.forEach(ch => ipcMain.removeHandler(ch));
     ipcMain.removeAllListeners('manual-translate');
+    ipcMain.removeAllListeners('get-app-version');
     // Cleanup OCR
     if (this.ocrService) {
       this.ocrService.stopAutoCapture();

@@ -3,17 +3,65 @@
  * Manages translation glossary entries for consistent terminology.
  * Supports exact match, case-insensitive, and regex patterns.
  * Applied as pre-processing (before translation) and post-processing (after).
+ *
+ * Two layers: the GLOBAL layer (this.store, `entries[]`, shared across all
+ * games) and a PER-PROFILE layer (`setProfileLayer()`, in-memory only —
+ * profiles/profile-store.js is what persists it). getEffective() merges
+ * them via glossary-merge.js, profile winning on conflict; both
+ * applyPreTranslation/applyPostTranslation read the merged result.
  */
-const Store = require('electron-store');
+const glossaryMerge = require('./glossary-merge');
+const glossaryEntries = require('./glossary-entries');
+
+// v3.13.40 (profiles Phase 1, step 2): require('electron-store') moved
+// inside the constructor's no-store branch instead of at module load —
+// this is what makes glossary.js requireable from a plain-Node bench with
+// an injected fake store and zero Electron/disk dependency (see
+// scripts/test-glossary-merge.js, which already calls
+// GlossaryService.prototype._applyEntry without ever instantiating Store).
+function createDefaultStore() {
+  const Store = require('electron-store');
+  return new Store({
+    name: 'glossary',
+    defaults: {
+      entries: []  // [{ id, source, target, mode, enabled, createdAt }]
+    }
+  });
+}
 
 class GlossaryService {
-  constructor() {
-    this.store = new Store({
-      name: 'glossary',
-      defaults: {
-        entries: []  // [{ id, source, target, mode, enabled, createdAt }]
-      }
-    });
+  constructor(store) {
+    this.store = store || createDefaultStore();
+    this._profileEntries = [];
+    this._effectiveDirty = true;
+    this._effectiveCache = [];
+  }
+
+  _invalidateEffective() {
+    this._effectiveDirty = true;
+  }
+
+  /**
+   * Sets the in-memory per-profile glossary layer — called on profile
+   * switch (and at startup for the active profile). Not persisted by this
+   * class; profile-store.js owns writing profile.glossary to disk.
+   */
+  setProfileLayer(entries) {
+    this._profileEntries = Array.isArray(entries) ? entries : [];
+    this._invalidateEffective();
+  }
+
+  /**
+   * The merged, effective glossary: profile layer entries first, global
+   * layer entries after, profile winning on (mode, source) conflict — see
+   * glossary-merge.js for why the order is functional, not cosmetic.
+   */
+  getEffective() {
+    if (this._effectiveDirty) {
+      this._effectiveCache = glossaryMerge.mergeGlossaryLayers(this.getEnabled(), this._profileEntries);
+      this._effectiveDirty = false;
+    }
+    return this._effectiveCache;
   }
 
   getAll() {
@@ -25,33 +73,23 @@ class GlossaryService {
   }
 
   add(entry) {
-    const entries = this.store.get('entries', []);
-    const newEntry = {
-      id: this._generateId(),
-      source: entry.source || '',
-      target: entry.target || '',
-      mode: entry.mode || 'exact',  // 'exact', 'case-insensitive', 'regex'
-      enabled: entry.enabled !== undefined ? entry.enabled : true,
-      createdAt: Date.now()
-    };
-    entries.push(newEntry);
-    this.store.set('entries', entries);
+    const { list, entry: newEntry } = glossaryEntries.addEntry(this.store.get('entries', []), entry);
+    this.store.set('entries', list);
+    this._invalidateEffective();
     return newEntry;
   }
 
   update(id, updates) {
-    const entries = this.store.get('entries', []);
-    const idx = entries.findIndex(e => e.id === id);
-    if (idx === -1) return null;
-    entries[idx] = { ...entries[idx], ...updates, id };
-    this.store.set('entries', entries);
-    return entries[idx];
+    const { list, entry } = glossaryEntries.updateEntry(this.store.get('entries', []), id, updates);
+    if (!entry) return null;
+    this.store.set('entries', list);
+    this._invalidateEffective();
+    return entry;
   }
 
   delete(id) {
-    let entries = this.store.get('entries', []);
-    entries = entries.filter(e => e.id !== id);
-    this.store.set('entries', entries);
+    this.store.set('entries', glossaryEntries.removeEntry(this.store.get('entries', []), id));
+    this._invalidateEffective();
   }
 
   /**
@@ -59,18 +97,14 @@ class GlossaryService {
    */
   replaceAll(newEntries) {
     this.store.set('entries', newEntries);
+    this._invalidateEffective();
   }
 
   /**
    * Apply glossary replacements to text (pre-translation)
    */
   applyPreTranslation(text) {
-    const entries = this.getEnabled();
-    let result = text;
-    for (const entry of entries) {
-      result = this._applyEntry(result, entry);
-    }
-    return result;
+    return this._apply(text);
   }
 
   /**
@@ -78,9 +112,12 @@ class GlossaryService {
    * Useful for terms that the translation engine doesn't know
    */
   applyPostTranslation(text) {
-    const entries = this.getEnabled();
+    return this._apply(text);
+  }
+
+  _apply(text) {
     let result = text;
-    for (const entry of entries) {
+    for (const entry of this.getEffective()) {
       result = this._applyEntry(result, entry);
     }
     return result;
@@ -112,34 +149,15 @@ class GlossaryService {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  _generateId() {
-    return Date.now().toString(36) + Math.random().toString(36).substring(2, 11);
-  }
-
   /**
    * Import glossary from JSON file
    */
   importFromFile(filePath) {
     const fs = require('fs');
     const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!Array.isArray(data)) throw new Error('Invalid glossary format');
-
-    const entries = this.store.get('entries', []);
-    let imported = 0;
-    for (const item of data) {
-      if (item.source && item.target) {
-        entries.push({
-          id: this._generateId(),
-          source: item.source,
-          target: item.target,
-          mode: item.mode || 'exact',
-          enabled: item.enabled !== undefined ? item.enabled : true,
-          createdAt: Date.now()
-        });
-        imported++;
-      }
-    }
-    this.store.set('entries', entries);
+    const { list, imported } = glossaryEntries.importEntries(this.store.get('entries', []), data);
+    this.store.set('entries', list);
+    this._invalidateEffective();
     return imported;
   }
 

@@ -19,12 +19,16 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'clear-context',
   'import-glossary',
   'export-glossary',
+  'browse-save-json',
+  'browse-open-json',
   'get-profiles',
   'save-profile',
   'create-profile',
   'delete-profile',
   'load-profile',
   'get-active-profile',
+  'rename-profile',
+  'duplicate-profile',
   'ocr-capture',
   'ocr-start',
   'ocr-stop',
@@ -141,26 +145,32 @@ const api = {
     return secureInvoke('save-settings', data);
   },
 
-  // Glossary
+  // Glossary (v3.13.40: two layers — scope is 'global' or 'profile')
   getGlossary: () => secureInvoke('get-glossary'),
-  saveGlossaryEntry: (entry) => {
+  saveGlossaryEntry: (entry, scope = 'global') => {
     if (!entry || typeof entry.source !== 'string' || typeof entry.target !== 'string') {
       throw new Error('Invalid glossary entry');
     }
-    return secureInvoke('save-glossary', entry);
+    return secureInvoke('save-glossary', { entry, scope });
   },
-  deleteGlossaryEntry: (id) => {
+  deleteGlossaryEntry: (id, scope = 'global') => {
     if (typeof id !== 'string') throw new Error('Invalid entry ID');
-    return secureInvoke('delete-glossary-entry', id);
+    return secureInvoke('delete-glossary-entry', { id, scope });
   },
-  importGlossary: (filePath) => {
+  importGlossary: (filePath, scope = 'global') => {
     if (typeof filePath !== 'string') throw new Error('Invalid file path');
-    return secureInvoke('import-glossary', filePath);
+    return secureInvoke('import-glossary', { filePath, scope });
   },
-  exportGlossary: (filePath) => {
+  exportGlossary: (filePath, scope = 'global') => {
     if (typeof filePath !== 'string') throw new Error('Invalid file path');
-    return secureInvoke('export-glossary', filePath);
+    return secureInvoke('export-glossary', { filePath, scope });
   },
+  // v3.13.40-fix: native file pickers, replacing the "type the full path"
+  // prompt() flow — real feedback found it unclear (read as "type just
+  // the filename" at first) and worse UX than every other file-choosing
+  // flow in the app already had (see textractorBrowseCli).
+  browseSaveFile: (options) => secureInvoke('browse-save-json', options || {}),
+  browseOpenFile: (options) => secureInvoke('browse-open-json', options || {}),
 
   // History
   getHistory: () => secureInvoke('get-history'),
@@ -171,23 +181,33 @@ const api = {
     return secureInvoke('export-history', filePath);
   },
 
-  // Profiles
+  // Profiles (v3.13.40: keyed by id, not name — id is what makes rename possible)
   getProfiles: () => secureInvoke('get-profiles'),
-  saveProfile: (profile) => {
-    if (!profile || typeof profile.name !== 'string') throw new Error('Invalid profile');
-    return secureInvoke('save-profile', profile);
+  saveProfile: (id) => {
+    if (typeof id !== 'string') throw new Error('Invalid profile id');
+    return secureInvoke('save-profile', id);
   },
-  createProfile: ({ name, cloneFrom }) => {
+  createProfile: ({ name, cloneFromId } = {}) => {
     if (typeof name !== 'string') throw new Error('Invalid profile name');
-    return secureInvoke('create-profile', { name, cloneFrom: cloneFrom || undefined });
+    return secureInvoke('create-profile', { name, cloneFromId: cloneFromId || undefined });
   },
-  deleteProfile: (name) => {
-    if (typeof name !== 'string') throw new Error('Invalid profile name');
-    return secureInvoke('delete-profile', name);
+  renameProfile: (id, newName) => {
+    if (typeof id !== 'string') throw new Error('Invalid profile id');
+    if (typeof newName !== 'string') throw new Error('Invalid profile name');
+    return secureInvoke('rename-profile', { id, newName });
   },
-  loadProfile: (name) => {
-    if (typeof name !== 'string') throw new Error('Invalid profile name');
-    return secureInvoke('load-profile', name);
+  duplicateProfile: (id, newName) => {
+    if (typeof id !== 'string') throw new Error('Invalid profile id');
+    if (typeof newName !== 'string') throw new Error('Invalid profile name');
+    return secureInvoke('duplicate-profile', { id, newName });
+  },
+  deleteProfile: (id) => {
+    if (typeof id !== 'string') throw new Error('Invalid profile id');
+    return secureInvoke('delete-profile', id);
+  },
+  loadProfile: (id) => {
+    if (typeof id !== 'string') throw new Error('Invalid profile id');
+    return secureInvoke('load-profile', id);
   },
   getActiveProfile: () => secureInvoke('get-active-profile'),
 
@@ -379,7 +399,21 @@ const api = {
 
   // Platform info
   platform: process.platform,
-  version: process.env.npm_package_version || '3.13.01'
+  // v3.13.40-fix: require('../../package.json') broke the ENTIRE preload
+  // silently — this window is created with `sandbox: true`
+  // (window-manager.js), and a sandboxed preload's require() only allows
+  // a small built-in allowlist (electron/events/timers/url), not
+  // arbitrary local file paths. Since this was the last property in the
+  // `api` object literal, the exception aborted the whole `const api =
+  // {...}` before contextBridge.exposeInMainWorld ever ran — window.tuhuaAPI
+  // stayed undefined, and every api.* call in the renderer failed via
+  // init()'s `if (!api) return;` guard (not just this field — that's why
+  // profile cards disappeared too, not only the version badge).
+  // ipcRenderer.sendSync is explicitly allowed under sandbox, so this asks
+  // the main process (which has full Node/Electron access) via
+  // app.getVersion() — Electron's own accessor for package.json's
+  // `version`, correct in both dev and a packaged build.
+  version: ipcRenderer.sendSync('get-app-version')
 };
 
 contextBridge.exposeInMainWorld('tuhuaAPI', api);
