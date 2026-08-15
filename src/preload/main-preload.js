@@ -343,9 +343,12 @@ const api = {
     if (typeof query !== 'string' || query.trim().length < 2) throw new Error('Query too short');
     return secureInvoke('vndb-search', query);
   },
-  vndbImport: (vnId, options) => {
+  // v3.13.41: profileId is explicit now — the import button lives on each
+  // profile card, not just the active profile's Glosario tab.
+  vndbImport: (vnId, profileId, options) => {
     if (typeof vnId !== 'string') throw new Error('Invalid VNDB ID');
-    return secureInvoke('vndb-import', vnId, options || {});
+    if (typeof profileId !== 'string') throw new Error('Invalid profile ID');
+    return secureInvoke('vndb-import', vnId, profileId, options || {});
   },
 
   // v3.11.28: DeepL feature detection

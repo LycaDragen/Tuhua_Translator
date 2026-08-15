@@ -38,7 +38,7 @@ class VndbService {
    * Returns up to 10 matching VN entries with basic info.
    *
    * @param {string} query - Search term (title or partial title)
-   * @returns {Promise<Array<{id: string, title: string, alttitle: string|null, aliases: string[]}>>}
+   * @returns {Promise<Array<{id: string, title: string, alttitle: string|null, aliases: string[], imageUrl: string|null}>>}
    */
   async searchVN(query) {
     if (!query || query.trim().length < 2) return [];
@@ -46,7 +46,7 @@ class VndbService {
     try {
       const response = await this._client.post('/vn', {
         filters: ['search', '=', query.trim()],
-        fields: 'id, title, alttitle, aliases',
+        fields: 'id, title, alttitle, aliases, image.url',
         sort: 'searchrank',
         results: 10
       });
@@ -57,7 +57,8 @@ class VndbService {
         id: vn.id,
         title: vn.title || '',
         alttitle: vn.alttitle || null,
-        aliases: vn.aliases || []
+        aliases: vn.aliases || [],
+        imageUrl: (vn.image && vn.image.url) || null
       }));
     } catch (err) {
       log.error('[VNDB] Search VN error:', err.message);

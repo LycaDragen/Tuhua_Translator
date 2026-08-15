@@ -34,6 +34,25 @@ const api = {
   // Requests the main process to resize this overlay window to fit content
   resizeOverlay: (desiredHeight) => ipcRenderer.invoke('resize-overlay', desiredHeight),
 
+  // v3.13.42: right-click a word in the output overlay → save to glossary.
+  // requestWordContextMenu asks the main process to build and show a
+  // NATIVE context menu (ipcMain.on('overlay-word-context-menu', ...) in
+  // ipc-handlers.js) — a native menu can render outside this window's own
+  // bounds, which a DOM popup couldn't, since this window is sized tightly
+  // to the translation text. Picking a menu item there opens a second,
+  // tiny prompt window (word-save-prompt/) that reuses this SAME preload
+  // — onWordPromptContext/saveGlossaryEntry are for that window, not this
+  // one. save-glossary is otherwise a main-window-only channel (see
+  // ALLOWED_INVOKE_CHANNELS in main-preload.js); invoking it here is
+  // deliberate, same as resize-overlay above (see this file's header).
+  requestWordContextMenu: (word) => ipcRenderer.send('overlay-word-context-menu', word),
+  onWordPromptContext: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('word-prompt-context', handler);
+    return () => ipcRenderer.removeListener('word-prompt-context', handler);
+  },
+  saveGlossaryEntry: (entry, scope) => ipcRenderer.invoke('save-glossary', { entry, scope }),
+
   platform: process.platform
 };
 

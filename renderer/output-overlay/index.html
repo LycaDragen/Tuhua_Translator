@@ -71,6 +71,22 @@
             width: 100%;
             animation: fadeIn 0.3s ease;
         }
+        /* v3.13.42: right-click a word to save it + a meaning to the
+           glossary (see the contextmenu listener below). Only applies
+           when click-through is OFF — same precondition as dragging the
+           overlay already has, nothing new introduced by this feature. */
+        #text-content .word {
+            cursor: context-menu;
+            border-radius: 3px;
+            padding: 0 1px;
+            transition: background-color 0.15s ease;
+        }
+        #text-content .word:hover {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+        .theme-light #text-content .word:hover {
+            background-color: rgba(0, 0, 0, 0.08);
+        }
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(4px); }
             to { opacity: 1; transform: translateY(0); }
@@ -136,8 +152,48 @@
                 }
             }
 
+            /**
+             * v3.13.42: renders the translation as individual clickable
+             * word spans (instead of one plain text node) so the
+             * contextmenu listener below can tell WHICH word was
+             * right-clicked. Whitespace is preserved as literal text
+             * nodes between spans so wrapping/spacing looks identical to
+             * plain innerText. Leading/trailing punctuation is stripped
+             * from the saved term (span.dataset.word) but still shown
+             * on screen — "Hola," should save as "Hola", not "Hola,".
+             * Word segmentation is whitespace-based, so this only makes
+             * sense for space-delimited target languages (the overlay
+             * always shows the TRANSLATION, i.e. the reader's own
+             * language — usually Latin-alphabet); a CJK target language
+             * is a known, accepted gap, not handled here.
+             */
+            function renderClickableText(text) {
+                content.innerHTML = '';
+                const parts = String(text).split(/(\s+)/);
+                for (const part of parts) {
+                    if (part === '') continue;
+                    if (/^\s+$/.test(part)) {
+                        content.appendChild(document.createTextNode(part));
+                        continue;
+                    }
+                    const span = document.createElement('span');
+                    span.className = 'word';
+                    span.textContent = part;
+                    const clean = part.replace(/^[¿¡"'“‘(\[]+|["'”’.,!?;:)\]]+$/g, '');
+                    span.dataset.word = clean || part;
+                    content.appendChild(span);
+                }
+            }
+
+            content.addEventListener('contextmenu', (e) => {
+                const wordEl = e.target.closest('.word');
+                if (!wordEl || !wordEl.dataset.word) return;
+                e.preventDefault();
+                overlay.requestWordContextMenu(wordEl.dataset.word);
+            });
+
             overlay.onOutputText((data) => {
-                content.innerText = data.text || '';
+                renderClickableText(data.text || '');
                 if (data.targetLang && langBadge) {
                     langBadge.innerText = LANG_NAMES[data.targetLang] || data.targetLang.toUpperCase();
                 }

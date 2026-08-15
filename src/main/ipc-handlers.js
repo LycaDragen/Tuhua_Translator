@@ -3,7 +3,7 @@
  * Registers all secure IPC communication between main and renderer.
  * All payloads are validated before processing.
  */
-const { ipcMain, dialog, app, desktopCapturer } = require('electron');
+const { ipcMain, dialog, app, desktopCapturer, Menu } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -580,7 +580,10 @@ class IpcHandlers {
         const count = this.glossary.importFromFile(filePath);
         return { success: true, imported: count };
       } catch (e) {
-        return { success: false, error: e.message };
+        // e.code (WRONG_CATEGORY_HISTORY / NO_VALID_ENTRIES / INVALID_FORMAT,
+        // see glossary-entries.js) lets the renderer show a specific,
+        // translated message instead of the raw error text.
+        return { success: false, error: e.message, code: e.code };
       }
     });
 
@@ -728,31 +731,61 @@ class IpcHandlers {
       }
     });
 
-    // Import glossary entries from a VNDB visual novel
-    ipcMain.handle('vndb-import', async (event, vnId, options) => {
+    // Import glossary entries from a VNDB visual novel.
+    // v3.13.40 (profiles Phase 1, step 6): routes to a PROFILE glossary
+    // layer, not the global one — a VN's characters/terms are per-game
+    // data, same reasoning as save-glossary/import-glossary's scope:
+    // 'profile' branch above (which this mirrors: profileStore.update()).
+    // v3.13.41: the button that opens this moved to each profile CARD, so
+    // it now targets an explicit `profileId` — not necessarily the active
+    // one. glossary.setProfileLayer() represents "the active profile's
+    // merged view" specifically, so it's only called when the profile we
+    // just edited IS the active one; calling it for a different profile
+    // would clobber the pipeline's in-memory glossary with the wrong
+    // profile's data while some OTHER profile stays active.
+    ipcMain.handle('vndb-import', async (event, vnId, profileId, options) => {
       if (typeof vnId !== 'string' || !vnId.match(/^v\d+$/)) {
         return { success: false, error: 'Invalid VNDB VN ID (format: v123)' };
       }
+      const target = this.profileStore.getById(profileId);
+      if (!target) return { success: false, error: 'Profile not found' };
       try {
         const importResult = await this.vndbService.importGlossary(vnId, options || {});
 
-        // Add all imported entries to the glossary
         let addedCount = 0;
-        for (const entry of importResult.entries) {
-          // Check for duplicates before adding
-          const existing = this.glossary.getAll();
-          const isDuplicate = existing.some(e =>
-            e.source === entry.source && e.target === entry.target
-          );
-          if (!isDuplicate) {
-            this.glossary.add({
-              source: entry.source,
-              target: entry.target,
-              mode: entry.mode || 'case-insensitive',
-              enabled: true
-            });
-            addedCount++;
+        this.profileStore.update(target.id, (current) => {
+          let list = current.glossary || [];
+          for (const entry of importResult.entries) {
+            const isDuplicate = list.some(e =>
+              e.source === entry.source && e.target === entry.target
+            );
+            if (!isDuplicate) {
+              const result = glossaryEntries.addEntry(list, {
+                source: entry.source,
+                target: entry.target,
+                mode: entry.mode || 'case-insensitive',
+                enabled: true
+              });
+              list = result.list;
+              addedCount++;
+            }
           }
+          const patch = { glossary: list };
+          // v3.13.41: cover thumbnail — the renderer already has the VN's
+          // image.url from the search result (see vndb.js), so it's
+          // passed straight through in `options` instead of fetching the
+          // VN a second time here. Only overwrites the card's existing
+          // cover when this VN actually has an image; re-importing a
+          // cover-less VN on top of a profile that already has one
+          // shouldn't blank it out.
+          if (options && typeof options.coverUrl === 'string' && options.coverUrl) {
+            patch.cover = { url: options.coverUrl, vnId, vnTitle: options.vnTitle || '' };
+          }
+          return patch;
+        });
+        const active = this.profileStore.getActive();
+        if (active && active.id === target.id) {
+          this.glossary.setProfileLayer(this.profileStore.getById(target.id).glossary);
         }
 
         return {
@@ -764,6 +797,50 @@ class IpcHandlers {
       } catch (e) {
         return { success: false, error: e.message };
       }
+    });
+
+    // ===== Word → Glossary (right-click on the output overlay) =====
+    // v3.13.42: Textractor/clipboard/OCR all render through the SAME
+    // output-overlay window, so this covers all three input methods at
+    // once — no per-method wiring needed. `.on`, not `.handle`: the
+    // overlay just fires-and-forgets the click, the menu itself is built
+    // and shown here (a native Menu can render outside the tiny overlay
+    // window's own bounds, which a DOM popup couldn't — see
+    // overlay-preload.js's comment on requestWordContextMenu). The scope
+    // (global vs. this profile) is picked from the menu directly; the
+    // follow-up prompt window (word-save-prompt/, created by
+    // windowManager.createWordSavePrompt) only asks for the meaning.
+    ipcMain.on('overlay-word-context-menu', (event, word) => {
+      if (typeof word !== 'string' || !word.trim()) return;
+      const cleanWord = word.trim();
+      const active = this.profileStore.getActive();
+      // Resolved here (not in the prompt window) because that window has
+      // no translations.js of its own — same reasoning as mainT() itself,
+      // see its doc comment near the top of this file.
+      const strings = {
+        save: mainT(this.store, 'word_save_button'),
+        cancel: mainT(this.store, 'word_save_cancel'),
+        placeholder: mainT(this.store, 'word_save_meaning_placeholder'),
+        emptyError: mainT(this.store, 'word_save_empty_meaning'),
+        error: mainT(this.store, 'word_save_error'),
+        success: mainT(this.store, 'word_save_success')
+      };
+      const globalLabel = mainT(this.store, 'word_save_scope_global');
+      const template = [
+        { label: `"${cleanWord}"`, enabled: false },
+        { type: 'separator' },
+        {
+          label: mainT(this.store, 'word_save_global'),
+          click: () => this.windowManager.createWordSavePrompt(cleanWord, 'global', globalLabel, strings)
+        }
+      ];
+      if (active) {
+        template.push({
+          label: mainT(this.store, 'word_save_profile').replace('{profile}', active.name),
+          click: () => this.windowManager.createWordSavePrompt(cleanWord, 'profile', active.name, strings)
+        });
+      }
+      Menu.buildFromTemplate(template).popup({ window: this.windowManager.outputOverlay });
     });
 
     // ===== History =====
@@ -2001,6 +2078,7 @@ class IpcHandlers {
     channels.forEach(ch => ipcMain.removeHandler(ch));
     ipcMain.removeAllListeners('manual-translate');
     ipcMain.removeAllListeners('get-app-version');
+    ipcMain.removeAllListeners('overlay-word-context-menu');
     // Cleanup OCR
     if (this.ocrService) {
       this.ocrService.stopAutoCapture();

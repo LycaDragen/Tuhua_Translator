@@ -1009,16 +1009,35 @@
             }
         }
 
+        // v3.13.41: stays on screen until the user closes it (X, top-right)
+        // instead of auto-fading after 2s — real feedback was that longer
+        // messages (import results, error details) didn't stay up long
+        // enough to read. Still a single-slot toast: a new call replaces
+        // whatever's showing, same as before, it just doesn't time out on
+        // its own anymore.
         function showToast(message) {
             const existing = document.querySelector('.tuhua-toast');
             if (existing) existing.remove();
 
             const toast = document.createElement('div');
             toast.className = 'tuhua-toast';
-            toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;padding:10px 20px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);transition:opacity 0.3s ease;pointer-events:none;';
-            toast.textContent = message;
+            toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;align-items:flex-start;gap:10px;max-width:min(420px,90vw);padding:10px 10px 10px 16px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);';
+
+            const text = document.createElement('span');
+            text.style.cssText = 'flex:1;word-break:break-word;';
+            text.textContent = message;
+
+            const closeBtn = document.createElement('button');
+            closeBtn.setAttribute('aria-label', 'Close');
+            closeBtn.textContent = '×';
+            closeBtn.style.cssText = 'flex-shrink:0;background:none;border:none;color:inherit;opacity:0.6;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;';
+            closeBtn.onmouseenter = () => { closeBtn.style.opacity = '1'; };
+            closeBtn.onmouseleave = () => { closeBtn.style.opacity = '0.6'; };
+            closeBtn.onclick = () => toast.remove();
+
+            toast.appendChild(text);
+            toast.appendChild(closeBtn);
             document.body.appendChild(toast);
-            setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 2000);
         }
 
         // ===== CLICK THROUGH =====
@@ -1589,8 +1608,24 @@
             const browse = await api.browseOpenFile({ title: t.glossary_import });
             if (browse.canceled || !browse.path) return;
             const result = await api.importGlossary(browse.path, currentGlossaryScope);
-            if (result.success) loadGlossary();
-            else showToast((t.glossary_import_failed || 'Import failed: ') + result.error);
+            if (result.success) {
+                loadGlossary();
+                showToast((t.glossary_import_success || 'Imported {count} entries').replace('{count}', result.imported));
+                return;
+            }
+            // v3.13.41: importEntries() now flags WHY nothing was imported
+            // instead of silently returning imported:0 — real feedback
+            // found that picking History's export JSON here used to import
+            // 0 entries with no error at all (different shape: original/
+            // translated, not source/target), reading as "nothing
+            // happened." Give the specific reason when we have one.
+            if (result.code === 'WRONG_CATEGORY_HISTORY') {
+                showToast(t.glossary_import_wrong_category || 'That file is a history export, not a glossary — different category, can\'t be imported here.');
+            } else if (result.code === 'NO_VALID_ENTRIES') {
+                showToast(t.glossary_import_no_valid_entries || 'No valid glossary entries found in that file.');
+            } else {
+                showToast((t.glossary_import_failed || 'Import failed: ') + result.error);
+            }
         }
 
         async function exportGlossary() {
@@ -1600,6 +1635,232 @@
             if (browse.canceled || !browse.path) return;
             const result = await api.exportGlossary(browse.path, currentGlossaryScope);
             if (result.success) showToast((t.glossary_export_success || 'Exportadas {count} entradas').replace('{count}', result.exported));
+        }
+
+        // ===== VNDB IMPORT (profiles Phase 1, step 6) =====
+        // v3.13.41: moved from a Glosario-tab button to a per-CARD action
+        // in the Profiles tab (next to Duplicar/Renombrar) — real feedback
+        // was that it belongs there since it always targets one specific
+        // game's profile. `profileId` is now passed in explicitly from the
+        // card that opened it, and is NOT necessarily the active profile —
+        // the backend (vndb-import IPC) writes into that exact profile's
+        // glossary layer regardless of which one is active. The modal
+        // explains that up front (message + a per-target confirmation
+        // line) so the user knows what to expect before importing —
+        // there's no way to redirect the import to Global from this UI.
+        async function openVndbImportModal(profileId) {
+            const t = translations[currentLang] || translations['en'];
+            const targetProfile = profileList.find(p => p.id === profileId);
+            if (!targetProfile) {
+                showToast(t.vndb_no_active_profile || 'Profile not found.');
+                return;
+            }
+            const profileName = displayProfileName(targetProfile, t);
+
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+            overlay.innerHTML = `
+                <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-[420px] max-h-[80vh] flex flex-col gap-3 shadow-xl border border-gray-200 dark:border-dark-600">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-sm font-bold text-gray-800 dark:text-gray-100">${escapeHtml(t.vndb_modal_title || 'Import from VNDB')}</h3>
+                        <button data-action="close" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-lg leading-none">&times;</button>
+                    </div>
+                    <p class="text-[10px] text-gray-500 dark:text-gray-400 leading-snug">${escapeHtml((t.vndb_modal_desc || '').replace('{profile}', profileName))}</p>
+                    <div class="flex gap-2">
+                        <input type="text" id="vndb-search-input" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="${escapeHtml(t.vndb_search_placeholder || '')}">
+                        <button data-action="search" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-md transition">${escapeHtml(t.vndb_search_button || 'Search')}</button>
+                    </div>
+                    <div id="vndb-results" class="flex-1 overflow-y-auto scrollbar-thin space-y-1.5 min-h-[80px]"></div>
+                </div>`;
+            document.body.appendChild(overlay);
+
+            const closeModal = () => overlay.remove();
+            overlay.querySelector('[data-action="close"]').onclick = closeModal;
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+
+            const input = overlay.querySelector('#vndb-search-input');
+            const resultsEl = overlay.querySelector('#vndb-results');
+
+            // v3.13.41: cover thumbnail (VNDB's `image.url`, added in
+            // vndb.js) next to each result — a bare title list made it
+            // hard to tell same-named entries/regional re-releases apart.
+            // Falls back to a placeholder glyph, and onerror hides a
+            // thumbnail whose URL 404s rather than showing a broken-image
+            // icon.
+            function coverThumb(vn) {
+                return vn.imageUrl
+                    ? `<img src="${escapeHtml(vn.imageUrl)}" loading="lazy" class="w-8 h-10 object-cover rounded flex-shrink-0 bg-gray-200 dark:bg-dark-700" onerror="this.style.visibility='hidden'">`
+                    : `<span class="w-8 h-10 rounded flex-shrink-0 bg-gray-200 dark:bg-dark-700 flex items-center justify-center text-sm">🎮</span>`;
+            }
+
+            function renderVndbResults(results) {
+                if (!results.length) {
+                    resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_no_results || 'No results.')}</p>`;
+                    return;
+                }
+                resultsEl.innerHTML = results.map((vn, idx) => `
+                    <button data-vn-idx="${idx}" class="w-full flex items-center gap-2 text-left p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 hover:border-emerald-400 dark:hover:border-emerald-500 transition text-xs">
+                        ${coverThumb(vn)}
+                        <span class="min-w-0">
+                            <span class="font-medium text-gray-700 dark:text-gray-200 block truncate">${escapeHtml(vn.title)}</span>
+                            ${vn.alttitle ? `<span class="text-[10px] text-gray-400 block truncate">${escapeHtml(vn.alttitle)}</span>` : ''}
+                        </span>
+                    </button>
+                `).join('');
+                resultsEl.querySelectorAll('[data-vn-idx]').forEach(btn => {
+                    btn.onclick = () => renderVndbDetail(results[Number(btn.dataset.vnIdx)]);
+                });
+            }
+
+            function renderVndbDetail(vn) {
+                resultsEl.innerHTML = `
+                    <div class="p-2.5 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 space-y-2">
+                        <div class="flex items-center gap-2">
+                            ${coverThumb(vn)}
+                            <span class="font-medium text-gray-700 dark:text-gray-200 text-xs block truncate">${escapeHtml(vn.title)}</span>
+                        </div>
+                        <label class="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400">
+                            <input type="checkbox" id="vndb-inc-title" checked class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                            ${escapeHtml(t.vndb_include_title || 'Include title and aliases')}
+                        </label>
+                        <label class="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400">
+                            <input type="checkbox" id="vndb-inc-characters" checked class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                            ${escapeHtml(t.vndb_include_characters || 'Include characters')}
+                        </label>
+                        <label class="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400 pt-1 border-t border-gray-200 dark:border-dark-600">
+                            <input type="checkbox" id="vndb-new-profile" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                            ${escapeHtml(t.vndb_new_profile_toggle || 'Save to a new profile')}
+                        </label>
+                        <div id="vndb-new-profile-wrap" class="hidden">
+                            <input type="text" id="vndb-new-profile-name" value="${escapeHtml(vn.title)}" class="w-full p-1.5 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs" placeholder="${escapeHtml(t.vndb_new_profile_name_placeholder || 'New profile name')}">
+                        </div>
+                        <p id="vndb-target-line" class="text-[9px] font-medium text-emerald-600 dark:text-emerald-400"></p>
+                        <div class="flex gap-2 pt-1">
+                            <button data-action="back" class="flex-1 py-1.5 text-[10px] font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white border border-gray-200 dark:border-dark-600 rounded-md transition">${escapeHtml(t.vndb_back || 'Back')}</button>
+                            <button data-action="import" class="flex-1 py-1.5 text-[10px] font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-md transition">${escapeHtml(t.vndb_import_button || 'Import into glossary')}</button>
+                        </div>
+                    </div>`;
+                resultsEl.querySelector('[data-action="back"]').onclick = () => runSearch();
+
+                // v3.13.43: "save to a new profile" — creates the profile
+                // (pre-filled with the VN's title, editable), switches to
+                // it, THEN imports into it. Only decided at click time
+                // (checkbox), so the confirmation line and the eventual
+                // vndb-import target both need to react to it live.
+                const newProfileCheckbox = resultsEl.querySelector('#vndb-new-profile');
+                const newProfileWrap = resultsEl.querySelector('#vndb-new-profile-wrap');
+                const newProfileNameInput = resultsEl.querySelector('#vndb-new-profile-name');
+                const targetLine = resultsEl.querySelector('#vndb-target-line');
+
+                function updateTargetLine() {
+                    if (newProfileCheckbox.checked) {
+                        const name = newProfileNameInput.value.trim() || vn.title;
+                        targetLine.textContent = (t.vndb_import_target_new_profile || 'A new profile will be created and activated: {profile}').replace('{profile}', name);
+                    } else {
+                        targetLine.textContent = (t.vndb_import_target || 'Will be imported into: {profile}').replace('{profile}', profileName);
+                    }
+                }
+                newProfileCheckbox.onchange = () => {
+                    newProfileWrap.classList.toggle('hidden', !newProfileCheckbox.checked);
+                    if (newProfileCheckbox.checked) { newProfileNameInput.focus(); newProfileNameInput.select(); }
+                    updateTargetLine();
+                };
+                newProfileNameInput.addEventListener('input', updateTargetLine);
+                updateTargetLine();
+
+                resultsEl.querySelector('[data-action="import"]').onclick = async () => {
+                    const includeTitle = resultsEl.querySelector('#vndb-inc-title').checked;
+                    const includeCharacters = resultsEl.querySelector('#vndb-inc-characters').checked;
+                    let targetProfileId = profileId;
+
+                    if (newProfileCheckbox.checked) {
+                        const newName = newProfileNameInput.value.trim() || vn.title;
+                        resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_creating_profile || 'Creating profile...')}</p>`;
+                        const createResult = await api.createProfile({ name: newName });
+                        if (!createResult.success) {
+                            showToast(createResult.error);
+                            renderVndbDetail(vn); // back to the form so the name can be fixed and retried
+                            return;
+                        }
+                        targetProfileId = createResult.profile.id;
+                        // loadProfile() (defined in the Profiles section
+                        // below) does the FULL client+server switch — same
+                        // path a card click uses — so activeProfileId,
+                        // settings panels, glossary/history all end up
+                        // consistent, not just a local variable flip.
+                        await loadProfile(targetProfileId);
+                    }
+
+                    resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_importing || 'Importing...')}</p>`;
+                    try {
+                        // coverUrl/vnTitle: the search result already carries
+                        // VNDB's image.url — passed straight through so the
+                        // main process can save it on the profile without a
+                        // second VNDB fetch (see vndb-import in ipc-handlers.js).
+                        const result = await api.vndbImport(vn.id, targetProfileId, {
+                            includeTitle, includeCharacters,
+                            coverUrl: vn.imageUrl || '', vnTitle: vn.title || ''
+                        });
+                        if (!result.success) {
+                            showToast((t.vndb_import_error || 'Import error: {error}').replace('{error}', result.error || ''));
+                            closeModal();
+                            return;
+                        }
+                        showToast((t.vndb_import_success || 'Imported {imported} entries ({duplicates} were already there)')
+                            .replace('{imported}', result.imported)
+                            .replace('{duplicates}', result.duplicates));
+                        closeModal();
+                        // The Glosario tab only ever shows the ACTIVE
+                        // profile's layer — only reload it if that's the
+                        // profile we just imported into. Refresh the
+                        // profile cards regardless, so the 📖 count badge
+                        // updates even for a profile we didn't switch to.
+                        if (targetProfileId === activeProfileId) {
+                            currentGlossaryScope = 'profile';
+                            await loadGlossary();
+                        }
+                        await loadProfiles();
+                    } catch (e) {
+                        showToast((t.vndb_import_error || 'Import error: {error}').replace('{error}', e.message));
+                        closeModal();
+                    }
+                };
+            }
+
+            async function runSearch() {
+                const query = input.value.trim();
+                if (query.length < 2) {
+                    resultsEl.innerHTML = '';
+                    return;
+                }
+                resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_searching || 'Searching...')}</p>`;
+                try {
+                    const res = await api.vndbSearch(query);
+                    if (!res.success) {
+                        resultsEl.innerHTML = `<p class="text-[10px] text-red-500 text-center py-3">${escapeHtml((t.vndb_search_error || 'Search error: {error}').replace('{error}', res.error || ''))}</p>`;
+                        return;
+                    }
+                    renderVndbResults(res.results || []);
+                } catch (e) {
+                    resultsEl.innerHTML = `<p class="text-[10px] text-red-500 text-center py-3">${escapeHtml((t.vndb_search_error || 'Search error: {error}').replace('{error}', e.message))}</p>`;
+                }
+            }
+
+            let searchDebounce = null;
+            overlay.querySelector('[data-action="search"]').onclick = () => { clearTimeout(searchDebounce); runSearch(); };
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { clearTimeout(searchDebounce); runSearch(); }
+                if (e.key === 'Escape') closeModal();
+            });
+            // v3.13.41: live suggestions as the user types, not just on
+            // Enter/click — debounced (VNDB's anonymous rate limit is
+            // ~1 req/s, see vndb.js) so we don't fire one request per
+            // keystroke.
+            input.addEventListener('input', () => {
+                clearTimeout(searchDebounce);
+                searchDebounce = setTimeout(runSearch, 400);
+            });
+            input.focus();
         }
 
         // ===== HISTORY =====
@@ -1795,6 +2056,11 @@
                 const bgClass = isActive ? 'bg-emerald-50 dark:bg-emerald-900/10' : 'bg-gray-50 dark:bg-dark-900/50';
                 const id = escapeHtml(profile.id);
                 const displayName = escapeHtml(displayProfileName(profile, t));
+                // v3.13.41: cover thumbnail, set on a successful VNDB
+                // import (see openVndbImportModal / vndb-import) — lets a
+                // profile be recognized by its game at a glance instead of
+                // just its (often generic) name.
+                const coverUrl = profile.cover && profile.cover.url ? profile.cover.url : null;
 
                 // v3.13.40-fix: clicking anywhere on a non-active card now
                 // switches to it (feedback: depending on a small "Cargar"
@@ -1804,28 +2070,36 @@
                 const cardOnClick = !isActive ? ` onclick="loadProfile('${id}')"` : '';
                 const cardCursor = !isActive ? 'cursor-pointer hover:border-emerald-300 dark:hover:border-emerald-700' : '';
 
+                // v3.13.42: back to 3 stacked lines (name / buttons /
+                // properties) — real feedback was that name+buttons sharing
+                // one row made the name unreadable once VNDB joined
+                // Duplicar/Renombrar/Eliminar on that row. Cover grew from
+                // a 10×14 strip to a 16×16 square to visually match the
+                // taller 3-line stack next to it.
                 return `
-                <div class="p-2.5 rounded-lg ${bgClass} border ${borderClass} ${cardCursor} space-y-1.5 transition"${cardOnClick}>
-                    <div class="flex items-center justify-between gap-2">
+                <div class="p-2.5 rounded-lg ${bgClass} border ${borderClass} ${cardCursor} transition flex gap-2 items-start"${cardOnClick}>
+                    ${coverUrl ? `<img src="${escapeHtml(coverUrl)}" loading="lazy" class="w-16 h-16 object-cover rounded flex-shrink-0 bg-gray-200 dark:bg-dark-700" title="${escapeHtml(profile.cover.vnTitle || '')}" onerror="this.style.display='none'">` : ''}
+                    <div class="flex-1 min-w-0 space-y-1">
                         <div class="flex items-center gap-1.5 min-w-0">
                             ${isActive ? '<span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot flex-shrink-0"></span>' : ''}
                             <span class="text-sm font-medium truncate ${isActive ? 'text-emerald-700 dark:text-emerald-300' : ''}" title="${displayName}">${displayName}</span>
                             ${isDefault ? `<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase flex-shrink-0">${escapeHtml(t.profile_default_name || 'Default')}</span>` : ''}
                             ${hasHook ? '<span class="text-[8px] flex-shrink-0" title="Hook guardado">🎯</span>' : ''}
                         </div>
-                        <div class="flex gap-1 flex-shrink-0" onclick="event.stopPropagation()">
-                            <button onclick="duplicateProfile('${id}')" class="px-2.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
-                            <button onclick="renameProfile('${id}')" class="px-2.5 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
-                            ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-2.5 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
+                        <div class="flex flex-wrap gap-1" onclick="event.stopPropagation()">
+                            <button onclick="openVndbImportModal('${id}')" class="px-2 py-1 text-[10px] font-medium text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition" data-i18n="glossary_vndb_import">Importar de VNDB</button>
+                            <button onclick="duplicateProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
+                            <button onclick="renameProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
+                            ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
                         </div>
-                    </div>
-                    <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-gray-400">
-                        ${glossaryCount > 0 ? `<span class="bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded">📖 ${glossaryCount}</span>` : ''}
-                        ${historyCount > 0 ? `<span class="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded">📋 ${historyCount}</span>` : ''}
-                        <span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">${sourceLang}</span>
-                        <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${engineName}</span>
-                        <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${inputMethod}</span>
-                        ${savedDate ? `<span>${savedDate}</span>` : ''}
+                        <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-gray-400">
+                            ${glossaryCount > 0 ? `<span class="bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded">📖 ${glossaryCount}</span>` : ''}
+                            ${historyCount > 0 ? `<span class="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded">📋 ${historyCount}</span>` : ''}
+                            <span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">${sourceLang}</span>
+                            <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${engineName}</span>
+                            <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${inputMethod}</span>
+                            ${savedDate ? `<span>${savedDate}</span>` : ''}
+                        </div>
                     </div>
                 </div>`;
             }).join('');

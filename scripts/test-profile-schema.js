@@ -37,7 +37,7 @@ const EXPECTED_FIELDS = [
   'sourceLang', 'inputMethod', 'engine',
   'customEndpoint', 'customModel', 'libretranslateEndpoint',
   'customMTEndpoint', 'customMTMethod', 'customMTBody', 'customMTResponsePath', 'customMTAuthHeader',
-  'manualTextractorMode', 'glossary', 'hook', 'history'
+  'manualTextractorMode', 'glossary', 'hook', 'cover', 'history'
 ].sort();
 
 const LEGACY_V0_PROFILE = {
@@ -78,7 +78,7 @@ check('create-profile-defaults-are-sane', () => {
   const p = createProfile({ name: 'Test' });
   const pass = p.sourceLang === 'auto' && p.inputMethod === 'textractor' && p.engine === 'google-free'
     && p.isDefault === false && Array.isArray(p.glossary) && p.glossary.length === 0
-    && p.hook === null && Array.isArray(p.history) && p.history.length === 0
+    && p.hook === null && p.cover === null && Array.isArray(p.history) && p.history.length === 0
     && typeof p.id === 'string' && p.id.length > 0;
   return { pass, actual: p };
 });
@@ -173,14 +173,22 @@ check('settings-to-profile-updates-scoped-keys-only', () => {
   const existing = createProfile({ name: 'Nekopara', sourceLang: 'ja' });
   existing.glossary = [{ id: 'a1', source: 'x', target: 'y', mode: 'exact', enabled: true, createdAt: 1 }];
   existing.hook = { hookCode: 'HQ8@0', source: 'manual' };
+  existing.cover = { url: 'https://t.vndb.org/cv/01/23.jpg', vnId: 'v49181', vnTitle: 'Nekopara' };
   const settings = { sourceLang: 'auto', engine: 'openai', deeplKey: 'ignored-not-scoped' };
   const updated = settingsToProfile(settings, existing);
   const pass = updated.sourceLang === 'auto' && updated.engine === 'openai'
     && !Object.prototype.hasOwnProperty.call(updated, 'deeplKey')
     && updated.glossary.length === 1 && updated.hook.hookCode === 'HQ8@0'
+    && updated.cover.vnId === 'v49181'
     && updated.id === existing.id && updated.name === 'Nekopara';
   return { pass, actual: updated };
-}, 'glossary/hook/history/id/name/isDefault/createdAt survive untouched; deeplKey (not in PROFILE_SCOPED_SETTING_KEYS) is ignored even though it was present in the settings object.');
+}, 'glossary/hook/cover/history/id/name/isDefault/createdAt survive untouched; deeplKey (not in PROFILE_SCOPED_SETTING_KEYS) is ignored even though it was present in the settings object.');
+
+check('normalize-profile-preserves-cover-field', () => {
+  const raw = { ...LEGACY_V0_PROFILE, cover: { url: 'https://t.vndb.org/cv/01/23.jpg', vnId: 'v49181', vnTitle: 'Nekopara' } };
+  const p = normalizeProfile(raw);
+  return { pass: p.cover !== null && p.cover.vnId === 'v49181' && p.cover.url.includes('vndb'), actual: p.cover };
+}, 'cover (VNDB import thumbnail) is a real schema field, not dropped like the pre-v1 legacy keys.');
 
 check('settings-to-profile-bumps-saved-at', () => {
   const existing = createProfile({ name: 'Test' });
