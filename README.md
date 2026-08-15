@@ -251,6 +251,13 @@ Si te gusta este proyecto, considera dejar una ⭐ en GitHub.
 
 ## 🙏 Agradecimientos
 
+### Especiales
+
+- **ZpectralKrystal** — por el apoyo incondicional, por estar siempre ahí y por motivarme a crecer y ser mejor en todo este proceso.
+- **Dust** — por regalarme la clave de Claude Pro que hizo posible llevar este proyecto hasta donde siempre quise que llegara.
+
+### Tecnologías y proyectos open source
+
 - [Textractor](https://github.com/Artikash/Textractor) — Extractor de texto para juegos
 - [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTranslator) — Plugin de traducción para Unity
 - [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — Motor OCR por defecto (PP-OCRv5)

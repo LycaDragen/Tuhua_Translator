@@ -105,7 +105,7 @@
             <img src="assets/icon-256.png" alt="Tuhua" class="w-8 h-8 rounded-lg shadow-lg shadow-emerald-500/20 object-contain">
             <div>
                 <span class="font-bold text-base tracking-tight">Tuhua <span class="text-emerald-600 dark:text-emerald-400">Translator</span></span>
-                <span class="text-[10px] text-gray-400 ml-1.5" data-i18n="app_subtitle">Open Source VN Translator</span><span class="text-[9px] font-mono text-emerald-500/70 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-1.5">v3.13.14</span>
+                <span class="text-[10px] text-gray-400 ml-1.5" data-i18n="app_subtitle">Open Source VN Translator</span><span id="app-version-badge" class="text-[9px] font-mono text-emerald-500/70 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-1.5"></span>
             </div>
         </div>
         <div class="flex items-center gap-3">
@@ -529,6 +529,15 @@
                     <h3 class="text-sm font-bold" data-i18n="glossary_title">Glosario de Traducción</h3>
                     <p class="text-[10px] text-gray-400 mt-1" data-i18n="glossary_desc">Define traducciones personalizadas para términos.</p>
                 </div>
+                <!-- Scope switch: Global (shared everywhere) vs. this profile
+                     (character/game-specific terms, wins on conflict) -->
+                <div>
+                    <div class="flex gap-1 p-1 rounded-lg bg-gray-100 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                        <button id="glossary-scope-global" onclick="setGlossaryScope('global')" class="flex-1 py-1.5 text-[10px] font-medium rounded-md transition" data-i18n="glossary_scope_global">Global</button>
+                        <button id="glossary-scope-profile" onclick="setGlossaryScope('profile')" class="flex-1 py-1.5 text-[10px] font-medium rounded-md transition" data-i18n="glossary_scope_profile">Este perfil</button>
+                    </div>
+                    <p class="text-[9px] text-gray-400 mt-1" data-i18n="glossary_scope_note">Si un término existe en ambos, gana el de este perfil.</p>
+                </div>
                 <!-- Add Entry Form -->
                 <div class="p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 space-y-2">
                     <input type="text" id="glossary-source" class="w-full p-2 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Source term (e.g. こんにちは)">
@@ -581,9 +590,12 @@
                     <span id="active-profile-indicator" class="text-xs font-bold text-emerald-700 dark:text-emerald-300">Por Defecto</span>
                 </div>
                 <!-- Action Buttons -->
-                <div class="flex gap-2">
-                    <input type="text" id="profile-name" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Nombre del perfil...">
-                    <button onclick="createNewProfile()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition" data-i18n="profile_create">Crear Nuevo</button>
+                <div>
+                    <div class="flex gap-2">
+                        <input type="text" id="profile-name" oninput="clearProfileNameError()" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Nombre del perfil...">
+                        <button onclick="createNewProfile()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition" data-i18n="profile_create">Crear Nuevo</button>
+                    </div>
+                    <p id="profile-name-error" class="hidden text-[9px] text-red-500 mt-1"></p>
                 </div>
                 <div class="p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-900/30 space-y-1">
                     <p class="text-[10px] font-bold text-blue-700 dark:text-blue-400" data-i18n="profile_stores_title">Cada perfil almacena:</p>
@@ -594,6 +606,7 @@
                         <li data-i18n="profile_stores_input">Método de entrada (Textractor/Clipboard/OCR)</li>
                         <li data-i18n="profile_stores_engine">Motor de traducción y su configuración</li>
                     </ul>
+                    <p class="text-[9px] text-gray-400 dark:text-gray-500 pt-1" data-i18n="profile_stores_note">El idioma de destino, las claves de API y la ruta de Textractor son globales — no cambian entre perfiles.</p>
                 </div>
                 <div id="profile-list" class="space-y-2">
                     <p class="text-xs text-gray-400 text-center py-4" data-i18n="profile_empty">Sin perfiles guardados.</p>
@@ -841,29 +854,15 @@
                     </div>
                 </div>
 
-                <!-- ===== Glosario Category (collapsible) ===== -->
-                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
-                    <button onclick="toggleSettingsCategory('glossary')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
-                        <div class="flex items-center gap-2">
-                            <div class="w-1 h-5 bg-purple-500 rounded-full"></div>
-                            <h3 class="text-xs font-bold text-purple-500 uppercase tracking-wider" data-i18n="settings_cat_glossary">Glosario</h3>
-                        </div>
-                        <svg id="cat-glossary-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                    </button>
-                    <div id="cat-glossary-content" class="px-4 pb-4 pt-3 space-y-3">
-                        <!-- Per-Profile Glossary -->
-                        <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
-                            <div>
-                                <span class="text-xs font-medium" data-i18n="per_profile_glossary">Glosario por Perfil</span>
-                                <p class="text-[9px] text-gray-400" data-i18n="per_profile_glossary_desc">Cada perfil tiene su propio glosario en vez de uno compartido.</p>
-                            </div>
-                            <label class="relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="per-profile-glossary-toggle" class="sr-only peer" onchange="togglePerProfileGlossary(this.checked)">
-                                <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-purple-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
-                            </label>
-                        </div>
-                    </div>
-                </div>
+                <!-- v3.13.40: the "Glosario por Perfil" toggle that used to
+                     live here is gone — it was global-scoped but supposedly
+                     controlled per-profile behavior, and was broken besides
+                     (the snapshot write was unconditional, only the restore
+                     was gated, so turning it on never actually recovered a
+                     separate glossary). Replaced by the real two-layer
+                     model: a Global/Este perfil switch directly in the
+                     Glosario tab (renderer/main/index.html's #tab-glossary),
+                     since both layers always exist now, nothing to toggle. -->
 
                 <!-- ===== Filtro de Texto Category (collapsible) ===== -->
                 <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">

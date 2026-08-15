@@ -233,13 +233,23 @@ const FALLBACK_CHAIN = {
 };
 
 class TranslationPipeline extends EventEmitter {
-  constructor(settings = {}) {
+  // v3.13.40 (profiles Phase 1, step 2): `glossary` is injected rather than
+  // constructed here. Previously this class built its own GlossaryService
+  // over the same glossary.json that src/main/index.js also opens a
+  // separate instance of — two objects backed by one file, kept in sync
+  // only by electron-store re-reading the file per access. Collapsing to
+  // one shared instance is what makes setProfileLayer()/getEffective()
+  // meaningful: a profile switch calls setProfileLayer() on the instance
+  // index.js owns, and this pipeline sees it because there is only one.
+  // `glossary || new GlossaryService()` keeps direct construction (existing
+  // benches, XUatServer tests) working without an injected instance.
+  constructor(settings = {}, { glossary } = {}) {
     super();
     this.settings = settings;
     this.cache = new TranslationCache({ maxSize: 5000 });
     // v3.11.23: Translation Memory — engine-agnostic persistent store
     this.translationMemory = new TranslationMemory({ maxSize: 10000, enabled: settings.enableTranslationMemory !== false });
-    this.glossary = new GlossaryService();
+    this.glossary = glossary || new GlossaryService();
     // v3.13.19: Context Memory — owned here, not per-engine (see context-memory.js).
     // `!== undefined` matters: `settings.maxContextHistory || 5` would silently turn
     // an explicit 0 (disable context) back into 5, since 0 is falsy in JS.

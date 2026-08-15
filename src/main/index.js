@@ -4,7 +4,7 @@
  * Open Source Visual Novel Translator
  * No paywalls, no feature gates — everything is free.
  */
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, Menu } = require('electron');
 const Store = require('electron-store');
 const log = require('electron-log');
 
@@ -19,6 +19,7 @@ const OcrService = require('../services/ocr');
 const XuatServer = require('../services/xuat-server');
 const TranslationPipeline = require('../services/translation/pipeline');
 const GlossaryService = require('../services/translation/glossary');
+const ProfileStore = require('../services/profiles/profile-store');
 const RegexFilterService = require('../services/regex-filter');
 const HookCleaningSettingsService = require('../services/hook-cleaning-settings');
 
@@ -50,8 +51,17 @@ let ocrService;
 let xuatServer;
 let regexFilter;
 let hookCleaningSettings;
+let profileStore;
 
 app.whenReady().then(() => {
+  // v3.13.40: removes Electron's default File/Edit/View/Window/Help menu
+  // bar — this is Chromium's stock application menu (About/Quit/Reload/
+  // DevTools/etc), not anything Tuhua defines; the app has no use for it
+  // and it doesn't match the rest of the UI. AppTray (src/main/tray.js)
+  // is unrelated — that's the system tray icon's right-click menu, still
+  // built separately below and untouched by this.
+  Menu.setApplicationMenu(null);
+
   // Initialize store with defaults
   store = new Store({
     defaults: {
@@ -106,14 +116,46 @@ app.whenReady().then(() => {
     }
   });
 
+  // v3.13.40 (profiles Phase 1, steps 3-4): glossary and profileStore are
+  // constructed BEFORE the settings snapshot below is captured, and the
+  // one-time schema migration runs in between — this is what lets
+  // `settings` (used to build the pipeline and everything downstream)
+  // reflect the POST-migration global settings (promoted credentials,
+  // targetLang, textractorCliPath/Port; the four dead settings keys
+  // stripped) rather than a stale pre-migration snapshot.
+  glossary = new GlossaryService();
+  profileStore = new ProfileStore(store);
+  const migration = profileStore.migrate(glossary.getAll());
+  if (migration.ran) {
+    log.info('Profiles migrated to schema v1.', {
+      profileCount: migration.profiles.length,
+      credentialConflicts: migration.report.credentialConflicts.map((c) => c.key),
+      targetLangConflict: !!migration.report.targetLangConflict,
+      textractorPortConflict: !!migration.report.textractorPortConflict
+    });
+  }
+  // Materialized once here at startup, not lazily inside get-profiles —
+  // see profile-store.js's ensureDefault() doc comment for why the old
+  // lazy-inside-the-getter approach is what let the default profile's
+  // seed literal drift from save-profile's in the first place.
+  profileStore.ensureDefault(store.get());
+
+  // v3.13.40 (step 5): the active profile's glossary layer must be live
+  // from the very first translation, not just after the first profile
+  // switch — load-profile's handler sets this again on every switch, but
+  // nothing else runs at startup, so it has to happen here too.
+  const startupActiveProfile = profileStore.getActive();
+  if (startupActiveProfile) {
+    glossary.setProfileLayer(startupActiveProfile.glossary);
+  }
+
   const settings = store.get();
   log.info('Settings loaded:', { engine: settings.engine, sourceLang: settings.sourceLang, targetLang: settings.targetLang, inputMethod: settings.inputMethod });
 
   // Initialize services
-  glossary = new GlossaryService();
   regexFilter = new RegexFilterService();
   hookCleaningSettings = new HookCleaningSettingsService();
-  pipeline = new TranslationPipeline(settings);
+  pipeline = new TranslationPipeline(settings, { glossary });
   textractor = new TextractorConnector(settings.textractorPort || 9251);
   textractorLauncher = new TextractorLauncher(hookCleaningSettings);
   clipboardWatcher = new ClipboardWatcher({ interval: 500 });
@@ -237,7 +279,7 @@ app.whenReady().then(() => {
   shortcuts.register();
 
   // Initialize IPC handlers (v3.11.25: pass shortcuts for OCR hotkey integration)
-  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings);
+  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings, profileStore);
   ipcHandlers.register();
 
   // v3.13.07: Improved startup overlay state management.

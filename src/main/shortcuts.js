@@ -118,6 +118,25 @@ class ShortcutManager {
     } catch (e) {
       console.warn('Failed to register Ctrl+Shift+S (OCR capture):', e.message);
     }
+
+    // v3.13.40-fix: Menu.setApplicationMenu(null) (src/main/index.js)
+    // removed Electron's default File/Edit/View/Window/Help bar — the
+    // F12/Ctrl+Shift+I DevTools shortcut was wired through that menu's
+    // "Toggle Developer Tools" accelerator, so it silently died with it.
+    // First attempt at rebinding it was a `before-input-event` listener on
+    // webContents (fires on every keystroke) — pulled after real testing
+    // showed typing in text inputs stopped working until DevTools was
+    // opened once. globalShortcut only fires for this exact combo, same
+    // mechanism as the six shortcuts above, so it can't intercept normal
+    // typing the way a per-keystroke hook can.
+    try {
+      globalShortcut.register('CommandOrControl+Shift+D', () => {
+        const { main } = this.windowManager.getAllWindows();
+        if (main) main.webContents.toggleDevTools();
+      });
+    } catch (e) {
+      console.warn('Failed to register Ctrl+Shift+D (DevTools):', e.message);
+    }
   }
 
   unregister() {

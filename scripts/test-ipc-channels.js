@@ -42,6 +42,34 @@
  *      reachable via sendToMainWindow is checked), but this pins the
  *      specific invariant the dom-ready replay depends on.
  *
+ *   5. HANDLER / ALLOWLIST / UNREGISTER PARITY (profiles Phase 1): every
+ *      `ipcMain.handle('X', ...)` in ipc-handlers.js must appear in BOTH
+ *      main-preload.js's ALLOWED_INVOKE_CHANNELS (otherwise secureInvoke
+ *      throws for every caller — loud, but still a real gap) AND in
+ *      unregister()'s channel list (otherwise ipcMain.removeHandler is
+ *      never called for it, so re-registering after a reload/restart path
+ *      throws "Attempted to register a second handler" instead of
+ *      cleanly replacing the first). Confirmed real, not hypothetical, by
+ *      grepping this exact codebase while writing this check:
+ *      'create-profile' and 'get-active-profile' are handled and
+ *      allowlisted but missing from unregister(); a further ~20 channels
+ *      added since (vndb-*, deepl-*, regex-filter-*, hook-cleaning-*,
+ *      ocr-set-min-confidence, set-ocr-engine, get-ocr-engine-status,
+ *      xuat-update-language, xuat-clear-cache) were added to the handler
+ *      and the allowlist but never back-ported into unregister()'s list —
+ *      unregister() has silently drifted out of sync with the handler set
+ *      for multiple releases. NOT flagged: 'resize-overlay', which is
+ *      handled and unregistered but absent from ALLOWED_INVOKE_CHANNELS —
+ *      that's correct, not a gap, because it's invoked from
+ *      overlay-preload.js (a second, deliberately looser preload for the
+ *      output-overlay window that calls ipcRenderer.invoke directly with
+ *      no allowlist of its own — see its own file header). The check
+ *      exempts any channel overlay-preload.js invokes directly. Also
+ *      reports (non-fatal, informational) allowlisted-but-unhandled and
+ *      unregistered-but-unhandled channels, since those indicate the same
+ *      drift in the opposite direction even though they fail loudly
+ *      rather than silently.
+ *
  *   node scripts/test-ipc-channels.js
  *   node scripts/test-ipc-channels.js --quiet
  *   node scripts/test-ipc-channels.js --json=PATH
@@ -105,6 +133,64 @@ function extractSentChannels(sourceText) {
     channels.add(m[2]);
   }
   return channels;
+}
+
+/**
+ * Extracts every literal channel name passed as the first argument to an
+ * `ipcMain.handle(...)` call in ipc-handlers.js — the full set of channels
+ * the main process actually serves.
+ */
+function extractHandledChannels(sourceText) {
+  const re = /\bipcMain\.handle\(\s*(['"])([^'"]+)\1/g;
+  const channels = new Set();
+  let m;
+  while ((m = re.exec(sourceText)) !== null) {
+    channels.add(m[2]);
+  }
+  return channels;
+}
+
+/**
+ * Extracts every literal channel name passed to `ipcRenderer.invoke(...)`
+ * directly in overlay-preload.js. That file is a second, deliberately
+ * looser preload (see its own header comment) that skips main-preload's
+ * ALLOWED_INVOKE_CHANNELS mechanism entirely — a channel it calls is
+ * legitimately absent from that Set, not a gap.
+ */
+function extractOverlayPreloadInvokedChannels(sourceText) {
+  const re = /\bipcRenderer\.invoke\(\s*(['"])([^'"]+)\1/g;
+  const channels = new Set();
+  let m;
+  while ((m = re.exec(sourceText)) !== null) {
+    channels.add(m[2]);
+  }
+  return channels;
+}
+
+/**
+ * Generic version of extractAllowedChannels below: pulls every quoted
+ * string literal out of a bracketed list that starts right after `anchor`
+ * and ends at the first `closeToken` found afterward. Used for both
+ * Set([...]) literals (closeToken ']);') and plain array literals
+ * (closeToken '];') so ALLOWED_INVOKE_CHANNELS and unregister()'s
+ * `channels` array can share one parser instead of two near-duplicates.
+ */
+function extractBracketedStrings(sourceText, anchor, closeToken) {
+  const start = sourceText.indexOf(anchor);
+  if (start === -1) {
+    throw new Error(`Could not find "${anchor}" — has it been renamed or restructured?`);
+  }
+  const closeIdx = sourceText.indexOf(closeToken, start);
+  if (closeIdx === -1) {
+    throw new Error(`Could not find the closing "${closeToken}" for "${anchor}".`);
+  }
+  let body = sourceText.slice(start + anchor.length, closeIdx);
+  body = body.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const out = new Set();
+  const re = /['"]([^'"]+)['"]/g;
+  let m;
+  while ((m = re.exec(body)) !== null) out.add(m[1]);
+  return out;
 }
 
 /**
@@ -317,6 +403,49 @@ function runReplayableChannelsCheck() {
   };
 }
 
+/**
+ * Profiles Phase 1, step 0: every `ipcMain.handle('X', ...)` in
+ * ipc-handlers.js must appear in BOTH main-preload.js's
+ * ALLOWED_INVOKE_CHANNELS and unregister()'s `channels` array. Also
+ * reports (non-fatally) the reverse drift — allowlisted-but-unhandled and
+ * unregistered-but-unhandled channels — since those are the same kind of
+ * desync even though they fail loudly (a thrown error) rather than
+ * silently, so they don't block the bench but are worth surfacing.
+ */
+function runHandlerParityCheck() {
+  const ipcPath = path.join(ROOT, 'src', 'main', 'ipc-handlers.js');
+  const ipcSrc = fs.readFileSync(ipcPath, 'utf8');
+  const handled = extractHandledChannels(ipcSrc);
+
+  const preloadPath = path.join(ROOT, 'src', 'preload', 'main-preload.js');
+  const preloadSrc = fs.readFileSync(preloadPath, 'utf8');
+  const invokeAllowed = extractBracketedStrings(preloadSrc, 'ALLOWED_INVOKE_CHANNELS = new Set([', ']);');
+
+  const overlayPreloadPath = path.join(ROOT, 'src', 'preload', 'overlay-preload.js');
+  const overlayInvoked = extractOverlayPreloadInvokedChannels(fs.readFileSync(overlayPreloadPath, 'utf8'));
+
+  const unregistered = extractBracketedStrings(ipcSrc, 'const channels = [', '];');
+
+  const missingFromAllowlist = [...handled]
+    .filter((ch) => !invokeAllowed.has(ch) && !overlayInvoked.has(ch))
+    .sort();
+  const missingFromUnregister = [...handled].filter((ch) => !unregistered.has(ch)).sort();
+  const allowlistedButUnhandled = [...invokeAllowed].filter((ch) => !handled.has(ch)).sort();
+  const unregisteredButUnhandled = [...unregistered].filter((ch) => !handled.has(ch)).sort();
+
+  return {
+    id: 'handler-allowlist-unregister-parity',
+    pass: missingFromAllowlist.length === 0 && missingFromUnregister.length === 0,
+    handledCount: handled.size,
+    invokeAllowedCount: invokeAllowed.size,
+    unregisteredCount: unregistered.size,
+    missingFromAllowlist,
+    missingFromUnregister,
+    allowlistedButUnhandled,
+    unregisteredButUnhandled
+  };
+}
+
 function run() {
   const args = parseArgs(process.argv.slice(2));
   const all = [];
@@ -325,6 +454,7 @@ function run() {
   if (!args.only || 'i18n'.includes(args.only) || 'parity'.includes(args.only)) all.push(runI18nParityCheck());
   if (!args.only || 'badge'.includes(args.only)) all.push(runBadgeStatusValuesCheck());
   if (!args.only || 'replay'.includes(args.only)) all.push(runReplayableChannelsCheck());
+  if (!args.only || 'handlers'.includes(args.only) || 'unregister'.includes(args.only)) all.push(runHandlerParityCheck());
 
   console.log(`${C.bold}IPC-channel / i18n-parity bench${C.reset} — ${all.length} case(s)\n`);
   let passed = 0;
