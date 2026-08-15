@@ -46,6 +46,8 @@ class WindowManager {
     this.mainWindow = null;
     this.outputOverlay = null;
     this.captureArea = null;
+    // v3.13.42: the "save word to glossary" popup — see createWordSavePrompt().
+    this._wordPrompt = null;
     this.clickThrough = false;
     // v3.13.04: Periodic alwaysOnTop reaffirmation timer
     this._alwaysOnTopTimer = null;
@@ -488,6 +490,66 @@ class WindowManager {
     if (this.captureArea && !this.captureArea.isDestroyed()) {
       this.store.set('captureAreaBounds', this.captureArea.getBounds());
     }
+  }
+
+  /**
+   * v3.13.42: small ephemeral popup for the "right-click a word in the
+   * output overlay → save to glossary" feature. `scope` was already
+   * decided by which native-menu item the user clicked (see
+   * overlay-word-context-menu in ipc-handlers.js, the only caller) — this
+   * window's only job is collecting the meaning, so it has no scope
+   * picker of its own. Positioned just under the output overlay so it
+   * reads as attached to the word that was clicked, clamped to the
+   * nearest display's work area so it can't render off-screen near an
+   * edge. Reuses overlay-preload.js (see that file's own comment on why)
+   * and the output-overlay's dark glass visual language.
+   */
+  createWordSavePrompt(word, scope, scopeLabel, strings) {
+    if (this._wordPrompt && !this._wordPrompt.isDestroyed()) {
+      this._wordPrompt.close();
+    }
+
+    const width = 300;
+    const height = 170;
+    let x, y;
+    if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
+      const bounds = this.outputOverlay.getBounds();
+      x = Math.round(bounds.x + (bounds.width - width) / 2);
+      y = bounds.y + bounds.height + 8;
+      const display = screen.getDisplayNearestPoint({ x: bounds.x, y: bounds.y });
+      const area = display.workArea;
+      x = Math.min(Math.max(x, area.x), area.x + area.width - width);
+      y = Math.min(Math.max(y, area.y), area.y + area.height - height);
+    }
+
+    const win = new BrowserWindow({
+      width, height, x, y,
+      frame: false,
+      transparent: true,
+      resizable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      show: false,
+      hasShadow: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        preload: path.join(__dirname, '..', 'preload', 'overlay-preload.js')
+      }
+    });
+    win.setAlwaysOnTop(true, 'screen-saver');
+    win.loadFile(path.join(RENDERER_BASE, 'word-save-prompt', 'index.html'));
+    win.once('ready-to-show', () => win.show());
+    win.webContents.on('did-finish-load', () => {
+      win.webContents.send('word-prompt-context', { word, scope, scopeLabel, strings });
+    });
+    // Dismiss like a popup/context menu when the user clicks elsewhere.
+    win.on('blur', () => { if (!win.isDestroyed()) win.close(); });
+    win.on('closed', () => { if (this._wordPrompt === win) this._wordPrompt = null; });
+
+    this._wordPrompt = win;
+    return win;
   }
 
   getAllWindows() {

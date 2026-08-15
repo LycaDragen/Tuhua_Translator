@@ -102,6 +102,12 @@ function createProfile(overrides = {}) {
     // Deliberately NOT a hookKey: hookKey embeds a thread handle, PID, and
     // absolute addresses, none of which survive a restart.
     hook: overrides.hook || null,
+    // {url, vnId, vnTitle} | null — set on a successful VNDB glossary
+    // import (see vndb-import in ipc-handlers.js), shown as the card's
+    // cover thumbnail so a profile is recognizable by its game at a
+    // glance. Purely cosmetic identification, never read by translation/
+    // pipeline logic.
+    cover: overrides.cover || null,
     history: Array.isArray(overrides.history) ? overrides.history : []
   };
 }
@@ -147,6 +153,9 @@ function validateProfile(profile) {
   }
   if (profile.hook !== null && typeof profile.hook !== 'object') {
     errors.push('hook must be null or an object');
+  }
+  if (profile.cover !== null && typeof profile.cover !== 'object') {
+    errors.push('cover must be null or an object');
   }
   for (const key of PROFILE_SCOPED_SETTING_KEYS) {
     if (profile[key] === undefined) {

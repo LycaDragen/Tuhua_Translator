@@ -1,7 +1,7 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.40",
-  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.40",
+  "version": "3.13.43",
+  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.43",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Guardar término</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden;
+            background: transparent;
+            user-select: none;
+            -webkit-user-select: none;
+            font-family: 'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif;
+        }
+        #box {
+            background-color: rgba(20, 22, 28, 0.96);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            color: white;
+            padding: 12px 14px;
+            height: 100vh;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        #word-row {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            min-width: 0;
+        }
+        #word-label {
+            font-size: 16px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        #scope-badge {
+            font-size: 10px;
+            color: rgba(16, 185, 129, 0.9);
+            background: rgba(16, 185, 129, 0.15);
+            padding: 1px 6px;
+            border-radius: 999px;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        #meaning-input {
+            width: 100%;
+            padding: 7px 8px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.06);
+            color: white;
+            font-size: 13px;
+            outline: none;
+        }
+        #meaning-input:focus {
+            border-color: rgba(16, 185, 129, 0.6);
+        }
+        #error-msg {
+            font-size: 11px;
+            color: #f87171;
+            min-height: 14px;
+        }
+        #error-msg.hidden { visibility: hidden; }
+        .buttons {
+            display: flex;
+            justify-content: flex-end;
+            gap: 6px;
+            margin-top: auto;
+        }
+        button {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+            font-family: inherit;
+        }
+        #cancel-btn {
+            background: rgba(255, 255, 255, 0.08);
+            color: rgba(255, 255, 255, 0.7);
+        }
+        #cancel-btn:hover { background: rgba(255, 255, 255, 0.14); }
+        #save-btn {
+            background: #059669;
+            color: white;
+        }
+        #save-btn:hover { background: #10b981; }
+        #save-btn:disabled { opacity: 0.6; cursor: default; }
+    </style>
+</head>
+<body>
+    <div id="box">
+        <div id="word-row">
+            <span id="word-label"></span>
+            <span id="scope-badge"></span>
+        </div>
+        <input type="text" id="meaning-input" autocomplete="off" spellcheck="false">
+        <div id="error-msg" class="hidden"></div>
+        <div class="buttons">
+            <button id="cancel-btn"></button>
+            <button id="save-btn"></button>
+        </div>
+    </div>
+    <script>
+        const overlay = window.tuhuaOverlay;
+        const wordLabel = document.getElementById('word-label');
+        const scopeBadge = document.getElementById('scope-badge');
+        const input = document.getElementById('meaning-input');
+        const errorMsg = document.getElementById('error-msg');
+        const saveBtn = document.getElementById('save-btn');
+        const cancelBtn = document.getElementById('cancel-btn');
+
+        let ctx = null;
+
+        function showError(message) {
+            errorMsg.textContent = message;
+            errorMsg.classList.remove('hidden');
+        }
+
+        if (overlay && overlay.onWordPromptContext) {
+            overlay.onWordPromptContext((data) => {
+                ctx = data;
+                wordLabel.textContent = data.word;
+                wordLabel.title = data.word;
+                scopeBadge.textContent = data.scopeLabel;
+                input.placeholder = (data.strings && data.strings.placeholder) || '';
+                saveBtn.textContent = (data.strings && data.strings.save) || 'Guardar';
+                cancelBtn.textContent = (data.strings && data.strings.cancel) || 'Cancelar';
+                input.focus();
+            });
+        }
+
+        cancelBtn.onclick = () => window.close();
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.close(); });
+        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveBtn.click(); });
+        input.addEventListener('input', () => errorMsg.classList.add('hidden'));
+
+        saveBtn.onclick = async () => {
+            if (!ctx || !overlay || !overlay.saveGlossaryEntry) return;
+            const meaning = input.value.trim();
+            const strings = ctx.strings || {};
+            if (!meaning) {
+                showError(strings.emptyError || 'Escribí un significado primero');
+                input.focus();
+                return;
+            }
+            errorMsg.classList.add('hidden');
+            saveBtn.disabled = true;
+            try {
+                const result = await overlay.saveGlossaryEntry(
+                    { source: ctx.word, target: meaning, mode: 'case-insensitive', enabled: true },
+                    ctx.scope
+                );
+                if (!result || result.success === false) {
+                    showError((strings.error || 'Error: {error}').replace('{error}', (result && result.error) || ''));
+                    saveBtn.disabled = false;
+                    return;
+                }
+                wordLabel.textContent = strings.success || 'Guardado ✓';
+                input.style.display = 'none';
+                document.querySelector('.buttons').style.display = 'none';
+                scopeBadge.style.display = 'none';
+                setTimeout(() => window.close(), 700);
+            } catch (e) {
+                showError((strings.error || 'Error: {error}').replace('{error}', e.message));
+                saveBtn.disabled = false;
+            }
+        };
+    </script>
+</body>
+</html>

@@ -105,6 +105,43 @@ check('import-entries-rejects-non-array-data', () => {
   return { pass: threw };
 });
 
+// ─── Real bug: importing a History export into the Glossary picker used
+// to silently succeed with imported:0 (different shape: original/target
+// vs source/target) — no error, nothing visibly happened. Now it throws
+// a typed error the renderer can show a specific message for.
+check('looks-like-history-file-detects-a-real-history-export-shape', () => {
+  const data = [{ id: 'a1', original: 'こんにちは', translated: 'Hola', engine: 'deepl', cached: false, timestamp: 123 }];
+  return { pass: glossaryEntries.looksLikeHistoryFile(data) === true };
+});
+
+check('looks-like-history-file-rejects-a-real-glossary-shape', () => {
+  const data = [{ source: 'a', target: 'b', mode: 'exact' }];
+  return { pass: glossaryEntries.looksLikeHistoryFile(data) === false };
+});
+
+check('looks-like-history-file-rejects-empty-array', () => {
+  return { pass: glossaryEntries.looksLikeHistoryFile([]) === false };
+});
+
+check('import-entries-throws-wrong-category-code-for-a-history-export', () => {
+  const data = [{ id: 'a1', original: 'x', translated: 'y', engine: 'deepl', cached: false, timestamp: 1 }];
+  let code = null;
+  try { glossaryEntries.importEntries([], data); } catch (e) { code = e.code; }
+  return { pass: code === 'WRONG_CATEGORY_HISTORY', actual: code };
+});
+
+check('import-entries-throws-no-valid-entries-code-for-other-malformed-arrays', () => {
+  const data = [{ foo: 'bar' }, { baz: 'qux' }];
+  let code = null;
+  try { glossaryEntries.importEntries([], data); } catch (e) { code = e.code; }
+  return { pass: code === 'NO_VALID_ENTRIES', actual: code };
+});
+
+check('import-entries-empty-array-still-imports-zero-without-throwing', () => {
+  const { list, imported } = glossaryEntries.importEntries([], []);
+  return { pass: imported === 0 && list.length === 0 };
+});
+
 // ─── The two-scope reuse claim, verified directly ──────────────────────
 check('same-primitives-work-identically-for-a-global-store-list-and-a-plain-profile-array', () => {
   // Simulates exactly how ipc-handlers.js uses these: global layer

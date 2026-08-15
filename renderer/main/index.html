@@ -556,6 +556,11 @@
                     <button onclick="importGlossary()" class="flex-1 py-1.5 text-[10px] font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white border border-gray-200 dark:border-dark-600 rounded-md transition" data-i18n="glossary_import">Importar JSON</button>
                     <button onclick="exportGlossary()" class="flex-1 py-1.5 text-[10px] font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white border border-gray-200 dark:border-dark-600 rounded-md transition" data-i18n="glossary_export">Exportar JSON</button>
                 </div>
+                <!-- v3.13.41: same feature as the button on each profile
+                     card (Perfiles tab) — this one is a shortcut that
+                     always targets the currently ACTIVE profile, for
+                     when the user is already looking at its glossary. -->
+                <button onclick="openVndbImportModal(activeProfileId)" class="w-full py-1.5 text-[10px] font-medium text-purple-600 dark:text-purple-400 hover:text-purple-700 dark:hover:text-purple-300 border border-purple-200 dark:border-purple-800 rounded-md transition" data-i18n="glossary_vndb_import">Importar de VNDB</button>
                 <!-- Entries List -->
                 <div id="glossary-list" class="space-y-2">
                     <p class="text-xs text-gray-400 text-center py-4" data-i18n="glossary_empty">Sin entradas en el glosario.</p>
