@@ -15,6 +15,7 @@ const TranslationCache = require('./cache');
 const TranslationMemory = require('./translation-memory');
 const GlossaryService = require('./glossary');
 const ContextMemory = require('./context-memory');
+const { buildGlossaryPrompt, maskKeepUnchanged } = require('./glossary-prompt');
 
 // Engine imports
 const GoogleFreeEngine = require('./engines/google-free');
@@ -248,6 +249,13 @@ class TranslationPipeline extends EventEmitter {
     // v3.11.23: Translation Memory — engine-agnostic persistent store
     this.translationMemory = new TranslationMemory({ maxSize: 10000, enabled: settings.enableTranslationMemory !== false });
     this.glossary = glossary || new GlossaryService();
+    // v3.13.6x (Fase 5): word-boundary regex compile cache for
+    // glossary-prompt.js's buildGlossaryPrompt(), reused across every
+    // translate() call for the life of this pipeline instance — same
+    // pattern as GlossaryService's own per-entry compile-error cache.
+    // Keyed by "mode source", so a stale entry (glossary term edited/
+    // removed) is just an unused Map slot, never a wrong match.
+    this._glossaryPromptCache = new Map();
     // v3.13.19: Context Memory — owned here, not per-engine (see context-memory.js).
     // `!== undefined` matters: `settings.maxContextHistory || 5` would silently turn
     // an explicit 0 (disable context) back into 5, since 0 is falsy in JS.
@@ -511,11 +519,22 @@ class TranslationPipeline extends EventEmitter {
       }
     }
 
-    // 1. Apply glossary pre-processing
-    const preprocessed = this.glossary.applyPreTranslation(text);
+    // 1. Cache/TM/context key — ALWAYS the raw text (post upstream filters,
+    // e.g. regex-filter/hook-cleaning, which already ran before this method
+    // was called). v3.13.6x (Fase 5): before this, `preprocessed` (glossary
+    // literal-substituted text) was both the cache key AND what got sent to
+    // the engine. Once glossaryPrompt-capable engines stop getting the
+    // literal substitution (see _tryEngine below), the SAME line would
+    // otherwise hash into two different cache-key spaces depending on
+    // whether glossaryMode happened to be 'prompt' or 'literal' at the
+    // time — a cache/TM entry written under one mode would silently never
+    // be found under the other. Keying on the untouched line instead makes
+    // the cache mode-agnostic; _tryEngine decides per-call how the glossary
+    // reaches the engine, entirely independent of what gets hashed.
+    const cacheKey = text;
 
     // 2. Check engine-specific cache (exact engine match)
-    const cached = this.cache.get(preprocessed, effectiveSrcLang, tgtLang, engineName);
+    const cached = this.cache.get(cacheKey, effectiveSrcLang, tgtLang, engineName);
     if (cached) {
       this.stats.cacheHits++;
       this._addToHistory(text, cached, engineName, true);
@@ -538,21 +557,21 @@ class TranslationPipeline extends EventEmitter {
       // which a cache hit never calls, so repeated lines silently vanished
       // from the context window. Order matters here: push first, return
       // second — swapping them reintroduces the exact bug this line fixes.
-      this.contextMemory.push(preprocessed, cached);
+      this.contextMemory.push(cacheKey, cached);
 
       return postprocessed;
     }
 
     // 2b. v3.11.25: Translation Memory — exact match first, then fuzzy.
     // This saves money and reduces latency for repeated or near-matching dialogue.
-    const tmResult = this.translationMemory.getWithFuzzy(preprocessed, effectiveSrcLang, tgtLang);
+    const tmResult = this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang);
     if (tmResult) {
       this.stats.tmHits++;
       const matchType = tmResult.fuzzy ? 'fuzzy' : 'exact';
       const scoreInfo = tmResult.fuzzy ? ` (${(tmResult.score * 100).toFixed(0)}%)` : '';
-      console.log(`[Pipeline] Translation Memory ${matchType} hit${scoreInfo}: "${preprocessed.substring(0, 30)}..." → "${tmResult.translation.substring(0, 30)}..." (was: ${engineName})`);
+      console.log(`[Pipeline] Translation Memory ${matchType} hit${scoreInfo}: "${cacheKey.substring(0, 30)}..." → "${tmResult.translation.substring(0, 30)}..." (was: ${engineName})`);
       // Also store in engine-specific cache for faster future lookups
-      this.cache.set(preprocessed, effectiveSrcLang, tgtLang, engineName, tmResult.translation);
+      this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, tmResult.translation);
       this._addToHistory(text, tmResult.translation, engineName, true);
 
       const postprocessed = this.glossary.applyPostTranslation(tmResult.translation);
@@ -571,7 +590,7 @@ class TranslationPipeline extends EventEmitter {
       });
 
       // v3.13.19: Same fix as the cache-hit branch above — push before return.
-      this.contextMemory.push(preprocessed, tmResult.translation);
+      this.contextMemory.push(cacheKey, tmResult.translation);
 
       return postprocessed;
     }
@@ -583,7 +602,7 @@ class TranslationPipeline extends EventEmitter {
     this._lastError = null;
 
     // Try primary engine
-    const result = await this._tryEngine(engineName, preprocessed, effectiveSrcLang, tgtLang);
+    const result = await this._tryEngine(engineName, text, effectiveSrcLang, tgtLang);
     if (result) {
       // v3.13.57: a response the sanitizer flagged as cut off by
       // max_tokens (llm-output.js verdict:'truncated') is still shown to
@@ -593,9 +612,9 @@ class TranslationPipeline extends EventEmitter {
       // exactly the kind of thing that used to get cached for 24h as if
       // it were a real translation. `!result.truncated` guards all three.
       if (!result.truncated) {
-        this.cache.set(preprocessed, effectiveSrcLang, tgtLang, engineName, result.text);
+        this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, result.text);
         // v3.11.23: Also store in Translation Memory (engine-agnostic) for cross-engine reuse
-        this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, result.text);
+        this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, result.text);
       }
       this.stats.totalTranslations++;
 
@@ -622,7 +641,7 @@ class TranslationPipeline extends EventEmitter {
       });
 
       if (!result.truncated) {
-        this.contextMemory.push(preprocessed, result.text);
+        this.contextMemory.push(cacheKey, result.text);
       }
 
       return postprocessed;
@@ -647,7 +666,7 @@ class TranslationPipeline extends EventEmitter {
       return fallbackEngine.supportedLanguages.includes(tgtLang);
     });
     for (const fallback of fallbacks) {
-      const fallbackResult = await this._tryEngine(fallback, preprocessed, effectiveSrcLang, tgtLang);
+      const fallbackResult = await this._tryEngine(fallback, text, effectiveSrcLang, tgtLang);
       if (fallbackResult) {
         this.stats.fallbacks++;
         // v3.13.57: same guard as the primary-engine branch above — a
@@ -655,9 +674,9 @@ class TranslationPipeline extends EventEmitter {
         // configuration, so this stays correct even though today's chains
         // only fall back to non-LLM engines that never set `truncated`.
         if (!fallbackResult.truncated) {
-          this.cache.set(preprocessed, effectiveSrcLang, tgtLang, fallback, fallbackResult.text);
+          this.cache.set(cacheKey, effectiveSrcLang, tgtLang, fallback, fallbackResult.text);
           // v3.11.23: Also store in Translation Memory
-          this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, fallbackResult.text);
+          this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, fallbackResult.text);
         }
         this.stats.totalTranslations++;
 
@@ -677,7 +696,7 @@ class TranslationPipeline extends EventEmitter {
         });
 
         if (!fallbackResult.truncated) {
-          this.contextMemory.push(preprocessed, fallbackResult.text);
+          this.contextMemory.push(cacheKey, fallbackResult.text);
         }
 
         return postprocessed;
@@ -702,6 +721,60 @@ class TranslationPipeline extends EventEmitter {
 
     console.log(`[Pipeline] _tryEngine: engine=${engineName}, srcLang=${srcLang} (${getLanguageName(srcLang)}), tgtLang=${tgtLang} (${getLanguageName(tgtLang)})`);
 
+    // v3.13.6x (Fase 5): glossary-as-prompt-instruction. Measured against
+    // two real engines before picking a default — see
+    // scripts/test-glossary-compliance.js and its report: OpenAI hit 100%
+    // prompt-only compliance, but a local 3B model (Qwen2.5-3B-Instruct via
+    // Ollama) only hit 81.8% — it followed "translate X as Y" fine but
+    // ignored "leave X unchanged" (source===target entries) and translated
+    // the proper noun anyway. Since this is one global setting and Tuhua
+    // can't know in advance whether a given local-llm user's model complies
+    // well, 'hybrid' is the default (see below), not 'prompt'.
+    //
+    // `glossaryMode` (settings, default 'hybrid' — see src/main/index.js)
+    // is the rollback interruptor: 'literal' reproduces the exact
+    // pre-Fase-5 behavior for every engine. Only engines whose
+    // capabilities.glossaryPrompt is true (today: openai, local-llm — see
+    // llm-base.js) are eligible for anything else; every other engine
+    // (google-free, deepl, bing, ...) always gets the literal path,
+    // unaffected by this setting.
+    const glossaryMode = this.settings.glossaryMode || 'hybrid';
+    const supportsGlossaryPrompt = !!engine.capabilities?.glossaryPrompt;
+    const usePromptGlossary = supportsGlossaryPrompt && glossaryMode !== 'literal';
+    // 'prompt': the literal pre-substitution is skipped entirely — sending
+    // the model a line that's already half-target-language degrades output
+    // (and, per the Fase 0 fix, that same degraded text is what feeds the
+    // cache/TM/context window). 'hybrid' additionally keeps the literal
+    // substitution for RENDERING entries (source≠target — a real, working
+    // safety net there, since the model never sees the source term at all).
+    // It does nothing extra for KEEP-UNCHANGED entries (source===target):
+    // literal substitution is a no-op for those by construction, so masking
+    // (below) is what actually protects them in both 'prompt' and 'hybrid'.
+    let engineInput = (usePromptGlossary && glossaryMode !== 'hybrid')
+      ? text
+      : this.glossary.applyPreTranslation(text);
+    let glossaryBlock;
+    // Placeholder-masks the text the model actually sees where the model
+    // ignoring the prompt instruction was measured to be a real failure
+    // mode (see maskKeepUnchanged's doc comment in glossary-prompt.js) —
+    // the model can't mistranslate a proper noun it never saw. Runs on
+    // `engineInput` (after any literal substitution above) since the two
+    // never target the same entries: masking only touches source===target,
+    // literal substitution only ever changes anything for source≠target.
+    let restoreKeepUnchanged = (output) => output;
+    if (usePromptGlossary) {
+      const masked = maskKeepUnchanged(this.glossary.getEffective(), engineInput, { compileCache: this._glossaryPromptCache });
+      engineInput = masked.maskedText;
+      restoreKeepUnchanged = masked.restore;
+      glossaryBlock = buildGlossaryPrompt(this.glossary.getEffective(), text, {
+        compileCache: this._glossaryPromptCache,
+        // Masked entries are already guaranteed — telling the model to
+        // "keep X unchanged" when X has been replaced by a ⟦N⟧ token it
+        // can't even see is redundant at best, confusing at worst.
+        includeKeepUnchanged: false
+      });
+    }
+
     for (let attempt = 0; attempt <= retries; attempt++) {
       // v3.13.55: rate limiting used to be enforced once in _doTranslate, before
       // the primary engine's *first* attempt only — so a retry or a fallback
@@ -709,13 +782,17 @@ class TranslationPipeline extends EventEmitter {
       // here means every attempt (primary retries AND fallback engines) is spaced.
       await this._enforceRateLimit();
       try {
-        const result = await engine.translate(text, {
+        const result = await engine.translate(engineInput, {
           sourceLang: srcLang,
           targetLang: tgtLang,
           sourceLangName: getLanguageName(srcLang),
           targetLangName: getLanguageName(tgtLang),
-          context: this.contextMemory.get()
+          context: this.contextMemory.get(),
+          glossary: glossaryBlock
         });
+        if (result) {
+          result.text = restoreKeepUnchanged(result.text);
+        }
         return result;
       } catch (err) {
         this._lastError = err; // Track last actual error

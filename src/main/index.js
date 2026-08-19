@@ -109,6 +109,27 @@ app.whenReady().then(() => {
       // the LLM output sanitizer (llm-output.js) — set false to fall back
       // to a bare .trim() with none of its heuristics.
       llmSanitize: true,
+      // v3.13.6x (LLM engine overhaul, Fase 5): rollback interruptor for
+      // glossary-as-prompt-instruction (glossary-prompt.js). Measured
+      // against two real engines (scripts/test-glossary-compliance.js):
+      // OpenAI hit 100% prompt-only compliance, but a local 3B model
+      // (Qwen2.5-3B-Instruct via Ollama) only hit 81.8% — it followed
+      // "translate X as Y" instructions fine but ignored "leave X
+      // unchanged" (source===target entries) and translated the term
+      // anyway. Since glossaryMode is one global setting and Tuhua can't
+      // know in advance whether a given local-llm user's model is strong
+      // enough for prompt-only compliance, 'hybrid' — literal substitution
+      // AND the prompt instruction together — is the safer universal
+      // default: the literal substitution guarantees the term is present
+      // (same ~100% floor as pre-Fase-5 behavior) while the prompt
+      // instruction still helps a capable model integrate it with better
+      // grammar than a raw substituted string. 'prompt' (skip the literal
+      // substitution entirely) is available for a setup known to comply
+      // well, e.g. OpenAI per the measurement above; 'literal' reproduces
+      // the exact pre-Fase-5 behavior for every engine. No UI toggle yet —
+      // same as llmSanitize just above, this is an escape hatch reachable
+      // by editing settings directly if a real-world setup needs it.
+      glossaryMode: 'hybrid',
       // v3.13.58 (LLM engine overhaul, Fase 3): global — credentials, one
       // real-world API key per provider id (see llm-providers.js). NOT
       // profile-scoped, same reasoning as deeplKey/apiKey before it.

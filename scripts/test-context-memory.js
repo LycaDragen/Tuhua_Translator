@@ -110,7 +110,14 @@ function buildPipeline(engineName, windowSize, meta) {
     targetLang: meta.targetLang,
     deeplKey: process.env.DEEPL_API_KEY,
     deeplUsePro: process.env.DEEPL_USE_PRO === 'true',
+    // v3.13.58 (Fase 3) moved the openai engine's key source from the flat
+    // `openaiKey` setting to the provider-keyed `llmProviderKeys` map —
+    // this bench predates that and was still setting the now-unread key,
+    // silently failing every openai call with "API key is required" ever
+    // since. `openaiKey` kept here too since it's still harmless/ignored.
     openaiKey: process.env.OPENAI_API_KEY,
+    llmProviderKeys: { openai: process.env.OPENAI_API_KEY },
+    llmProvider: 'openai',
     // No default here on purpose — pipeline.js's own default
     // (http://localhost:1234/v1, LM Studio's port) would silently point at
     // the wrong server for Ollama (11434) and produce a confusing

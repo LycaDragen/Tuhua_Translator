@@ -84,6 +84,7 @@ scripts/context-report.json
 scripts/hook-cleaning-report.json
 scripts/stdout-decoding-report.json
 scripts/ipc-channels-report.json
+scripts/glossary-compliance-report.json
 
 # ── Coverage ──
 coverage/
