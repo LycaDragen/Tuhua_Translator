@@ -11,6 +11,7 @@
  * - Request cancellation for superseded translations
  */
 const EventEmitter = require('events');
+const crypto = require('crypto');
 const TranslationCache = require('./cache');
 const TranslationMemory = require('./translation-memory');
 const GlossaryService = require('./glossary');
@@ -448,6 +449,14 @@ class TranslationPipeline extends EventEmitter {
     const src = options.source || this.settings.sourceLang || 'ja';
     const tgt = options.target || this.settings.targetLang || 'es';
     const engine = options.engine || this.settings.engine || 'google-free';
+    // v3.13.6x (Fase 7a): the speaker's name, extracted by ipc-handlers.js's
+    // _handleText BEFORE the filters that would otherwise destroy it — see
+    // its own comment there. `game`/`vnTitle`/`inputMethod` are NOT threaded
+    // through options: _tryEngine resolves them itself, straight from the
+    // active profile / settings, the same way it already resolves DeepL's
+    // glossary_id — there's no reason to make every caller of translate()
+    // pass through data the pipeline already has direct access to.
+    const meta = { speaker: options.speaker };
 
     // Debounce
     return new Promise((resolve, reject) => {
@@ -455,7 +464,7 @@ class TranslationPipeline extends EventEmitter {
       this.debounceTimer = setTimeout(async () => {
         this._pendingReject = null;
         try {
-          const result = await this._doTranslate(text, src, tgt, engine);
+          const result = await this._doTranslate(text, src, tgt, engine, meta);
           resolve(result);
         } catch (err) {
           reject(err);
@@ -471,10 +480,11 @@ class TranslationPipeline extends EventEmitter {
     const src = options.source || this.settings.sourceLang || 'ja';
     const tgt = options.target || this.settings.targetLang || 'es';
     const engine = options.engine || this.settings.engine || 'google-free';
-    return this._doTranslate(text, src, tgt, engine);
+    const meta = { speaker: options.speaker };
+    return this._doTranslate(text, src, tgt, engine, meta);
   }
 
-  async _doTranslate(text, srcLang, tgtLang, engineName) {
+  async _doTranslate(text, srcLang, tgtLang, engineName, meta = {}) {
     console.log(`[Pipeline] _doTranslate: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}`);
 
     // v3.13.04: For ALL engines (not just LLM), use detected language when
@@ -545,9 +555,21 @@ class TranslationPipeline extends EventEmitter {
     // the cache mode-agnostic; _tryEngine decides per-call how the glossary
     // reaches the engine, entirely independent of what gets hashed.
     const cacheKey = text;
+    // v3.13.6x (Fase 7c): the 5th key component — see cache.js's and
+    // _cacheVariant's own header comments. Computed once here (not
+    // per-attempt inside _tryEngine) since it only depends on the primary
+    // engine's static configuration, not anything about this specific call.
+    const variant = this._cacheVariant(this.getEngine(engineName));
+    // v3.13.6x (Fase 7d): TM namespace/compatibility — see
+    // translation-memory.js's own header comments for why cross-profile
+    // bleed and LLM-reusing-MT were real bugs, not features. '' when no
+    // profileStore is injected (existing benches) preserves the old
+    // global-namespace TM behavior exactly.
+    const profileId = this.profileStore?.getActive()?.id || '';
+    const engineClass = this._engineClass(this.getEngine(engineName));
 
     // 2. Check engine-specific cache (exact engine match)
-    const cached = this.cache.get(cacheKey, effectiveSrcLang, tgtLang, engineName);
+    const cached = this.cache.get(cacheKey, effectiveSrcLang, tgtLang, engineName, variant);
     if (cached) {
       this.stats.cacheHits++;
       this._addToHistory(text, cached, engineName, true);
@@ -570,21 +592,28 @@ class TranslationPipeline extends EventEmitter {
       // which a cache hit never calls, so repeated lines silently vanished
       // from the context window. Order matters here: push first, return
       // second — swapping them reintroduces the exact bug this line fixes.
-      this.contextMemory.push(cacheKey, cached);
+      //
+      // v3.13.6x (Fase 7e): pushes `postprocessed`, not `cached` — the
+      // context window is what a FUTURE line's {contextBoth} sees as "how
+      // was this rendered", and glossary-post-processing (character name
+      // casing, style fixes) is part of the real rendered output. Pushing
+      // the pre-post-processing text meant the context window quietly
+      // disagreed with what the user actually saw on screen for that line.
+      this.contextMemory.push(cacheKey, postprocessed);
 
       return postprocessed;
     }
 
     // 2b. v3.11.25: Translation Memory — exact match first, then fuzzy.
     // This saves money and reduces latency for repeated or near-matching dialogue.
-    const tmResult = this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang);
+    const tmResult = this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang, profileId, engineClass);
     if (tmResult) {
       this.stats.tmHits++;
       const matchType = tmResult.fuzzy ? 'fuzzy' : 'exact';
       const scoreInfo = tmResult.fuzzy ? ` (${(tmResult.score * 100).toFixed(0)}%)` : '';
       console.log(`[Pipeline] Translation Memory ${matchType} hit${scoreInfo}: "${cacheKey.substring(0, 30)}..." → "${tmResult.translation.substring(0, 30)}..." (was: ${engineName})`);
       // Also store in engine-specific cache for faster future lookups
-      this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, tmResult.translation);
+      this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, tmResult.translation, variant);
       this._addToHistory(text, tmResult.translation, engineName, true);
 
       const postprocessed = this.glossary.applyPostTranslation(tmResult.translation);
@@ -603,7 +632,9 @@ class TranslationPipeline extends EventEmitter {
       });
 
       // v3.13.19: Same fix as the cache-hit branch above — push before return.
-      this.contextMemory.push(cacheKey, tmResult.translation);
+      // v3.13.6x (Fase 7e): pushes `postprocessed` — see the cache-hit
+      // branch's comment above for why.
+      this.contextMemory.push(cacheKey, postprocessed);
 
       return postprocessed;
     }
@@ -615,7 +646,7 @@ class TranslationPipeline extends EventEmitter {
     this._lastError = null;
 
     // Try primary engine
-    const result = await this._tryEngine(engineName, text, effectiveSrcLang, tgtLang);
+    const result = await this._tryEngine(engineName, text, effectiveSrcLang, tgtLang, 1, meta);
     if (result) {
       // v3.13.57: a response the sanitizer flagged as cut off by
       // max_tokens (llm-output.js verdict:'truncated') is still shown to
@@ -625,9 +656,9 @@ class TranslationPipeline extends EventEmitter {
       // exactly the kind of thing that used to get cached for 24h as if
       // it were a real translation. `!result.truncated` guards all three.
       if (!result.truncated) {
-        this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, result.text);
+        this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, result.text, variant);
         // v3.11.23: Also store in Translation Memory (engine-agnostic) for cross-engine reuse
-        this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, result.text);
+        this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, result.text, engineName, profileId, engineClass);
       }
       this.stats.totalTranslations++;
 
@@ -654,7 +685,10 @@ class TranslationPipeline extends EventEmitter {
       });
 
       if (!result.truncated) {
-        this.contextMemory.push(cacheKey, result.text);
+        // v3.13.6x (Fase 7e): pushes `postprocessed` — see the cache-hit
+        // branch's comment above for why the raw engine output isn't
+        // what belongs in the context window.
+        this.contextMemory.push(cacheKey, postprocessed);
       }
 
       return postprocessed;
@@ -679,7 +713,7 @@ class TranslationPipeline extends EventEmitter {
       return fallbackEngine.supportedLanguages.includes(tgtLang);
     });
     for (const fallback of fallbacks) {
-      const fallbackResult = await this._tryEngine(fallback, text, effectiveSrcLang, tgtLang);
+      const fallbackResult = await this._tryEngine(fallback, text, effectiveSrcLang, tgtLang, 1, meta);
       if (fallbackResult) {
         this.stats.fallbacks++;
         // v3.13.57: same guard as the primary-engine branch above — a
@@ -687,9 +721,12 @@ class TranslationPipeline extends EventEmitter {
         // configuration, so this stays correct even though today's chains
         // only fall back to non-LLM engines that never set `truncated`.
         if (!fallbackResult.truncated) {
-          this.cache.set(cacheKey, effectiveSrcLang, tgtLang, fallback, fallbackResult.text);
+          // v3.13.6x (Fase 7c): the FALLBACK engine's own variant, not the
+          // primary's — a fallback with different prompt/model config must
+          // not read/write under the primary's cache slot.
+          this.cache.set(cacheKey, effectiveSrcLang, tgtLang, fallback, fallbackResult.text, this._cacheVariant(this.getEngine(fallback)));
           // v3.11.23: Also store in Translation Memory
-          this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, fallbackResult.text);
+          this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, fallbackResult.text, fallback, profileId, this._engineClass(this.getEngine(fallback)));
         }
         this.stats.totalTranslations++;
 
@@ -709,7 +746,9 @@ class TranslationPipeline extends EventEmitter {
         });
 
         if (!fallbackResult.truncated) {
-          this.contextMemory.push(cacheKey, fallbackResult.text);
+          // v3.13.6x (Fase 7e): pushes `postprocessed` — same reasoning as
+          // the primary-engine branch above.
+          this.contextMemory.push(cacheKey, postprocessed);
         }
 
         return postprocessed;
@@ -728,11 +767,28 @@ class TranslationPipeline extends EventEmitter {
     return `[Error] Translation failed`;
   }
 
-  async _tryEngine(engineName, text, srcLang, tgtLang, retries = 1) {
+  async _tryEngine(engineName, text, srcLang, tgtLang, retries = 1, meta = {}) {
     const engine = this.getEngine(engineName);
     if (!engine) return null;
 
     console.log(`[Pipeline] _tryEngine: engine=${engineName}, srcLang=${srcLang} (${getLanguageName(srcLang)}), tgtLang=${tgtLang} (${getLanguageName(tgtLang)})`);
+
+    // v3.13.6x (Fase 7b): {game}/{vnTitle} resolved straight from the
+    // active profile here, not threaded in from translate()'s caller —
+    // profileStore is already injected (Fase 6), and the pipeline has
+    // direct access to exactly the same data a caller would otherwise have
+    // to look up and pass through every translate()/translateNow() call
+    // site for no reason. `game` is the profile's own name (always
+    // present); `vnTitle` is VNDB's title (only present if imported —
+    // profile.cover.vnTitle, see profile-schema.js). `inputMethod` is a
+    // plain setting, no profile lookup needed at all.
+    const activeProfile = this.profileStore?.getActive();
+    const promptContext = {
+      speaker: meta.speaker || '',
+      game: activeProfile?.name || '',
+      vnTitle: activeProfile?.cover?.vnTitle || '',
+      inputMethod: this.settings.inputMethod || ''
+    };
 
     // v3.13.6x (Fase 5): glossary-as-prompt-instruction. Measured against
     // two real engines before picking a default — see
@@ -815,7 +871,11 @@ class TranslationPipeline extends EventEmitter {
           context: this.contextMemory.get(),
           glossary: glossaryBlock,
           glossaryId: deeplGlossaryId,
-          keepUnchangedTerms: deeplKeepUnchangedTerms
+          keepUnchangedTerms: deeplKeepUnchangedTerms,
+          speaker: promptContext.speaker,
+          game: promptContext.game,
+          vnTitle: promptContext.vnTitle,
+          inputMethod: promptContext.inputMethod
         });
         if (result) {
           result.text = restoreKeepUnchanged(result.text);
@@ -902,6 +962,39 @@ class TranslationPipeline extends EventEmitter {
       console.error(`[Pipeline] DeepL glossary auto-sync failed, continuing without a glossary: ${err.response?.data?.message || err.message}`);
       return { glossaryId: undefined, keepUnchangedTerms };
     }
+  }
+
+  /**
+   * The cache key's 5th component (Fase 7c) — '' for any engine without
+   * `capabilities.glossaryPrompt` (their key shape is completely
+   * unaffected by this Fase), otherwise a hash of exactly what a prompt-
+   * driven engine's request actually depends on: provider, model, the
+   * rendered prompt template, temperature, and whether few-shot is on.
+   * Read straight off the constructed engine instance (llm-base.js already
+   * resolved all of these into properties on it) rather than re-derived
+   * from `this.settings` a second time — one source of truth, no chance of
+   * the two drifting apart.
+   *
+   * Context is deliberately NOT part of this — see cache.js's own header
+   * comment for why that's a considered decision, not an oversight.
+   */
+  _cacheVariant(engine) {
+    if (!engine.capabilities?.glossaryPrompt) return '';
+    const raw = [
+      engine.providerId || engine.name,
+      engine.model,
+      engine.promptTemplate,
+      engine.temperature,
+      engine.fewShotEnabled
+    ].join('|');
+    return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 12);
+  }
+
+  // v3.13.6x (Fase 7d): 'llm'|'mt' — the same capability signal
+  // _cacheVariant/glossaryMode already gate on, reused here for
+  // translation-memory.js's engine-class compatibility check.
+  _engineClass(engine) {
+    return engine.capabilities?.glossaryPrompt ? 'llm' : 'mt';
   }
 
   _isRetryable(err) {

@@ -15,6 +15,7 @@ const glossaryEntries = require('../services/translation/glossary-entries');
 const textCleaning = require('../services/text-cleaning');
 const llmProviders = require('../services/translation/llm-providers');
 const { deleteGlossary: deleteDeeplGlossary } = require('../services/translation/deepl-glossary-sync');
+const speakerExtract = require('../services/speaker-extract');
 const promptPresets = require('../services/translation/prompt-presets');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
@@ -63,6 +64,10 @@ class IpcHandlers {
     this._lastHandledTime = 0;
     // v3.13.12: Store last handled text for auto-retranslation when settings change
     this._lastHandledText = '';
+    // v3.13.6x (Fase 7a): companion to _lastHandledText — the speaker that
+    // was extracted for it, so a settings-change auto-retranslation (below)
+    // still has {speaker} available instead of silently losing it.
+    this._lastSpeakerName = null;
     // OCR dedup: persistent hash that doesn't expire — same text from OCR
     // should NEVER be re-translated until the game screen changes
     this._lastOcrTextHash = '';
@@ -335,14 +340,23 @@ class IpcHandlers {
       const engineChanged = data.engine && data.engine !== currentSettings.engine;
       const sourceLangChanged = data.sourceLang && data.sourceLang !== currentSettings.sourceLang;
       const targetLangChanged = data.targetLang && data.targetLang !== currentSettings.targetLang;
+      // v3.13.6x (LLM engine overhaul, Fase 7e): a genuine change in HOW
+      // text arrives (Textractor ↔ OCR ↔ clipboard) is data provenance
+      // changing mid-conversation — the {contextBoth} window an LLM sees
+      // would otherwise mix lines whose {inputMethod} the prompt itself
+      // now describes differently. Deliberately NOT extended to
+      // pause/resume — pausing translation isn't a scene change, and
+      // clearing context on every pause/resume cycle would defeat the
+      // point of carrying context across a player's natural reading pauses.
+      const inputMethodChanged = data.inputMethod && data.inputMethod !== currentSettings.inputMethod;
 
-      // v3.13.19: Reset Context Memory on any of these three changes — mixing
+      // v3.13.19: Reset Context Memory on any of these changes — mixing
       // context lines from a different engine/source language/target language
       // into the next translation call ranges from meaningless (DeepL's
       // context must be the same language as the new source) to actively
       // misleading (an LLM engine would see prior turns in the old target
       // language while being told to now answer in a different one).
-      if (engineChanged || sourceLangChanged || targetLangChanged) {
+      if (engineChanged || sourceLangChanged || targetLangChanged || inputMethodChanged) {
         this.pipeline.clearContext();
       }
 
@@ -356,7 +370,8 @@ class IpcHandlers {
           await this.pipeline.translateNow(this._lastHandledText, {
             source: newSourceLang,
             target: newTargetLang,
-            engine: newEngine
+            engine: newEngine,
+            speaker: this._lastSpeakerName
           });
         } catch (retransErr) {
           console.warn(`[Tuhua] Auto-retranslation failed: ${retransErr.message}`);
@@ -1805,11 +1820,22 @@ class IpcHandlers {
    * arrives from both stdout and TCP channels.
    */
   async _handleText(text) {
+    // v3.13.6x (LLM engine overhaul, Fase 7a): captured here, not lower —
+    // the two builtin filters right below (angle-bracket removal, Japanese
+    // quote extraction) both DESTROY the speaker's name on their way to
+    // producing clean dialogue text. Extracting it first, before either
+    // filter runs, is what lets the name survive at all while leaving the
+    // filters' own job (and the text they hand back) completely unchanged.
+    let speakerName = null;
     // v3.8.25: Safety net — strip any remaining null bytes, control chars,
     // and apply deduplication for text that arrives from TCP (bypassing _cleanGameText)
     if (text) {
       const originalText = text;
       text = text.replace(/[\u0000\u0001-\u0008\u000B\u000C\u000E-\u001F\uFEFF]/g, '');
+
+      const speakerResult = speakerExtract.extractSpeaker(text);
+      speakerName = speakerResult.speaker;
+      text = speakerResult.text;
 
       // v3.11.33: Apply regex text filters before dedup/translation
       // Always apply if regexFilter service is available (respects enableRegexFilter toggle)
@@ -1892,6 +1918,7 @@ class IpcHandlers {
 
     // v3.13.12: Store last handled text for auto-retranslation when settings change
     this._lastHandledText = text;
+    this._lastSpeakerName = speakerName;
 
     console.log(`[Tuhua] _handleText: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}, active=${this._translationActive}, inputMethod=${settings.inputMethod}, text="${text.substring(0, 60)}..."`);
 
@@ -1932,7 +1959,10 @@ class IpcHandlers {
       const translation = await this.pipeline.translate(text, {
         source: srcLang,
         target: tgtLang,
-        engine: engineName
+        engine: engineName,
+        // v3.13.6x (Fase 7a): extracted above, before the filters that
+        // would otherwise destroy it — see this method's top comment.
+        speaker: speakerName
       });
 
       console.log(`[Tuhua] Translation result: "${translation?.substring(0, 60)}..."`);

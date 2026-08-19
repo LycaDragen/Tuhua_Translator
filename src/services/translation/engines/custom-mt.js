@@ -47,7 +47,7 @@ class CustomMTEngine {
   }
 
   async translate(text, options = {}) {
-    const { sourceLang = 'ja', targetLang = 'es' } = options;
+    const { sourceLang = 'ja', targetLang = 'es', sourceLangName = sourceLang, targetLangName = targetLang } = options;
 
     if (!this.config.endpoint) {
       throw new Error('Custom MT endpoint is not configured');
@@ -57,6 +57,12 @@ class CustomMTEngine {
       text: text,
       source: sourceLang,
       target: targetLang,
+      // v3.13.6x (LLM engine overhaul, Fase 7b): full language names
+      // ("Japanese"/"Spanish"), for an endpoint whose own API expects a
+      // name rather than a code — pipeline.js already resolves and passes
+      // these to every engine, custom-mt just wasn't reading them.
+      sourceName: sourceLangName,
+      targetName: targetLangName,
       apiKey: this.config.apiKey
     };
 
