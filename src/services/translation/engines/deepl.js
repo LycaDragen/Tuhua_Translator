@@ -22,6 +22,7 @@
  */
 const axios = require('axios');
 const log = require('electron-log');
+const { fixTermSpacing } = require('../glossary-prompt');
 
 // Languages that support the style_rules feature (custom_instructions, style_id)
 // Per DeepL docs: de, en, es, fr, it, ja, ko, zh and variants
@@ -104,6 +105,22 @@ class DeepLEngine {
     // v3.11.28: Translation Memory — server-side DeepL TM
     this.translationMemoryId = options.translationMemoryId || '';
     this.translationMemoryThreshold = options.translationMemoryThreshold || 75;
+
+    // v3.13.6x (Fase 6): DeepL's next-gen model. Default matches what the
+    // app was ALREADY silently forcing almost all the time — see below —
+    // so this setting mostly just makes an existing behavior visible and
+    // overridable, rather than changing it. 'prefer_quality_optimized' is
+    // the soft-preference variant (falls back instead of erroring on a
+    // pair/config that doesn't support it), same reasoning as `formality`
+    // above using 'prefer_more' instead of a strict 'more'.
+    this.modelType = options.modelType || 'prefer_quality_optimized';
+
+    // v3.13.6x (Fase 6): DeepL's native glossary — resolved PER TRANSLATE
+    // CALL via options.glossaryId (see translate() below), not fixed here
+    // at construction time. A profile's effective glossary_id can change
+    // between calls (profile switch, glossary edit triggering a resync),
+    // and this engine instance is reused across the pipeline's lifetime —
+    // same reasoning as options.context/options.glossary in llm-base.js.
 
     // v3.11.28: Feature cache from /v3/languages
     this._languageFeatures = null;
@@ -268,13 +285,19 @@ class DeepLEngine {
       let total = 0;
       for (let i = contextWindow.length - 1; i >= 0; i--) {
         const line = contextWindow[i].source;
-        const addedLen = line.length + (kept.length > 0 ? 1 : 0); // +1 for the join space
+        const addedLen = line.length + (kept.length > 0 ? 1 : 0); // +1 for the join newline
         if (total + addedLen > MAX_CONTEXT_CHARS) break;
         kept.unshift(line);
         total += addedLen;
       }
       if (kept.length > 0) {
-        payload.context = kept.join(' ');
+        // v3.13.6x (Fase 6): joined with '\n', not ' ' — these are
+        // separate prior LINES of dialogue, not fragments of one
+        // continuous sentence. A space join ran them together as if
+        // "Line one Line two" were one sentence; DeepL's own docs
+        // describe `context` as surrounding text, which a newline
+        // represents more faithfully for line-based VN dialogue.
+        payload.context = kept.join('\n');
       }
     }
 
@@ -309,12 +332,43 @@ class DeepLEngine {
       }
     }
 
+    // v3.13.6x (Fase 6): only sent when non-default, so a Free-tier account
+    // (or any pair that doesn't support next-gen models) never sees a field
+    // it might reject — 'prefer_quality_optimized' already matches DeepL's
+    // own default when unset, so omitting it changes nothing observable.
+    if (this.modelType && this.modelType !== 'prefer_quality_optimized') {
+      payload.model_type = this.modelType;
+    }
+
+    // v3.13.6x (Fase 6): resolved by the pipeline (manual profile.deeplGlossaryId,
+    // or the auto-synced one from deepl-glossary-sync.js) and passed per call
+    // — see the constructor's comment for why this isn't fixed at construction.
+    if (options.glossaryId) {
+      payload.glossary_id = options.glossaryId;
+    }
+
     try {
       const response = await this._makeRequest(payload);
       const data = response.data;
       if (data.translations && data.translations[0]) {
+        let resultText = data.translations[0].text;
+        // v3.13.6x (Fase 6): verified against a real DeepL glossary_id call
+        // — a "keep unchanged" (source===target) term survives correctly
+        // but DeepL's own server-side glossary application doesn't
+        // reliably insert the space its own boundary needs ("a la桜花学園"
+        // instead of "a la 桜花学園"), the identical artifact
+        // maskKeepUnchanged's restore() fixes for the LLM path. DeepL
+        // applies its glossary server-side with no placeholder step Tuhua
+        // controls, so this scans the OUTPUT for the known keep-unchanged
+        // terms instead. Only entries the request actually SENT a
+        // glossary for are candidates — options.keepUnchangedTerms is
+        // populated by the pipeline from the same effective glossary the
+        // resolved glossary_id was built from.
+        if (options.glossaryId && Array.isArray(options.keepUnchangedTerms) && options.keepUnchangedTerms.length) {
+          resultText = fixTermSpacing(resultText, options.keepUnchangedTerms);
+        }
         const result = {
-          text: data.translations[0].text,
+          text: resultText,
           detectedLang: data.translations[0].detected_source_language?.toLowerCase() || null,
           engine: this.name
         };
@@ -437,6 +491,11 @@ class DeepLEngine {
   setTranslationMemory(id, threshold) {
     this.translationMemoryId = id || '';
     this.translationMemoryThreshold = threshold || 75;
+  }
+
+  // v3.13.6x (Fase 6): Set DeepL's next-gen model preference
+  setModelType(modelType) {
+    this.modelType = modelType || 'prefer_quality_optimized';
   }
 
 }

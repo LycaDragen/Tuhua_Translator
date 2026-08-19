@@ -292,11 +292,57 @@ function spaceIfNeeded(left, right) {
   return ' ';
 }
 
+/**
+ * Fixes the same glued-word-boundary artifact `maskKeepUnchanged`'s
+ * `restore()` fixes, but for text that was never masked — DeepL's OWN
+ * native glossary (Fase 6) has the identical problem: verified against a
+ * real translation ("桜花学園" kept via `glossary_id` came back as
+ * "a la桜花学園", no space), the exact same shape of bug on a completely
+ * different, non-LLM engine. Since DeepL applies its glossary server-side
+ * with no placeholder step Tuhua controls, this scans `text` for each
+ * literal `term` and inserts a space at any CJK↔non-CJK (or
+ * Latin↔Latin-adjacent, see spaceIfNeeded) boundary it finds around an
+ * occurrence — same rule, applied by scanning instead of by substitution.
+ *
+ * @param {string} text - engine output to fix.
+ * @param {string[]} terms - literal strings to look for (glossary "keep
+ *   unchanged" entries' `source`, i.e. what should appear verbatim).
+ */
+function fixTermSpacing(text, terms) {
+  let result = text || '';
+  const uniqueTerms = [...new Set((terms || []).filter(Boolean))]
+    // Longest first: a shorter term that happens to be a substring of a
+    // longer one (rare, but glossaries aren't guaranteed disjoint) must not
+    // get processed first and fragment the longer term's own boundary.
+    .sort((a, b) => b.length - a.length);
+
+  for (const term of uniqueTerms) {
+    let searchFrom = 0;
+    while (true) {
+      const idx = result.indexOf(term, searchFrom);
+      if (idx === -1) break;
+      const before = result.slice(0, idx);
+      const after = result.slice(idx + term.length);
+      const spaceBefore = spaceIfNeeded(before, term);
+      const spaceAfter = spaceIfNeeded(term, after);
+      if (spaceBefore || spaceAfter) {
+        result = before + spaceBefore + term + spaceAfter + after;
+      }
+      // Advance past this occurrence (+ any space just inserted) so the
+      // same spot isn't matched again on the next indexOf.
+      searchFrom = idx + spaceBefore.length + term.length + spaceAfter.length;
+    }
+  }
+  return result;
+}
+
 module.exports = {
   buildGlossaryPrompt,
   maskKeepUnchanged,
   matchesLine,
   containsCJK,
+  spaceIfNeeded,
+  fixTermSpacing,
   PLACEHOLDER_OPEN,
   PLACEHOLDER_CLOSE,
   MAX_ENTRIES,

@@ -13,7 +13,7 @@
  *   node scripts/test-glossary-prompt.js --quiet
  */
 const path = require('path');
-const { buildGlossaryPrompt, maskKeepUnchanged, matchesLine, containsCJK, PLACEHOLDER_OPEN, PLACEHOLDER_CLOSE, MAX_ENTRIES, MAX_CHARS } =
+const { buildGlossaryPrompt, maskKeepUnchanged, matchesLine, containsCJK, fixTermSpacing, PLACEHOLDER_OPEN, PLACEHOLDER_CLOSE, MAX_ENTRIES, MAX_CHARS } =
   require(path.join('..', 'src', 'services', 'translation', 'glossary-prompt.js'));
 
 const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
@@ -316,6 +316,37 @@ check('buildGlossaryPrompt-includeKeepUnchanged-defaults-to-true-unchanged-from-
   const entries = [{ source: '桜花学園', target: '桜花学園', mode: 'exact' }];
   const text = buildGlossaryPrompt(entries, '桜花学園に着いた。');
   return { pass: text.includes('Keep these unchanged (proper nouns):') && text.includes('- 桜花学園'), actual: text };
+});
+
+// ─── fixTermSpacing (DeepL's native glossary, Fase 6) ──────────────────────
+check('fixTermSpacing-fixes-a-real-deepl-glossary-glued-boundary', () => {
+  // Reproduced against DeepL's real API with a live glossary_id: "灰音は
+  // 桜花学園に行った。" with a keep-unchanged 桜花学園 entry came back as
+  // "Haine fue a la桜花学園." — DeepL's own native glossary has the exact
+  // same glued-boundary artifact as the LLM masking path, with no
+  // placeholder step of Tuhua's to hook into.
+  const result = fixTermSpacing('Haine fue a la桜花学園.', ['桜花学園']);
+  return { pass: result === 'Haine fue a la 桜花学園.', actual: result };
+});
+
+check('fixTermSpacing-does-not-touch-a-correctly-spaced-cjk-latin-boundary', () => {
+  const result = fixTermSpacing('花音は桜花学園に着いた。', ['桜花学園']);
+  return { pass: result === '花音は桜花学園に着いた。', actual: result };
+});
+
+check('fixTermSpacing-handles-latin-terms-too', () => {
+  const result = fixTermSpacing('Bienvenido aNekoparu Academy hoy.', ['Nekoparu Academy']);
+  return { pass: result === 'Bienvenido a Nekoparu Academy hoy.', actual: result };
+});
+
+check('fixTermSpacing-handles-multiple-terms-and-occurrences', () => {
+  const result = fixTermSpacing('花音と桜花学園とアルテミスが話す。桜花学園はいい所だ。', ['桜花学園', 'アルテミス']);
+  return { pass: result === '花音と桜花学園とアルテミスが話す。桜花学園はいい所だ。', actual: result };
+}, 'No terms glued to non-CJK neighbors here — should be a pure no-op, and must not throw or infinite-loop scanning repeated occurrences.');
+
+check('fixTermSpacing-is-a-no-op-when-the-term-is-absent', () => {
+  const result = fixTermSpacing('Nothing to see here.', ['桜花学園']);
+  return { pass: result === 'Nothing to see here.', actual: result };
 });
 
 function run() {

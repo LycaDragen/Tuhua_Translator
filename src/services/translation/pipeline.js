@@ -16,6 +16,7 @@ const TranslationMemory = require('./translation-memory');
 const GlossaryService = require('./glossary');
 const ContextMemory = require('./context-memory');
 const { buildGlossaryPrompt, maskKeepUnchanged } = require('./glossary-prompt');
+const { syncProfileGlossary } = require('./deepl-glossary-sync');
 
 // Engine imports
 const GoogleFreeEngine = require('./engines/google-free');
@@ -242,9 +243,18 @@ class TranslationPipeline extends EventEmitter {
   // index.js owns, and this pipeline sees it because there is only one.
   // `glossary || new GlossaryService()` keeps direct construction (existing
   // benches, XUatServer tests) working without an injected instance.
-  constructor(settings = {}, { glossary } = {}) {
+  //
+  // v3.13.6x (Fase 6): `profileStore` is the same injection Fase 4 left
+  // noted as Fase 7's job (per-profile promptTemplate override) — pulled
+  // forward here, scoped only to what DeepL's native glossary auto-sync
+  // needs (read the active profile's deeplGlossarySync bookkeeping, write
+  // it back after a successful remote sync). Optional: a pipeline built
+  // without one (existing benches, XUatServer) simply never attempts
+  // auto-sync — see _tryEngine's deepl-specific branch.
+  constructor(settings = {}, { glossary, profileStore } = {}) {
     super();
     this.settings = settings;
+    this.profileStore = profileStore || null;
     this.cache = new TranslationCache({ maxSize: 5000 });
     // v3.11.23: Translation Memory — engine-agnostic persistent store
     this.translationMemory = new TranslationMemory({ maxSize: 10000, enabled: settings.enableTranslationMemory !== false });
@@ -315,7 +325,10 @@ class TranslationPipeline extends EventEmitter {
           customInstructions: s.deeplCustomInstructions || [],
           styleId: s.deeplStyleId || '',
           translationMemoryId: s.deeplTranslationMemoryId || '',
-          translationMemoryThreshold: s.deeplTranslationMemoryThreshold || 75
+          translationMemoryThreshold: s.deeplTranslationMemoryThreshold || 75,
+          // v3.13.6x (Fase 6): global user preference (cost/latency vs.
+          // quality tradeoff), not per-game — same reasoning as llmTemperature.
+          modelType: s.deeplModelType || 'prefer_quality_optimized'
         });
         break;
       case 'openai': {
@@ -775,6 +788,18 @@ class TranslationPipeline extends EventEmitter {
       });
     }
 
+    // v3.13.6x (Fase 6): DeepL's native glossary_id — a completely
+    // different mechanism from the LLM prompt/masking block above (DeepL
+    // isn't an LLM; it has no prompt to instruct). Resolved once per call,
+    // not per attempt — a retry of the SAME call shouldn't re-sync.
+    let deeplGlossaryId;
+    let deeplKeepUnchangedTerms;
+    if (engineName === 'deepl') {
+      const resolved = await this._resolveDeeplGlossary(engine, srcLang, tgtLang);
+      deeplGlossaryId = resolved.glossaryId;
+      deeplKeepUnchangedTerms = resolved.keepUnchangedTerms;
+    }
+
     for (let attempt = 0; attempt <= retries; attempt++) {
       // v3.13.55: rate limiting used to be enforced once in _doTranslate, before
       // the primary engine's *first* attempt only — so a retry or a fallback
@@ -788,7 +813,9 @@ class TranslationPipeline extends EventEmitter {
           sourceLangName: getLanguageName(srcLang),
           targetLangName: getLanguageName(tgtLang),
           context: this.contextMemory.get(),
-          glossary: glossaryBlock
+          glossary: glossaryBlock,
+          glossaryId: deeplGlossaryId,
+          keepUnchangedTerms: deeplKeepUnchangedTerms
         });
         if (result) {
           result.text = restoreKeepUnchanged(result.text);
@@ -819,6 +846,62 @@ class TranslationPipeline extends EventEmitter {
       }
     }
     return null;
+  }
+
+  /**
+   * Resolves which DeepL glossary_id (if any) this call should send, and
+   * the list of "keep unchanged" terms for fixTermSpacing() to fix up
+   * DeepL's own glued-boundary artifact on (see deepl.js's translate()).
+   *
+   * Manual (`profile.deeplGlossaryId`, flows in via `this.settings` like any
+   * other profile-scoped setting — no profileStore access needed for this
+   * half) takes priority if set: "the user is managing this themselves, we
+   * don't touch it." Otherwise, if `deeplAutoGlossary` is on for the active
+   * profile, lazily syncs (see deepl-glossary-sync.js — a no-op on the
+   * common case where nothing changed since the last sync, just a hash
+   * comparison) and uses the resulting id.
+   *
+   * Never throws: a DeepL API hiccup during sync must not block the actual
+   * translation this call exists for — falls back to "no glossary" and lets
+   * the translation proceed, logging the failure.
+   */
+  async _resolveDeeplGlossary(deeplEngine, srcLang, tgtLang) {
+    const effective = this.glossary.getEffective();
+    const keepUnchangedTerms = effective
+      .filter((e) => e.enabled !== false && e.mode !== 'regex' && e.source === e.target)
+      .map((e) => e.source);
+
+    if (this.settings.deeplGlossaryId) {
+      return { glossaryId: this.settings.deeplGlossaryId, keepUnchangedTerms };
+    }
+    if (!this.settings.deeplAutoGlossary || !this.profileStore) {
+      return { glossaryId: undefined, keepUnchangedTerms };
+    }
+
+    const activeProfile = this.profileStore.getActive();
+    if (!activeProfile) {
+      return { glossaryId: undefined, keepUnchangedTerms };
+    }
+
+    try {
+      const { deeplGlossarySync, changed } = await syncProfileGlossary({
+        deeplGlossarySync: activeProfile.deeplGlossarySync,
+        entries: effective,
+        sourceLang: srcLang,
+        targetLang: tgtLang,
+        profileName: activeProfile.name,
+        baseUrl: deeplEngine.baseUrl,
+        apiKey: deeplEngine.apiKey
+      });
+      if (changed) {
+        this.profileStore.update(activeProfile.id, () => ({ deeplGlossarySync }));
+        console.log(`[Pipeline] DeepL glossary ${deeplGlossarySync ? 'synced' : 'cleared'} for profile "${activeProfile.name}"${deeplGlossarySync ? ` (${deeplGlossarySync.glossaryId})` : ''}`);
+      }
+      return { glossaryId: deeplGlossarySync?.glossaryId, keepUnchangedTerms };
+    } catch (err) {
+      console.error(`[Pipeline] DeepL glossary auto-sync failed, continuing without a glossary: ${err.response?.data?.message || err.message}`);
+      return { glossaryId: undefined, keepUnchangedTerms };
+    }
   }
 
   _isRetryable(err) {

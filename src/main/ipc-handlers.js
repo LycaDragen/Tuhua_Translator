@@ -14,6 +14,7 @@ const { profileToSettings, settingsToProfile } = require('../services/profiles/p
 const glossaryEntries = require('../services/translation/glossary-entries');
 const textCleaning = require('../services/text-cleaning');
 const llmProviders = require('../services/translation/llm-providers');
+const { deleteGlossary: deleteDeeplGlossary } = require('../services/translation/deepl-glossary-sync');
 const promptPresets = require('../services/translation/prompt-presets');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
@@ -1020,8 +1021,29 @@ class IpcHandlers {
       }
     });
 
-    ipcMain.handle('delete-profile', (event, id) => {
+    ipcMain.handle('delete-profile', async (event, id) => {
       try {
+        // v3.13.6x (Fase 6): best-effort cleanup of the profile's remote
+        // DeepL glossary (if auto-sync ever created one) BEFORE the
+        // profile record itself is gone — otherwise the glossaryId is lost
+        // and the remote resource is orphaned in the user's DeepL account
+        // forever (DeepL also caps the number of glossaries per account).
+        // Never blocks the actual deletion: a DeepL API hiccup here must
+        // not prevent removing a profile.
+        const target = this.profileStore.getById(id);
+        if (target?.deeplGlossarySync?.glossaryId) {
+          try {
+            const deeplEngine = this.pipeline.getEngine('deepl');
+            await deleteDeeplGlossary({
+              baseUrl: deeplEngine.baseUrl,
+              apiKey: deeplEngine.apiKey,
+              glossaryId: target.deeplGlossarySync.glossaryId
+            });
+          } catch (cleanupErr) {
+            console.error(`[Tuhua] Failed to clean up DeepL glossary for deleted profile "${target.name}": ${cleanupErr.message}`);
+          }
+        }
+
         const removed = this.profileStore.remove(id);
         if (!removed) return { success: false, error: 'Profile not found' };
         return { success: true };

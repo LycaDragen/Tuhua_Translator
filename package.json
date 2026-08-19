@@ -1,7 +1,7 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.60",
-  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.60",
+  "version": "3.13.61",
+  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.61",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -28,7 +28,8 @@
     "test:llm-providers": "node scripts/test-llm-providers.js",
     "test:prompt-template": "node scripts/test-prompt-template.js",
     "test:glossary-prompt": "node scripts/test-glossary-prompt.js",
-    "test:glossary-compliance": "node scripts/test-glossary-compliance.js"
+    "test:glossary-compliance": "node scripts/test-glossary-compliance.js",
+    "test:deepl-glossary-sync": "node scripts/test-deepl-glossary-sync.js"
   },
 
   "author": {

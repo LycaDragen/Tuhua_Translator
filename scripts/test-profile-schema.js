@@ -40,7 +40,12 @@ const EXPECTED_FIELDS = [
   'llmProvider', 'llmModel', 'llmCustomBaseUrl', 'localLlmEndpointPreset',
   'libretranslateEndpoint',
   'customMTEndpoint', 'customMTMethod', 'customMTBody', 'customMTResponsePath', 'customMTAuthHeader',
-  'manualTextractorMode', 'glossary', 'hook', 'cover', 'history'
+  'manualTextractorMode',
+  // v3.13.6x (Fase 6): DeepL native glossary — deeplGlossaryId/deeplAutoGlossary
+  // are user-facing scoped settings, deeplGlossarySync is internal bookkeeping
+  // (same category as hook/cover below).
+  'deeplGlossaryId', 'deeplAutoGlossary', 'deeplGlossarySync',
+  'glossary', 'hook', 'cover', 'history'
 ].sort();
 
 const LEGACY_V0_PROFILE = {
@@ -241,6 +246,43 @@ check('normalize-profile-defaults-localLlmEndpointPreset-to-custom-not-a-real-pr
 check('llmProvider-defaults-to-openai', () => {
   const normalized = normalizeProfile({ name: 'X' });
   return { pass: normalized.llmProvider === 'openai', actual: normalized.llmProvider };
+});
+
+// ─── Fase 6: DeepL native glossary ─────────────────────────────────────────
+check('deeplGlossaryId-and-deeplAutoGlossary-are-profile-scoped', () => {
+  const pass = PROFILE_SCOPED_SETTING_KEYS.includes('deeplGlossaryId') && PROFILE_SCOPED_SETTING_KEYS.includes('deeplAutoGlossary');
+  return { pass };
+}, 'A global setting here would leak profile 1\'s remote glossary into profile 2\'s translations the moment you switched games — this is the exact bug the Fase 6 profile-scoping fix exists to prevent.');
+
+check('deeplGlossarySync-is-neither-scoped-nor-promoted', () => {
+  const pass = !PROFILE_SCOPED_SETTING_KEYS.includes('deeplGlossarySync') && !PROMOTED_TO_GLOBAL_KEYS.includes('deeplGlossarySync');
+  return { pass };
+}, "It's internal bookkeeping (same category as hook/cover) written by deepl-glossary-sync.js, not a user-facing setting projected to/from global settings.");
+
+check('deeplGlossaryId-and-deeplAutoGlossary-default-to-empty-and-off', () => {
+  const p = createProfile({ name: 'Test' });
+  return { pass: p.deeplGlossaryId === '' && p.deeplAutoGlossary === false, actual: { id: p.deeplGlossaryId, auto: p.deeplAutoGlossary } };
+}, 'Auto-sync opt-in defaults OFF — sending glossary content to DeepL as a persistent account resource is materially different from a normal ephemeral translation request.');
+
+check('deeplGlossarySync-defaults-to-null', () => {
+  const p = createProfile({ name: 'Test' });
+  return { pass: p.deeplGlossarySync === null, actual: p.deeplGlossarySync };
+});
+
+check('validateProfile-rejects-a-non-object-non-null-deeplGlossarySync', () => {
+  const p = createProfile({ name: 'Test' });
+  p.deeplGlossarySync = 'not-an-object';
+  const result = validateProfile(p);
+  return { pass: result.valid === false && result.errors.some((e) => e.includes('deeplGlossarySync')), actual: result };
+});
+
+check('normalizeProfile-round-trips-a-populated-deeplGlossarySync', () => {
+  const sync = { glossaryId: 'g1', hash: 'abc123', sourceLang: 'ja', targetLang: 'es' };
+  const normalized = normalizeProfile({ name: 'Test', deeplGlossaryId: 'manual-id', deeplAutoGlossary: true, deeplGlossarySync: sync });
+  return {
+    pass: normalized.deeplGlossaryId === 'manual-id' && normalized.deeplAutoGlossary === true && JSON.stringify(normalized.deeplGlossarySync) === JSON.stringify(sync),
+    actual: normalized
+  };
 });
 
 function run() {

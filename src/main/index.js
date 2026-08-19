@@ -89,6 +89,14 @@ app.whenReady().then(() => {
       deeplTranslationMemoryId: '',
       deeplTranslationMemoryThreshold: 75,
       deeplLanguageFeatures: null,
+      // v3.13.6x (LLM engine overhaul, Fase 6): global user preference (a
+      // cost/latency-vs-quality tradeoff), not per-game — same reasoning as
+      // llmTemperature. 'prefer_quality_optimized' matches what the app was
+      // ALREADY silently forcing almost all the time before this Fase (see
+      // deepl.js: custom_instructions, sent by default, forces DeepL's
+      // next-gen model) — this setting mostly makes an existing behavior
+      // visible and overridable rather than changing it.
+      deeplModelType: 'prefer_quality_optimized',
       maxContextHistory: 5,
       historyLimit: 5,
       // v3.13.59 (LLM engine overhaul, Fase 4): kept as a default (not
@@ -225,7 +233,10 @@ app.whenReady().then(() => {
   // Initialize services
   regexFilter = new RegexFilterService();
   hookCleaningSettings = new HookCleaningSettingsService();
-  pipeline = new TranslationPipeline(settings, { glossary });
+  // v3.13.6x (Fase 6): profileStore injected so DeepL native glossary
+  // auto-sync can read/write the active profile's deeplGlossarySync
+  // bookkeeping — see pipeline.js's constructor comment.
+  pipeline = new TranslationPipeline(settings, { glossary, profileStore });
   textractor = new TextractorConnector(settings.textractorPort || 9251);
   textractorLauncher = new TextractorLauncher(hookCleaningSettings);
   clipboardWatcher = new ClipboardWatcher({ interval: 500 });
