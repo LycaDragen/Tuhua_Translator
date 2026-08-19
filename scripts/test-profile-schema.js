@@ -35,7 +35,10 @@ function parseArgs(argv) {
 const EXPECTED_FIELDS = [
   'id', 'name', 'isDefault', 'createdAt', 'savedAt',
   'sourceLang', 'inputMethod', 'engine',
-  'customEndpoint', 'customModel', 'libretranslateEndpoint',
+  'customEndpoint', 'customModel',
+  // v3.13.58 (Fase 3): cloud-LLM analogues of customEndpoint/customModel.
+  'llmProvider', 'llmModel', 'llmCustomBaseUrl', 'localLlmEndpointPreset',
+  'libretranslateEndpoint',
   'customMTEndpoint', 'customMTMethod', 'customMTBody', 'customMTResponsePath', 'customMTAuthHeader',
   'manualTextractorMode', 'glossary', 'hook', 'cover', 'history'
 ].sort();
@@ -217,6 +220,28 @@ check('round-trip-identity-over-scoped-subset', () => {
 });
 
 check('schema-version-is-1', () => ({ pass: PROFILE_SCHEMA_VERSION === 1 }));
+
+// ─── v3.13.58 (Fase 3): llmProvider* fields ─────────────────────────────
+check('llm-provider-keys-is-promoted-to-global-not-scoped', () => {
+  const pass = PROMOTED_TO_GLOBAL_KEYS.includes('llmProviderKeys') && !PROFILE_SCOPED_SETTING_KEYS.includes('llmProviderKeys');
+  return { pass };
+}, 'Credentials stay global — same reasoning as deeplKey/apiKey. A profile carrying this key fails validateProfile (see the promoted-key rejection case above).');
+
+check('normalize-profile-defaults-localLlmEndpointPreset-to-custom-not-a-real-preset', () => {
+  // A v0/pre-Fase-3 profile with a manually-set customEndpoint (e.g.
+  // pointed at Ollama's :11434) and no localLlmEndpointPreset field at
+  // all must NOT come out pointed at a different preset's port after
+  // normalization — 'custom' is the only default that defers entirely to
+  // the existing customEndpoint value instead of overriding it.
+  const legacyProfile = { name: 'Old Profile', customEndpoint: 'http://localhost:11434/v1' };
+  const normalized = normalizeProfile(legacyProfile);
+  return { pass: normalized.localLlmEndpointPreset === 'custom', actual: normalized.localLlmEndpointPreset };
+});
+
+check('llmProvider-defaults-to-openai', () => {
+  const normalized = normalizeProfile({ name: 'X' });
+  return { pass: normalized.llmProvider === 'openai', actual: normalized.llmProvider };
+});
 
 function run() {
   const args = parseArgs(process.argv.slice(2));

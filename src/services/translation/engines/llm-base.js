@@ -16,6 +16,7 @@
  */
 const axios = require('axios');
 const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
+const { getRequestParamOverrides } = require('../llm-providers');
 
 class OpenAICompatEngine {
   constructor({
@@ -34,7 +35,20 @@ class OpenAICompatEngine {
     // `.trim()` with none of sanitizeLLMOutput's heuristics, in case one of
     // them misfires on a real setup in a way the ground-truth bench didn't
     // catch.
-    sanitize = true
+    sanitize = true,
+    // v3.13.58 (Fase 3): `providerId` is looked up in llm-providers.js at
+    // request-build time (not resolved once in the constructor) so that
+    // changing `model` between calls — e.g. a user picks o4-mini after
+    // starting on gpt-4o-mini — always re-evaluates whether it's a
+    // reasoning model. `providerId` is undefined for local-llm (no
+    // provider table entry; local servers get the plain defaults).
+    providerId,
+    temperature = 0.3,
+    maxTokens = 1500,
+    // v3.13.58: unset (not 0) by default — top_p is a real sampling
+    // parameter with meaningful behavior at 0, so "not sent" and "sent as
+    // 0" must be distinguishable. null/undefined means "don't send it".
+    topP = null
   } = {}) {
     this.name = name;
     this.displayName = displayName;
@@ -46,6 +60,10 @@ class OpenAICompatEngine {
     this.timeout = timeout;
     this.supportedLanguages = supportedLanguages;
     this.sanitize = sanitize;
+    this.providerId = providerId;
+    this.temperature = temperature;
+    this.maxTokens = maxTokens;
+    this.topP = topP;
     // Injectable so scripts/test-llm-base.js can assert on the exact request
     // body/headers without making a real HTTP call — same idea as the
     // injectable `store` in glossary.js/profile-store.js.
@@ -114,14 +132,28 @@ CRITICAL RULES — follow all of them exactly:
       headers['Authorization'] = `Bearer ${this.apiKey}`;
     }
 
+    // v3.13.58 (Fase 3): some models (OpenAI's o-series, DeepSeek's
+    // deepseek-reasoner) reject a custom temperature/top_p outright, and
+    // OpenAI's reasoning models specifically want `max_completion_tokens`
+    // instead of `max_tokens` — getRequestParamOverrides() is the single
+    // place that table of exceptions lives (llm-providers.js), so a new
+    // provider/model quirk is a data change there, not a new branch here.
+    const { maxTokensField, omitSamplingParams } = getRequestParamOverrides(this.providerId, this.model);
+    const body = {
+      model: this.model,
+      messages: messages,
+      [maxTokensField]: this.maxTokens
+    };
+    if (!omitSamplingParams) {
+      body.temperature = this.temperature;
+      if (this.topP !== null && this.topP !== undefined) {
+        body.top_p = this.topP;
+      }
+    }
+
     const response = await this._httpClient.post(
       `${this.baseUrl}/chat/completions`,
-      {
-        model: this.model,
-        messages: messages,
-        temperature: 0.3,
-        max_tokens: 1000
-      },
+      body,
       { timeout: this.timeout, headers }
     );
 

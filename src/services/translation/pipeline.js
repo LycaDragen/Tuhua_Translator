@@ -24,6 +24,7 @@ const OpenAIEngine = require('./engines/openai');
 const LocalLLMEngine = require('./engines/local-llm');
 const LibreTranslateEngine = require('./engines/libretranslate');
 const CustomMTEngine = require('./engines/custom-mt');
+const { resolveLocalEndpoint } = require('./llm-providers');
 
 // Language code to full name mapping (for LLM prompts and display)
 const LANGUAGE_NAMES = {
@@ -309,23 +310,59 @@ class TranslationPipeline extends EventEmitter {
           translationMemoryThreshold: s.deeplTranslationMemoryThreshold || 75
         });
         break;
-      case 'openai':
-        this.engines[engineName] = new OpenAIEngine(s.openaiKey, {
-          model: s.openaiModel || 'gpt-3.5-turbo',
+      case 'openai': {
+        // v3.13.58 (Fase 3): `engine:'openai'` now means "cloud LLM,
+        // provider selected by s.llmProvider" — see openai.js's header
+        // comment for why the engine id/class/file name stay as-is rather
+        // than getting renamed. `s.openaiKey` is no longer read here (see
+        // llm-providers.js's seedProviderKeysFromLegacyOpenAIKey and its
+        // one-time call site in src/main/index.js) — the key comes from
+        // the provider-keyed map instead, so switching providers doesn't
+        // require re-entering a key that was really for a different one.
+        const providerId = s.llmProvider || 'openai';
+        const providerKey = (s.llmProviderKeys && s.llmProviderKeys[providerId]) || '';
+        this.engines[engineName] = new OpenAIEngine(providerKey, {
+          providerId,
+          // v3.13.58: renamed from the old (dead — see renderer.js's
+          // gatherConfig, which just hardcoded it to 'gpt-3.5-turbo' on
+          // every save, never displayed or user-edited) `openaiModel` to
+          // `llmModel`, since it now covers whichever cloud provider is
+          // selected, not just OpenAI specifically.
+          model: s.llmModel || '',
+          // Only meaningful for providerId==='custom' (see openai.js on
+          // why an unset custom baseUrl must NOT fall back to a real
+          // provider's URL); ignored otherwise since options.baseUrl only
+          // wins when non-empty.
+          baseUrl: providerId === 'custom' ? (s.llmCustomBaseUrl || '') : undefined,
           systemPrompt: s.systemPrompt || '',
+          temperature: s.llmTemperature,
+          maxTokens: s.llmMaxTokens,
+          topP: s.llmTopP,
           // v3.13.57 (Fase 2): rollback interruptor for the output
           // sanitizer — defaults on.
           sanitize: s.llmSanitize !== false
         });
         break;
-      case 'local-llm':
+      }
+      case 'local-llm': {
+        // v3.13.58 (Fase 3): s.localLlmEndpointPreset lets the UI offer a
+        // dropdown (Ollama/LM Studio/llama.cpp/KoboldCpp) instead of
+        // requiring the user to remember a port — resolveLocalEndpoint()
+        // falls back to the pre-existing customEndpoint setting when no
+        // preset (or 'custom') is selected, so an install upgrading from
+        // before this version keeps working unchanged.
+        const endpoint = resolveLocalEndpoint(s.localLlmEndpointPreset, s.customEndpoint) || 'http://localhost:1234/v1';
         this.engines[engineName] = new LocalLLMEngine({
-          endpoint: s.customEndpoint || 'http://localhost:1234/v1',
+          endpoint,
           model: s.customModel || 'local-model',
           systemPrompt: s.systemPrompt || '',
+          temperature: s.llmTemperature,
+          maxTokens: s.llmMaxTokens,
+          topP: s.llmTopP,
           sanitize: s.llmSanitize !== false
         });
         break;
+      }
       case 'libretranslate':
         this.engines[engineName] = new LibreTranslateEngine({
           endpoint: s.libretranslateEndpoint || 'http://localhost:5000',

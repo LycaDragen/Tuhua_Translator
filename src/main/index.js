@@ -22,6 +22,7 @@ const GlossaryService = require('../services/translation/glossary');
 const ProfileStore = require('../services/profiles/profile-store');
 const RegexFilterService = require('../services/regex-filter');
 const HookCleaningSettingsService = require('../services/hook-cleaning-settings');
+const llmProviders = require('../services/translation/llm-providers');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -94,6 +95,19 @@ app.whenReady().then(() => {
       // the LLM output sanitizer (llm-output.js) — set false to fall back
       // to a bare .trim() with none of its heuristics.
       llmSanitize: true,
+      // v3.13.58 (LLM engine overhaul, Fase 3): global — credentials, one
+      // real-world API key per provider id (see llm-providers.js). NOT
+      // profile-scoped, same reasoning as deeplKey/apiKey before it.
+      llmProviderKeys: {},
+      // Sampling params shared by both LLM engines (openai/local-llm) —
+      // deliberately global rather than per-profile: this is "how
+      // deterministic should translations be", a user preference, not a
+      // per-game setting the way the provider/model themselves are.
+      llmTemperature: 0.3,
+      llmMaxTokens: 1500,
+      // null, not 0 — unset. See llm-base.js's constructor comment for why
+      // "not sent" and "sent as 0" must stay distinguishable for top_p.
+      llmTopP: null,
       clickThrough: false,
       profiles: [],
       activeProfile: 'Por Defecto',
@@ -146,6 +160,19 @@ app.whenReady().then(() => {
   const startupActiveProfile = profileStore.getActive();
   if (startupActiveProfile) {
     glossary.setProfileLayer(startupActiveProfile.glossary);
+  }
+
+  // v3.13.58 (LLM engine overhaul, Fase 3): one-time, idempotent seed of
+  // the legacy global `openaiKey` into the new per-provider
+  // `llmProviderKeys` map — see llm-providers.js's
+  // seedProviderKeysFromLegacyOpenAIKey doc comment for why `openaiKey`
+  // itself is deliberately left untouched rather than deleted here.
+  // Runs before the settings snapshot below, same reasoning as the profile
+  // migration above: `settings` must reflect the post-seed store.
+  const seededProviderKeys = llmProviders.seedProviderKeysFromLegacyOpenAIKey(store.get());
+  if (seededProviderKeys) {
+    store.set('llmProviderKeys', seededProviderKeys);
+    log.info('Seeded llmProviderKeys from legacy openaiKey.', { providers: Object.keys(seededProviderKeys) });
   }
 
   const settings = store.get();

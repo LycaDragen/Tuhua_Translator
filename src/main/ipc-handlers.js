@@ -13,6 +13,7 @@ const VndbService = require('../services/vndb');
 const { profileToSettings, settingsToProfile } = require('../services/profiles/profile-schema');
 const glossaryEntries = require('../services/translation/glossary-entries');
 const textCleaning = require('../services/text-cleaning');
+const llmProviders = require('../services/translation/llm-providers');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
 // check), so it's requirable here too — used for the few strings the
@@ -100,6 +101,24 @@ class IpcHandlers {
     // anymore.
     ipcMain.handle('get-settings', () => {
       return this.store.get() || {};
+    });
+
+    // v3.13.58 (LLM engine overhaul, Fase 3): read-only — llm-providers.js
+    // lives in the main process (src/services/) and isn't reachable from
+    // the sandboxed renderer via require(), so this is what feeds the
+    // provider dropdown / local endpoint preset dropdown / model
+    // datalists. Only the fields the UI actually needs are sent —
+    // `reasoningModelPattern` (a RegExp) doesn't survive structured clone
+    // and isn't needed there anyway, request-param overrides are decided
+    // in the main process.
+    ipcMain.handle('get-llm-providers', () => {
+      return {
+        providers: llmProviders.CLOUD_PROVIDERS.map((p) => ({
+          id: p.id, labelKey: p.labelKey, requiresKey: p.requiresKey,
+          defaultModel: p.defaultModel, models: p.models, beta: !!p.beta, docsUrl: p.docsUrl || ''
+        })),
+        localPresets: llmProviders.LOCAL_ENDPOINT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey }))
+      };
     });
 
     ipcMain.handle('save-settings', async (event, data) => {
@@ -1056,7 +1075,7 @@ class IpcHandlers {
     });
 
     // ===== API Key Validation =====
-    ipcMain.handle('validate-api-key', async (event, { engine, apiKey, endpoint }) => {
+    ipcMain.handle('validate-api-key', async (event, { engine, apiKey, endpoint, provider }) => {
       try {
         switch (engine) {
           case 'deepl': {
@@ -1102,7 +1121,18 @@ class IpcHandlers {
           }
 
           case 'openai': {
-            const resp = await axios.get('https://api.openai.com/v1/models', {
+            // v3.13.58 (Fase 3): this used to be hardcoded to OpenAI's own
+            // API — now it hits whichever provider's baseUrl was selected
+            // (llm-providers.js), so "Validar" actually validates the key
+            // against the provider the dropdown has selected. `endpoint`
+            // (the 'custom' provider's user-typed URL) wins when set, same
+            // precedence as the real request path in openai.js.
+            const selectedProvider = llmProviders.getProvider(provider) || llmProviders.getProvider('openai');
+            const base = endpoint || selectedProvider.baseUrl;
+            if (!base) {
+              return { valid: false, code: 'endpoint_not_configured', params: {} };
+            }
+            const resp = await axios.get(`${base}/models`, {
               timeout: 8000,
               headers: { 'Authorization': `Bearer ${apiKey}` }
             });
@@ -2138,6 +2168,8 @@ class IpcHandlers {
   unregister() {
     const channels = [
       'get-settings', 'save-settings',
+      // v3.13.58 (LLM engine overhaul, Fase 3)
+      'get-llm-providers',
       'get-glossary', 'save-glossary', 'delete-glossary-entry',
       'import-glossary', 'export-glossary', 'browse-save-json', 'browse-open-json',
       'get-history', 'clear-history', 'export-history', 'clear-context',

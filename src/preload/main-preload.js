@@ -10,6 +10,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 const ALLOWED_INVOKE_CHANNELS = new Set([
   'get-settings',
   'save-settings',
+  // v3.13.58 (LLM engine overhaul, Fase 3)
+  'get-llm-providers',
   'get-glossary',
   'save-glossary',
   'delete-glossary-entry',
@@ -144,6 +146,11 @@ const api = {
     }
     return secureInvoke('save-settings', data);
   },
+  // v3.13.58 (LLM engine overhaul, Fase 3): the cloud provider dropdown /
+  // local endpoint preset dropdown / model datalists all read from this —
+  // see ipc-handlers.js's get-llm-providers for why it can't just be a
+  // require() of llm-providers.js from here (sandboxed renderer).
+  getLlmProviders: () => secureInvoke('get-llm-providers'),
 
   // Glossary (v3.13.40: two layers — scope is 'global' or 'profile')
   getGlossary: () => secureInvoke('get-glossary'),
@@ -263,9 +270,13 @@ const api = {
   },
 
   // API Key validation
-  validateApiKey: (engine, apiKey, endpoint) => {
+  // v3.13.58 (Fase 3): `provider` is new — which llm-providers.js entry to
+  // validate against for engine==='openai'. Optional/backward-compatible:
+  // every other engine ignores it, and omitting it falls back to the
+  // 'openai' provider (see ipc-handlers.js's validate-api-key handler).
+  validateApiKey: (engine, apiKey, endpoint, provider) => {
     if (typeof engine !== 'string') throw new Error('Invalid engine');
-    return secureInvoke('validate-api-key', { engine, apiKey: apiKey || '', endpoint: endpoint || '' });
+    return secureInvoke('validate-api-key', { engine, apiKey: apiKey || '', endpoint: endpoint || '', provider: provider || '' });
   },
 
   // Font family detection

@@ -91,7 +91,9 @@ check('openai-throws-before-any-request-when-no-key', async () => {
   } catch (e) {
     threw = e.message;
   }
-  const pass = threw === 'OpenAI (GPT) API key is required' && http.calls.length === 0;
+  // v3.13.58: displayName is now provider-derived ('OpenAI', from
+  // llm-providers.js) rather than the old hardcoded 'OpenAI (GPT)'.
+  const pass = threw === 'OpenAI API key is required' && http.calls.length === 0;
   return { pass, actual: { threw, callCount: http.calls.length } };
 }, 'Must fail fast without ever hitting the network — a missing key is not a retryable/network error.');
 
@@ -201,11 +203,95 @@ check('set-endpoint-updates-the-url-used-on-next-call', async () => {
 });
 
 check('default-models-match-provider-conventions', () => {
+  // v3.13.58: OpenAI's default model now comes from llm-providers.js
+  // (getProvider('openai').defaultModel) instead of a hardcoded literal —
+  // gpt-4o-mini rather than the outdated gpt-3.5-turbo.
   const openaiModel = new OpenAIEngine('key').model;
   const localModel = new LocalLLMEngine().model;
-  const pass = openaiModel === 'gpt-3.5-turbo' && localModel === 'local-model';
+  const pass = openaiModel === 'gpt-4o-mini' && localModel === 'local-model';
   return { pass, actual: { openaiModel, localModel } };
 });
+
+// ─── Fase 3: provider selection, params, reasoning-model overrides ──────
+check('providerId-selects-baseurl-displayname-and-default-model', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, providerId: 'groq' });
+  await engine.translate('x', {});
+  const pass = http.calls[0].url === 'https://api.groq.com/openai/v1/chat/completions'
+    && engine.displayName === 'Groq'
+    && engine.model === 'llama-3.3-70b-versatile';
+  return { pass, actual: { url: http.calls[0].url, displayName: engine.displayName, model: engine.model } };
+}, "Confirms the 'openai' engine class is genuinely provider-generic now, not just accepting the option and ignoring it.");
+
+check('explicit-model-option-overrides-the-provider-default', async () => {
+  const engine = new OpenAIEngine('key', { providerId: 'groq', model: 'llama-3.1-8b-instant' });
+  return { pass: engine.model === 'llama-3.1-8b-instant', actual: engine.model };
+});
+
+check('custom-providerId-with-no-url-does-not-silently-default-to-openai', () => {
+  // If this fell back to 'https://api.openai.com/v1' when the 'custom'
+  // provider's own baseUrl (empty in the table on purpose) and
+  // options.baseUrl are BOTH empty, a user's key/text meant for their own
+  // gateway could get sent to OpenAI's real API instead — a silent
+  // wrong-destination bug, not just a broken feature.
+  const engine = new OpenAIEngine('key', { providerId: 'custom' });
+  return { pass: engine.baseUrl === '', actual: engine.baseUrl };
+});
+
+check('custom-providerId-uses-a-user-supplied-baseurl', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, providerId: 'custom', baseUrl: 'https://my-gateway.example.com/v1', model: 'whatever-model' });
+  await engine.translate('x', {});
+  const pass = http.calls[0].url === 'https://my-gateway.example.com/v1/chat/completions';
+  return { pass, actual: http.calls[0].url };
+}, "The 'custom' provider table entry has an empty baseUrl on purpose — it exists to be overridden by options.baseUrl.");
+
+check('temperature-and-max-tokens-are-configurable-and-sent', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, temperature: 0.7, maxTokens: 800 });
+  await engine.translate('x', {});
+  const { body } = http.calls[0];
+  const pass = body.temperature === 0.7 && body.max_tokens === 800 && !('top_p' in body);
+  return { pass, actual: body };
+}, 'top_p absent by default — unset, not 0, since 0 is a meaningful sampling value.');
+
+check('top-p-is-sent-only-when-explicitly-set', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, topP: 0.9 });
+  await engine.translate('x', {});
+  const pass = http.calls[0].body.top_p === 0.9;
+  return { pass, actual: http.calls[0].body };
+});
+
+check('reasoning-model-gets-max-completion-tokens-and-drops-sampling-params', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, providerId: 'openai', model: 'o4-mini', temperature: 0.7, topP: 0.9 });
+  await engine.translate('x', {});
+  const { body } = http.calls[0];
+  const pass = body.max_completion_tokens !== undefined
+    && !('max_tokens' in body)
+    && !('temperature' in body)
+    && !('top_p' in body);
+  return { pass, actual: body };
+}, "End-to-end proof that llm-base.js's request builder actually consults getRequestParamOverrides() — llm-providers.js's own bench only proves the table lookup is correct in isolation.");
+
+check('deepseek-reasoner-keeps-max-tokens-but-drops-sampling-params', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, providerId: 'deepseek', model: 'deepseek-reasoner', temperature: 0.7 });
+  await engine.translate('x', {});
+  const { body } = http.calls[0];
+  const pass = body.max_tokens !== undefined && !('max_completion_tokens' in body) && !('temperature' in body);
+  return { pass, actual: body };
+}, 'The exact per-provider distinction getRequestParamOverrides exists for — see the same-named check in test-llm-providers.js for why this differs from OpenAI o-series.');
+
+check('non-reasoning-model-keeps-default-max-tokens-field-and-temperature', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  await engine.translate('x', {});
+  const { body } = http.calls[0];
+  const pass = body.max_tokens === 1500 && body.temperature === 0.3;
+  return { pass, actual: body };
+}, 'Defaults per the plan: temperature 0.3 (unchanged), maxTokens raised to 1500 (was hardcoded 1000, which cut off longer lines and got them cached truncated).');
 
 // ─── response parsing ────────────────────────────────────────────────────
 check('response-content-is-trimmed', async () => {

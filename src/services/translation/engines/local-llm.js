@@ -22,6 +22,13 @@ class LocalLLMEngine extends OpenAICompatEngine {
       systemPrompt: options.systemPrompt || '',
       timeout: 60000, // Local models can be slower
       supportedLanguages: ['ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh'],
+      // v3.13.58 (Fase 3): no `providerId` — local servers aren't in the
+      // provider table, so getRequestParamOverrides(undefined, model)
+      // always falls through to the plain max_tokens/temperature/top_p
+      // defaults, which is the right behavior for an arbitrary local model.
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      topP: options.topP,
       // Only ever set by scripts/test-llm-base.js — production code never
       // passes this, so llm-base.js's own axios default is what runs live.
       httpClient: options.httpClient,

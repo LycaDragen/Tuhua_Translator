@@ -209,8 +209,25 @@
                             <span data-i18n="validate_btn">Validar</span>
                         </button>
                     </div>
+                    <!-- v3.13.58 (LLM engine overhaul, Fase 3): cloud provider dropdown, next to the API key field as requested. Options populated at runtime by loadLlmProviders() from api.getLlmProviders() (llm-providers.js lives in the main process, unreachable via require() from this sandboxed renderer). Shown only for engine==='openai' (not deepl) — toggled in toggleInputFields(). -->
+                    <div id="llm-provider-row" class="hidden mb-2">
+                        <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_provider_label">Proveedor</label>
+                        <select id="llm-provider-select" onchange="onLlmProviderChange()" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs cursor-pointer"></select>
+                        <p id="llm-provider-beta-note" class="hidden text-[9px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="llm_provider_beta_note">Esta API de compatibilidad es beta según la documentación del proveedor — puede cambiar sin aviso.</p>
+                    </div>
                     <input type="password" id="api-key" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono transition-colors duration-200" placeholder="Pega tu Key aquí..." oninput="markUnsaved()">
                     <div id="api-key-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
+                    <!-- v3.13.58: shown only when the 'custom' provider is selected — the table's own baseUrl is deliberately empty for it, see llm-providers.js. -->
+                    <div id="llm-custom-baseurl-row" class="hidden mt-2">
+                        <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_base_url_label">URL Base</label>
+                        <input type="text" id="llm-custom-baseurl" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" placeholder="https://mi-gateway.ejemplo.com/v1" oninput="markUnsaved()">
+                    </div>
+                    <!-- v3.13.58: replaces the hardcoded 'gpt-3.5-turbo' — free text + datalist (not a &lt;select&gt;, the model landscape moves faster than Tuhua releases) populated per-provider by onLlmProviderChange(). Empty = use the provider's own default. -->
+                    <div id="llm-model-row" class="hidden mt-2">
+                        <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_model_label">Modelo</label>
+                        <input type="text" id="llm-model" list="llm-model-datalist" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" oninput="markUnsaved()">
+                        <datalist id="llm-model-datalist"></datalist>
+                    </div>
                     <!-- v3.11.23: DeepL Formality -->
                     <div id="deepl-formality-section" class="hidden mt-2">
                         <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="deepl_formality">Formalidad</label>
@@ -253,6 +270,11 @@
                             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             <span data-i18n="validate_btn">Validar</span>
                         </button>
+                    </div>
+                    <!-- v3.13.58 (Fase 3): preset dropdown for the endpoint below it — Ollama's :11434 vs LM Studio's :1234 (etc) is a real, documented mix-up (see scripts/test-context-memory.js's header). Selecting a real preset fills and locks the endpoint field; 'custom' (default) leaves it exactly as free text, same as before this existed. -->
+                    <div>
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1" data-i18n="llm_local_preset_label">Servidor Local</label>
+                        <select id="local-endpoint-preset" onchange="onLocalEndpointPresetChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs cursor-pointer"></select>
                     </div>
                     <input type="text" id="local-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:1234/v1" oninput="markUnsaved()">
                     <input type="text" id="local-model" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Model name (e.g. llama3)" oninput="markUnsaved()">
@@ -833,6 +855,27 @@
                                 <button onclick="resetSystemPrompt()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1" data-i18n="reset_prompt_btn">Restablecer</button>
                             </div>
                             <textarea id="system-prompt" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono resize-none" data-i18n-ph="system_prompt_ph" placeholder="Custom instructions for LLM engines..." oninput="markUnsaved()"></textarea>
+                        </div>
+                        <!-- v3.13.58 (LLM engine overhaul, Fase 3): shared by both LLM engines (openai/local-llm) — toggled in toggleInputFields(). Global rather than per-profile: how deterministic a translation should be is a user preference, not a per-game setting the way the provider/model themselves are (see profile-schema.js). -->
+                        <div id="llm-params-section" class="hidden space-y-2">
+                            <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="llm_params_label">Parámetros del Modelo</label>
+                            <div class="grid grid-cols-3 gap-2">
+                                <div>
+                                    <span class="text-[9px] text-gray-400" data-i18n="llm_temperature_label">Temperatura</span>
+                                    <input type="number" id="llm-temperature" min="0" max="2" step="0.1" value="0.3" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" oninput="markUnsaved()">
+                                </div>
+                                <div>
+                                    <span class="text-[9px] text-gray-400" data-i18n="llm_max_tokens_label">Máx. Tokens</span>
+                                    <input type="number" id="llm-max-tokens" min="50" max="8000" step="50" value="1500" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" oninput="markUnsaved()">
+                                </div>
+                                <div>
+                                    <div class="flex items-center gap-1">
+                                        <input type="checkbox" id="llm-top-p-enabled" onchange="document.getElementById('llm-top-p').disabled = !this.checked; markUnsaved()">
+                                        <span class="text-[9px] text-gray-400" data-i18n="llm_top_p_label">Top P</span>
+                                    </div>
+                                    <input type="number" id="llm-top-p" min="0" max="1" step="0.05" value="0.9" disabled class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs disabled:opacity-50" oninput="markUnsaved()">
+                                </div>
+                            </div>
                         </div>
                         <!-- Context History -->
                         <div id="context-history-section">

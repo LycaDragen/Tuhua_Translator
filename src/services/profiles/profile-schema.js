@@ -34,6 +34,21 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   'engine',
   'customEndpoint',
   'customModel',
+  // v3.13.58 (LLM engine overhaul, Fase 3): the cloud-LLM analogues of
+  // customEndpoint/customModel above — which provider/model a GAME uses is
+  // exactly as game-specific as which local server it points to (one VN
+  // might warrant a stronger cloud model, another a cheap local one).
+  // llmProvider/llmModel/llmCustomBaseUrl mirror engine/customModel/
+  // customEndpoint's scoping for the same reason. The API KEYS themselves
+  // (llmProviderKeys) are NOT here — see PROMOTED_TO_GLOBAL_KEYS below.
+  'llmProvider',
+  'llmModel',
+  'llmCustomBaseUrl',
+  // The convenience preset (Ollama/LM Studio/...) that resolves to
+  // customEndpoint when set to something other than 'custom' — scoped
+  // alongside customEndpoint since it's a UI shortcut for the same field,
+  // not an independent setting.
+  'localLlmEndpointPreset',
   'libretranslateEndpoint',
   'customMTEndpoint',
   'customMTMethod',
@@ -56,7 +71,14 @@ const PROMOTED_TO_GLOBAL_KEYS = [
   'apiKey',
   'targetLang',
   'textractorCliPath',
-  'textractorPort'
+  'textractorPort',
+  // v3.13.58 (Fase 3): the provider-keyed credential map that replaced
+  // the single global `openaiKey` — see llm-providers.js's
+  // seedProviderKeysFromLegacyOpenAIKey for the one-time migration off the
+  // old key. Credentials are global for the same reason deeplKey/apiKey
+  // already were: switching games shouldn't switch which real-world API
+  // key is in use.
+  'llmProviderKeys'
 ];
 
 function generateId() {
@@ -85,6 +107,20 @@ function createProfile(overrides = {}) {
     engine: overrides.engine !== undefined ? overrides.engine : 'google-free',
     customEndpoint: overrides.customEndpoint || '',
     customModel: overrides.customModel || '',
+    // v3.13.58 (Fase 3): '' means "use the provider's default" — see
+    // llmProvider's own default below and openai.js's fallback chain.
+    llmProvider: overrides.llmProvider || 'openai',
+    llmModel: overrides.llmModel || '',
+    llmCustomBaseUrl: overrides.llmCustomBaseUrl || '',
+    // v3.13.58: defaults to 'custom' (== "just use customEndpoint
+    // verbatim"), NOT one of the real presets. A profile normalized from
+    // before this field existed has no localLlmEndpointPreset at all and
+    // falls through to this default — if it defaulted to e.g. 'lmstudio',
+    // resolveLocalEndpoint() would silently override a customEndpoint the
+    // user had manually pointed at Ollama (or anything else) back to LM
+    // Studio's port. 'custom' is the only default that can't regress an
+    // existing endpoint.
+    localLlmEndpointPreset: overrides.localLlmEndpointPreset || 'custom',
     libretranslateEndpoint: overrides.libretranslateEndpoint || '',
     customMTEndpoint: overrides.customMTEndpoint || '',
     customMTMethod: overrides.customMTMethod || '',
