@@ -278,6 +278,12 @@ class TranslationPipeline extends EventEmitter {
     this.debounceMs = settings.debounceMs || 300;
     this.debounceTimer = null;
     this._pendingReject = null;
+    // v3.13.6x (Fase 9): the AbortController for whichever _doTranslate()
+    // call is currently making an HTTP request — see translate()'s
+    // supersession block below for why this exists. One at a time: only
+    // ONE _doTranslate() is ever the "current" one a superseding
+    // translate() call cares about aborting.
+    this._activeAbortController = null;
 
     // Rate limiting
     this.lastRequestTime = 0;
@@ -444,6 +450,18 @@ class TranslationPipeline extends EventEmitter {
       supersededError.code = 'SUPERSEDED';
       this._pendingReject(supersededError);
       this._pendingReject = null;
+    }
+    // v3.13.6x (Fase 9): the block above only rejects a translation still
+    // waiting OUT its debounce delay — once a debounce timer actually
+    // fires, _pendingReject is already null (see the timer callback
+    // below), but the engine's HTTP request can still be running for far
+    // longer than debounceMs (this is exactly the case with a slow LLM).
+    // Aborting here means that request — and the tokens it would have
+    // billed for a translation nobody will ever see — actually stops,
+    // instead of running to a completion that gets silently discarded.
+    if (this._activeAbortController) {
+      this._activeAbortController.abort();
+      this._activeAbortController = null;
     }
 
     const src = options.source || this.settings.sourceLang || 'ja';
@@ -645,8 +663,18 @@ class TranslationPipeline extends EventEmitter {
     // 4. Translate with retry and fallback
     this._lastError = null;
 
+    // v3.13.6x (Fase 9): one controller for this whole _doTranslate() call —
+    // covers the primary engine's retries AND any fallback attempt below,
+    // since all of them are for the SAME (possibly now-stale) text. See
+    // translate()'s supersession block for where this gets aborted; no
+    // explicit cleanup needed here — the next _doTranslate() call simply
+    // overwrites this with its own controller, and aborting an
+    // already-settled controller is a harmless no-op.
+    const abortController = new AbortController();
+    this._activeAbortController = abortController;
+
     // Try primary engine
-    const result = await this._tryEngine(engineName, text, effectiveSrcLang, tgtLang, 1, meta);
+    const result = await this._tryEngine(engineName, text, effectiveSrcLang, tgtLang, 1, meta, abortController.signal);
     if (result) {
       // v3.13.57: a response the sanitizer flagged as cut off by
       // max_tokens (llm-output.js verdict:'truncated') is still shown to
@@ -713,7 +741,7 @@ class TranslationPipeline extends EventEmitter {
       return fallbackEngine.supportedLanguages.includes(tgtLang);
     });
     for (const fallback of fallbacks) {
-      const fallbackResult = await this._tryEngine(fallback, text, effectiveSrcLang, tgtLang, 1, meta);
+      const fallbackResult = await this._tryEngine(fallback, text, effectiveSrcLang, tgtLang, 1, meta, abortController.signal);
       if (fallbackResult) {
         this.stats.fallbacks++;
         // v3.13.57: same guard as the primary-engine branch above — a
@@ -767,7 +795,7 @@ class TranslationPipeline extends EventEmitter {
     return `[Error] Translation failed`;
   }
 
-  async _tryEngine(engineName, text, srcLang, tgtLang, retries = 1, meta = {}) {
+  async _tryEngine(engineName, text, srcLang, tgtLang, retries = 1, meta = {}, signal = undefined) {
     const engine = this.getEngine(engineName);
     if (!engine) return null;
 
@@ -875,7 +903,12 @@ class TranslationPipeline extends EventEmitter {
           speaker: promptContext.speaker,
           game: promptContext.game,
           vnTitle: promptContext.vnTitle,
-          inputMethod: promptContext.inputMethod
+          inputMethod: promptContext.inputMethod,
+          // v3.13.6x (Fase 9): only engines with capabilities.abort (today:
+          // the LLM base class) actually read this — every other engine's
+          // translate() ignores an unused options field, same as it already
+          // ignores e.g. `glossaryId` when it isn't DeepL.
+          signal
         });
         if (result) {
           result.text = restoreKeepUnchanged(result.text);
@@ -883,6 +916,20 @@ class TranslationPipeline extends EventEmitter {
         return result;
       } catch (err) {
         this._lastError = err; // Track last actual error
+        // v3.13.6x (Fase 9): a cancelled request means translate() itself
+        // was superseded by newer text while this attempt was in flight
+        // (see translate()'s abort call) — not a real engine failure.
+        // Rethrow tagged the same way the debounce's own supersession
+        // already is, so the caller (_doTranslate, and translateNow()'s
+        // direct caller) treats it identically: no retry, no fallback
+        // chain, no [Error] painted on the overlay — the promise this
+        // stale attempt would have resolved is either already rejected or
+        // about to be discarded, so there's nothing left worth doing here.
+        if (err.code === 'ERR_CANCELED') {
+          const supersededError = new Error('Translation superseded by new text');
+          supersededError.code = 'SUPERSEDED';
+          throw supersededError;
+        }
         // v3.11.27: Log the actual error so we can diagnose engine failures
         const status = err.response?.status;
         const errMsg = err.response?.data?.error?.message || err.message || 'Unknown error';

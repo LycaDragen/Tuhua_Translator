@@ -88,8 +88,13 @@ class OpenAICompatEngine {
     // v3.13.56: `capabilities` is what pipeline.js will read once Fase 5
     // lands (glossary-as-prompt, abort/streaming) instead of hardcoding
     // engine names in a list — see the now-deleted `LLM_ENGINES` array
-    // this replaces the intent of. `abort` stays false until Fase 9
-    // actually wires an AbortController through translate().
+    // this replaces the intent of. v3.13.6x (Fase 9): `abort` is now true
+    // — translate() forwards options.signal straight to axios below, so a
+    // pipeline that aborts a stale request actually cancels the HTTP call
+    // instead of just discarding a promise nobody awaits. Full streaming
+    // was considered and deliberately NOT done for this same Fase — see
+    // the plan's registered objection (whole-output sanitizer, no render
+    // surface, small benefit for 20-40 token VN lines).
     //
     // v3.13.59 (Fase 4): `context` changed from 'chat-turns' to
     // 'prompt-template' — the real conversation context (recent game
@@ -100,7 +105,7 @@ class OpenAICompatEngine {
     // illustrative teaching pairs, not prior dialogue, and turn-based
     // few-shot is a well-established prompting technique independent of
     // this change. See translate() below for exactly where each lives.
-    this.capabilities = { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: false };
+    this.capabilities = { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: true };
   }
 
   async translate(text, options = {}) {
@@ -193,10 +198,15 @@ class OpenAICompatEngine {
       }
     }
 
+    // v3.13.6x (Fase 9): options.signal is undefined for any caller that
+    // doesn't pass one (a bare bench, translateNow() call sites that
+    // predate this) — axios treats an undefined `signal` as "no abort
+    // wiring", so this is a no-op change for anyone not threading one
+    // through, not a new required parameter.
     const response = await this._httpClient.post(
       `${this.baseUrl}/chat/completions`,
       body,
-      { timeout: this.timeout, headers }
+      { timeout: this.timeout, headers, signal: options.signal }
     );
 
     const rawContent = response.data?.choices?.[0]?.message?.content;

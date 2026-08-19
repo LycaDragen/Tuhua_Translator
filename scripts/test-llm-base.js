@@ -404,11 +404,72 @@ check('capabilities-shape-is-consistent-across-both-engines', () => {
   const localCaps = new LocalLLMEngine().capabilities;
   // v3.13.59 (Fase 4): context changed from 'chat-turns' to
   // 'prompt-template' — see the field's own doc comment in llm-base.js.
-  const expected = { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: false };
+  // v3.13.6x (Fase 9): abort is now true — see the two checks below for
+  // proof it's actually wired, not just a flipped flag.
+  const expected = { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: true };
   const matches = (caps) => JSON.stringify(caps) === JSON.stringify(expected);
   const pass = matches(openaiCaps) && matches(localCaps);
   return { pass, actual: { openaiCaps, localCaps } };
-}, 'Pins the contract Fase 5 will read instead of hardcoding engine names — abort stays false until Fase 9 wires an AbortController.');
+}, 'Pins the contract Fase 5 read for glossaryPrompt, and Fase 9 now reads too for abort.');
+
+// ─── Fase 9: abort wiring ─────────────────────────────────────────────
+check('options-signal-is-forwarded-to-the-http-client-request-config', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  const controller = new AbortController();
+  await engine.translate('x', { signal: controller.signal });
+  const pass = http.calls[0].config.signal === controller.signal;
+  return { pass, actual: typeof http.calls[0].config.signal };
+}, "pipeline.js's abortController.signal must reach axios's request config unchanged — this is the wiring the rest of the abort behavior depends on.");
+
+check('no-signal-option-does-not-throw-or-send-one', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  await engine.translate('x', {});
+  const pass = http.calls[0].config.signal === undefined;
+  return { pass, actual: http.calls[0].config.signal };
+}, 'Every existing caller that never passes options.signal (benches, translateNow() call sites written before Fase 9) must keep working unchanged.');
+
+check('aborting-mid-request-actually-cancels-the-real-http-call', async () => {
+  // v3.13.6x (Fase 9): the checks above only prove the signal is FORWARDED —
+  // this proves it actually CANCELS, against a real HTTP server and a real
+  // axios instance (not the fakeHttpClient the rest of this file uses),
+  // same discipline as v3.13.39's real net.createServer check for the TCP
+  // badge bug. A server that never responds + a signal aborted partway
+  // through is what a slow LLM the debounce moves past looks like in
+  // production.
+  const http = require('http');
+  const realAxios = require('axios');
+  let serverSawRequest = false;
+  const server = http.createServer((req, res) => {
+    serverSawRequest = true;
+    // Deliberately never respond — the abort must fire before any reply.
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+
+  const engine = new OpenAIEngine('key', { httpClient: realAxios, timeout: 5000 });
+  engine.setBaseUrl(`http://127.0.0.1:${port}`);
+  const controller = new AbortController();
+
+  const translatePromise = engine.translate('x', { signal: controller.signal });
+  // Give the request a tick to actually reach the server before aborting —
+  // an abort before the socket even connects would prove nothing about
+  // cancelling an in-flight request specifically.
+  await new Promise((r) => setTimeout(r, 100));
+  controller.abort();
+
+  let threw = null;
+  try {
+    await translatePromise;
+  } catch (e) {
+    threw = e;
+  }
+  server.close();
+
+  const pass = serverSawRequest && threw && threw.code === 'ERR_CANCELED';
+  return { pass, actual: { serverSawRequest, errorCode: threw?.code } };
+}, 'Proves cancellation is real, not just a forwarded option nobody reads — the request must have actually reached the server AND the promise must reject with ERR_CANCELED once aborted, against a live socket.');
 
 async function run() {
   const args = parseArgs(process.argv.slice(2));
