@@ -2015,13 +2015,19 @@ class IpcHandlers {
    * 'toggle-clickthrough' — 'retranslate' silently did nothing, ever. This
    * replaces it with an actual, verified path.
    *
-   * Deliberately input-method-agnostic: `_lastHandledText`/
-   * `_lastSpeakerName` are already set by _handleText() for every input
-   * method (Textractor/Clipboard/OCR/XUAT all funnel through it), so one
-   * implementation covers all of them — no per-input-method branching
-   * needed, unlike OCR's separate "📸 Capturar ahora" button (that one
+   * Only meaningful for Textractor/Clipboard/OCR — the three input methods
+   * that actually show the floating output overlay this button lives on.
+   * `_lastHandledText`/`_lastSpeakerName` are set by _handleText() for all
+   * three, so one implementation covers them with no per-input-method
+   * branching — unlike OCR's separate "📸 Capturar ahora" button (that one
    * re-reads the SCREEN; this one re-reads the last text Tuhua already
    * received, which is the only thing Textractor/Clipboard even have).
+   * v3.13.6x correction (Lyca, same day): does NOT apply to XUAT — XUAT
+   * replaces text directly inside the game via XUnity.AutoTranslator, it
+   * has no output overlay at all, and its text never reaches
+   * _handleText() in the first place (xuat-server.js calls
+   * pipeline.translateNow() directly) — so `_lastHandledText` is never set
+   * from XUAT either way.
    *
    * Uses translateNow() (no debounce) like the existing engine/language
    * auto-retranslate above, but — unlike that one — explicitly pushes the
