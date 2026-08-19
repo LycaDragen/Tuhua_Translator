@@ -92,16 +92,72 @@ function stripWrappingQuotesIfSafe(text, sourceText, actions) {
 // must not match. Covers the common English refusal openers plus a few
 // Japanese ones; deliberately not exhaustive (an over-broad phrase table is
 // itself a false-positive risk).
+//
+// v3.13.6x (Fase 9 testing follow-up): found by real testing (Lyca,
+// Nekopara Vol.1) — a GPT refusal in SPANISH ("Lo siento, no puedo ayudar
+// con eso.") sailed through completely undetected. The model tends to
+// refuse IN the target language it was asked to translate into, not
+// English — this table was English/Japanese-only, so any Latin-script
+// target (es/fr/de/pt/it/...) had zero phrase coverage AND signal 2b
+// (script mismatch) can never fire for those either, since the target
+// script IS Latin. Added openers for the other Latin-script targets Tuhua
+// ships translations into. Non-Latin targets (zh/ko/ru/ar/th/hi/uk/...)
+// already had a safety net via signal 2b regardless of phrase coverage.
 const REFUSAL_PATTERNS = [
   /^i\s*(?:can'?t|cannot|won'?t)\s*(?:assist|help|continue|comply|provide|translate)/i,
   /^i'?m\s*(?:sorry|unable|not able)/i,
   /^as an ai\b/i,
   /^i must decline/i,
   /^unfortunately,?\s*i\s*(?:can'?t|cannot)/i,
-  /^(?:申し訳ございません|申し訳ありません|お手伝いできません|対応できません)/
+  /^(?:申し訳ございません|申し訳ありません|お手伝いできません|対応できません)/,
+  // Spanish
+  /^lo siento/i,
+  /^no puedo ayudar/i,
+  // French
+  /^je suis désolé/i,
+  /^je ne peux pas/i,
+  // German
+  /^es tut mir leid/i,
+  /^ich kann (?:dir|ihnen)? ?nicht/i,
+  // Portuguese
+  /^(?:me )?desculpe/i,
+  /^não posso ajudar/i,
+  // Italian
+  /^mi dispiace/i,
+  /^non posso aiutart[ei]/i
+];
+
+// v3.13.6x (Fase 9 testing follow-up): a small set of FULL refusal clauses
+// (not mere openers) specific enough that a real character saying this
+// verbatim as dialogue is implausible — matching one of these is treated
+// as sufficient on its own, skipping the corroboration signals below.
+// Exists because the corroboration signals both assume a refusal is
+// LONGER than the dialogue it displaces; a terse refusal responding to an
+// unusually long source (garbled Textractor hook noise, not real
+// dialogue) is neither disproportionately long NOR script-mismatched for
+// a Latin-script target, so it would otherwise never be caught — exactly
+// the reproduced case ("no puedo ayudar con eso", 36 chars, answering an
+// 80+ char garbled "CClCliClicClick..." hook-buffer artifact).
+//
+// Anchored to the WHOLE string (allowing only a short apologetic lead-in,
+// e.g. "Lo siento, ") rather than a bare substring search — skipping
+// corroboration is already a stronger claim than the opener patterns
+// above, so this stays as narrow as the reproduced case actually needs:
+// a short, standalone, non-continuing sentence. A real line of dialogue
+// that mentions this clause mid-paragraph (continuing after it) does not
+// match.
+const LEAD_IN = '(?:.{0,30}[,.]\\s*)?';
+const REFUSAL_PATTERNS_UNCONDITIONAL = [
+  new RegExp(`^${LEAD_IN}no puedo ayudar (?:con|en) (?:eso|esto)\\.?\\s*$`, 'i'),
+  new RegExp(`^${LEAD_IN}can'?t help (?:you )?with that\\.?\\s*$`, 'i'),
+  new RegExp(`^${LEAD_IN}ne peux pas (?:vous )?aider avec (?:ça|cela)\\.?\\s*$`, 'i'),
+  new RegExp(`^${LEAD_IN}kann (?:dir|ihnen)? ?nicht (?:dabei )?helfen\\.?\\s*$`, 'i'),
+  new RegExp(`^${LEAD_IN}não posso ajudar com isso\\.?\\s*$`, 'i'),
+  new RegExp(`^${LEAD_IN}non posso aiutart[ei] con questo\\.?\\s*$`, 'i')
 ];
 
 function isLikelyRefusal(text, sourceText, targetLangCode) {
+  if (REFUSAL_PATTERNS_UNCONDITIONAL.some((re) => re.test(text))) return true;
   if (!REFUSAL_PATTERNS.some((re) => re.test(text))) return false;
 
   // Signal 2a: the output is disproportionately LONGER than the source.

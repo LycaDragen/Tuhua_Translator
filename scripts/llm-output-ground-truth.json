@@ -111,6 +111,27 @@
       "expectedActions": ["detected-refusal"]
     },
     {
+      "id": "refusal-in-spanish-responding-to-garbled-source-caught-unconditionally",
+      "input": "Lo siento, no puedo ayudar con eso.",
+      "sourceText": "CClCliClicClickClick Click tClick toClick to Click to eClick to enClick to entCl",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"],
+      "note": "The real bug found by Lyca (Nekopara Vol.1 session): a terse Spanish refusal answering long garbled Textractor hook noise — neither corroboration signal could fire (output is SHORTER than source, and Spanish shares the Latin script with the target), so this needed the unconditional full-clause pattern, not just broader language coverage."
+    },
+    {
+      "id": "refusal-french-opener-caught",
+      "input": "Je suis désolé, je ne peux pas traduire ce contenu.",
+      "sourceText": "服を脱いで、こっちに来て。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "fr",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"]
+    },
+    {
       "id": "passthrough-japanese-source-echoed-instead-of-translated-to-spanish",
       "input": "こんにちは、元気？",
       "sourceText": "こんにちは、元気？",
@@ -207,6 +228,17 @@
       "expectedText": "Amelia.",
       "expectedVerdict": "ok",
       "note": "A proper name can legitimately be identical pre/post translation. Source and target share the 'latin' expected script, so the passthrough check must not even run here — it can only be trusted when scripts genuinely differ."
+    },
+    {
+      "id": "mid-sentence-mention-of-a-refusal-clause-is-not-flagged",
+      "input": "Ella dijo que no puedo ayudar con eso y se fue enojada.",
+      "sourceText": "彼女は私が手伝えないと言って怒って去った。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Ella dijo que no puedo ayudar con eso y se fue enojada.",
+      "expectedVerdict": "ok",
+      "note": "The unconditional refusal patterns are anchored to the whole string (short lead-in only, sentence must end there) precisely so real dialogue that mentions the same clause mid-paragraph, then keeps going, survives untouched."
     },
     {
       "id": "genuinely-different-translation-is-unaffected",

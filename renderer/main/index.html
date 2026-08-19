@@ -88,6 +88,17 @@
         .dark select, .dark input[list] { color-scheme: dark; }
         .dark select option, .dark datalist option { background-color: #1e293b; color: #e2e8f0; }
         .dark select optgroup { background-color: #1e293b; color: #94a3b8; }
+        /* v3.13.6x: color-scheme: dark above fixes the SUGGESTIONS POPUP,
+           but Chromium also paints its own native "has a list" combobox
+           chrome on the input box itself (the small ▼ indicator's
+           container) using its dark widget skin — a flat medium gray, not
+           this app's actual dark-900. Found by Lyca testing: the field
+           looked visibly lighter than every other field in the same panel
+           once a value was picked from the list. Force the real
+           background back explicitly; #0f172a matches tailwind.config's
+           dark.900 exactly, same color every other field in this box
+           already uses (see #api-key/#llm-custom-baseurl next to it). */
+        .dark input[list] { background-color: #0f172a !important; }
 
         /* Regex filter hover tooltip — v3.11.35: JS-positioned fixed tooltip */
         .regex-tip { cursor: help; }
