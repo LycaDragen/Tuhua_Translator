@@ -1,7 +1,7 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.55",
-  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.55",
+  "version": "3.13.56",
+  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.56",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -22,7 +22,8 @@
     "test:profile-schema": "node scripts/test-profile-schema.js",
     "test:glossary-merge": "node scripts/test-glossary-merge.js",
     "test:profile-migration": "node scripts/test-profile-migration.js",
-    "test:glossary-entries": "node scripts/test-glossary-entries.js"
+    "test:glossary-entries": "node scripts/test-glossary-entries.js",
+    "test:llm-base": "node scripts/test-llm-base.js"
   },
   "author": {
     "name": "Lyca",
