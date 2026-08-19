@@ -79,9 +79,6 @@ function getLanguageName(code) {
   return LANGUAGE_NAMES[code] || code;
 }
 
-// Engines that are LLM-based and need explicit source language in prompt
-const LLM_ENGINES = ['openai', 'local-llm'];
-
 // Simple character-based language detection for CJK and common scripts
 // v3.13.04: Improved Japanese detection for kanji-only text.
 //   When PaddleOCR produces text that is purely kanji (no kana), it's often
@@ -359,9 +356,15 @@ class TranslationPipeline extends EventEmitter {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }
-    // Reject previous pending promise to prevent memory leak
+    // Reject previous pending promise to prevent memory leak.
+    // v3.13.55: tagged with a `code` so callers (see ipc-handlers.js _handleText)
+    // can tell "debounce superseded this" apart from a real translation failure
+    // instead of both landing in the same catch and painting `[Error] ...` text
+    // over the overlay for what is actually expected, routine behavior.
     if (this._pendingReject) {
-      this._pendingReject(new Error('Translation superseded by new text'));
+      const supersededError = new Error('Translation superseded by new text');
+      supersededError.code = 'SUPERSEDED';
+      this._pendingReject(supersededError);
       this._pendingReject = null;
     }
 
@@ -517,8 +520,8 @@ class TranslationPipeline extends EventEmitter {
       return postprocessed;
     }
 
-    // 3. Rate limiting
-    await this._enforceRateLimit();
+    // 3. Rate limiting is now enforced inside _tryEngine (once per attempt/fallback,
+    // not just once here) — see v3.13.55 note there.
 
     // 4. Translate with retry and fallback
     this._lastError = null;
@@ -559,14 +562,30 @@ class TranslationPipeline extends EventEmitter {
     }
 
     // 5. Fallback chain
-    const fallbacks = FALLBACK_CHAIN[engineName] || ['google-free'];
+    // v3.13.55 bugfix: this used to pass the raw `srcLang` ('auto', 'lzh') instead
+    // of `effectiveSrcLang` (the resolved/detected code used everywhere above,
+    // :530-532). A fallback triggered with sourceLang='auto' cached under a
+    // different key than the primary engine's attempt, so its result was never
+    // reused by the normal cache/TM lookup path, and poisoned the (TTL-less)
+    // Translation Memory with the literal string 'auto' as a language code.
+    // v3.13.55: every engine declares `supportedLanguages` but nothing read it
+    // before this — a fallback engine that doesn't support tgtLang was still
+    // tried and, unsurprisingly, failed. Skip fallbacks we already know can't
+    // work; still permissive (keep the candidate) if the list is missing/empty.
+    const fallbacks = (FALLBACK_CHAIN[engineName] || ['google-free']).filter((name) => {
+      const fallbackEngine = this.getEngine(name);
+      if (!fallbackEngine || !Array.isArray(fallbackEngine.supportedLanguages) || fallbackEngine.supportedLanguages.length === 0) {
+        return true;
+      }
+      return fallbackEngine.supportedLanguages.includes(tgtLang);
+    });
     for (const fallback of fallbacks) {
-      const fallbackResult = await this._tryEngine(fallback, preprocessed, srcLang, tgtLang);
+      const fallbackResult = await this._tryEngine(fallback, preprocessed, effectiveSrcLang, tgtLang);
       if (fallbackResult) {
         this.stats.fallbacks++;
-        this.cache.set(preprocessed, srcLang, tgtLang, fallback, fallbackResult.text);
+        this.cache.set(preprocessed, effectiveSrcLang, tgtLang, fallback, fallbackResult.text);
         // v3.11.23: Also store in Translation Memory
-        this.translationMemory.set(preprocessed, srcLang, tgtLang, fallbackResult.text);
+        this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, fallbackResult.text);
         this.stats.totalTranslations++;
 
         const postprocessed = this.glossary.applyPostTranslation(fallbackResult.text);
@@ -608,6 +627,11 @@ class TranslationPipeline extends EventEmitter {
     console.log(`[Pipeline] _tryEngine: engine=${engineName}, srcLang=${srcLang} (${getLanguageName(srcLang)}), tgtLang=${tgtLang} (${getLanguageName(tgtLang)})`);
 
     for (let attempt = 0; attempt <= retries; attempt++) {
+      // v3.13.55: rate limiting used to be enforced once in _doTranslate, before
+      // the primary engine's *first* attempt only — so a retry or a fallback
+      // engine call could fire back-to-back with no spacing at all. Enforcing it
+      // here means every attempt (primary retries AND fallback engines) is spaced.
+      await this._enforceRateLimit();
       try {
         const result = await engine.translate(text, {
           sourceLang: srcLang,
@@ -625,8 +649,16 @@ class TranslationPipeline extends EventEmitter {
         const statusInfo = status ? ` (HTTP ${status})` : '';
         console.error(`[Pipeline] ${engineName} failed${statusInfo}: ${errMsg}`);
         if (attempt < retries && this._isRetryable(err)) {
-          // Exponential backoff
-          const delay = Math.pow(2, attempt) * 500;
+          // v3.13.55: honor Retry-After when the server sends one (429/503 commonly
+          // do) instead of always using the exponential backoff guess. The header
+          // can be seconds (an integer) or an HTTP-date; we only handle the
+          // integer-seconds form here since that's what every engine we talk to
+          // uses in practice — a non-numeric value falls through to the backoff.
+          const retryAfterHeader = err.response?.headers?.['retry-after'];
+          const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : NaN;
+          const delay = Number.isFinite(retryAfterSeconds)
+            ? retryAfterSeconds * 1000
+            : Math.pow(2, attempt) * 500; // Exponential backoff
           await new Promise(r => setTimeout(r, delay));
           continue;
         }
@@ -640,11 +672,19 @@ class TranslationPipeline extends EventEmitter {
     if (!err) return false;
     const msg = err.message || '';
     const code = err.code || '';
-    // Retry on network errors, rate limits, and timeouts
+    const status = err.response?.status;
+    // Retry on network errors, rate limits, timeouts, and server-side errors.
+    // v3.13.55: 5xx (server overloaded/down, common with local LLM servers under
+    // load) and explicit status checks for 429/408 were missing — only string
+    // matching on err.message caught 429 (because axios's default message text
+    // happens to contain "429"), and a plain 500/502/503 matched nothing at all.
     return (
       code === 'ECONNRESET' ||
       code === 'ETIMEDOUT' ||
       code === 'ENOTFOUND' ||
+      status === 429 ||
+      status === 408 ||
+      (status !== undefined && status >= 500) ||
       msg.includes('429') ||
       msg.includes('rate') ||
       msg.includes('timeout') ||

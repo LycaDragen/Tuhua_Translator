@@ -512,10 +512,15 @@ class IpcHandlers {
     // very next translation, not just after the next profile switch.
     ipcMain.handle('get-glossary', () => {
       const active = this.profileStore.getActive();
+      // v3.13.55: getEffective() must run before getCompileErrors() reads
+      // off it — it's what recomputes and self-tests the merged list (see
+      // glossary.js). Order matters here.
+      const effective = this.glossary.getEffective();
       return {
         global: this.glossary.getAll(),
         profile: active ? active.glossary : [],
-        effective: this.glossary.getEffective(),
+        effective,
+        compileErrors: this.glossary.getCompileErrors(),
         activeProfileId: active ? active.id : null
       };
     });
@@ -1882,6 +1887,15 @@ class IpcHandlers {
       // for a source→target glossary, and the exact bug Lyca flagged.
       this.windowManager.sendToOutputOverlay('update-output', { text: translation, originalText: text, targetLang: tgtLang });
     } catch (err) {
+      // v3.13.55: a SUPERSEDED error means the debounce in pipeline.translate()
+      // rejected this call because newer text arrived before it fired — routine,
+      // expected behavior on every fast-scrolling line, not a translation
+      // failure. It used to fall through to the generic branch below and paint
+      // `[Error] Translation superseded by new text` over the overlay, which
+      // could flash on screen for any line the debounce superseded.
+      if (err.code === 'SUPERSEDED') {
+        return;
+      }
       console.error(`[Tuhua] Translation error:`, err.message);
       this.windowManager.sendToOutputOverlay('update-output', {
         text: `[Error] ${err.message}`

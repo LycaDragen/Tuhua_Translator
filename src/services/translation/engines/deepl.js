@@ -254,11 +254,27 @@ class DeepLEngine {
     // capped to the configured window size), not a per-engine array.
     const contextWindow = options.context || [];
     if (contextWindow.length > 0) {
-      const contextTexts = contextWindow.map(h => h.source);
-      const contextStr = contextTexts.join(' ');
-      // DeepL recommends context < 2000 chars, and it must be same language as source
-      if (contextStr.length > 0 && contextStr.length <= 2000) {
-        payload.context = contextStr;
+      // DeepL doesn't publish a character limit for `context` itself (the only
+      // documented ceiling is the request body's 128 KiB), so 2000 here is a
+      // self-imposed cap, not a DeepL requirement.
+      const MAX_CONTEXT_CHARS = 2000;
+      // v3.13.55 bugfix: this used to build the full joined string and discard
+      // it ENTIRELY if it exceeded 2000 chars — with a large context window
+      // (the UI slider goes to 20) DeepL would silently get no context at all.
+      // Now we keep as many of the most RECENT lines as fit, dropping the
+      // oldest ones first — contextWindow is oldest-first (see
+      // context-memory.js), so we walk it backwards.
+      const kept = [];
+      let total = 0;
+      for (let i = contextWindow.length - 1; i >= 0; i--) {
+        const line = contextWindow[i].source;
+        const addedLen = line.length + (kept.length > 0 ? 1 : 0); // +1 for the join space
+        if (total + addedLen > MAX_CONTEXT_CHARS) break;
+        kept.unshift(line);
+        total += addedLen;
+      }
+      if (kept.length > 0) {
+        payload.context = kept.join(' ');
       }
     }
 

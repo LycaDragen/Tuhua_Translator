@@ -35,6 +35,12 @@ class GlossaryService {
     this._profileEntries = [];
     this._effectiveDirty = true;
     this._effectiveCache = [];
+    // v3.13.55: entry.id -> {id, source, mode, error}. Populated by
+    // _applyEntry's catch (see there) and refreshed on every getEffective()
+    // recompute — see the self-test loop below. Previously a bad regex
+    // pattern (invalid syntax) was caught and silently discarded with no
+    // way for the user to find out their entry wasn't doing anything.
+    this._compileErrors = new Map();
   }
 
   _invalidateEffective() {
@@ -60,8 +66,31 @@ class GlossaryService {
     if (this._effectiveDirty) {
       this._effectiveCache = glossaryMerge.mergeGlossaryLayers(this.getEnabled(), this._profileEntries);
       this._effectiveDirty = false;
+      // v3.13.55: self-test every entry against an empty string right when the
+      // merged list changes, instead of only finding out an entry is broken
+      // whenever real translation traffic happens to route through it (which,
+      // for a rarely-matched term, could be never). Clear first — an entry
+      // that was fixed or removed since the last recompute must not leave a
+      // stale error behind.
+      this._compileErrors.clear();
+      for (const entry of this._effectiveCache) {
+        this._applyEntry('', entry);
+      }
     }
     return this._effectiveCache;
+  }
+
+  /**
+   * Glossary entries whose pattern failed to compile/apply (e.g. invalid
+   * regex syntax). Surfaced to the UI via the `get-glossary` IPC response so
+   * a bad entry shows a warning instead of silently doing nothing.
+   * Calls getEffective() itself — _compileErrors is only ever refreshed
+   * inside that recompute, so reading it without forcing that first would
+   * silently return stale data after any add/update/delete/setProfileLayer.
+   */
+  getCompileErrors() {
+    this.getEffective();
+    return Array.from(this._compileErrors.values());
   }
 
   getAll() {
@@ -124,6 +153,17 @@ class GlossaryService {
   }
 
   _applyEntry(text, entry) {
+    // v3.13.55: clear any stale error for this id before re-attempting — a
+    // previously-broken entry that now compiles fine must not keep showing
+    // as broken. Only meaningful when getEffective()'s self-test loop calls
+    // this repeatedly on recompute; a no-op the rest of the time.
+    // `this._compileErrors` may not exist here: scripts/test-glossary-merge.js
+    // deliberately calls `GlossaryService.prototype._applyEntry.call(proto, ...)`
+    // without ever running the constructor, to test this method with zero
+    // store/disk dependency — guard instead of requiring that setup to change.
+    if (entry.id != null && this._compileErrors) {
+      this._compileErrors.delete(entry.id);
+    }
     try {
       switch (entry.mode) {
         case 'exact':
@@ -140,7 +180,14 @@ class GlossaryService {
           return text;
       }
     } catch (e) {
-      // Invalid regex or pattern, skip
+      // v3.13.55: this used to just discard the error — invalid regex syntax
+      // (the overwhelmingly likely cause; 'exact'/'case-insensitive' can't
+      // really throw here) meant the entry silently did nothing, forever,
+      // with zero signal to the user. Now recorded so getCompileErrors() /
+      // the UI can surface it. Same bare-prototype guard as above.
+      if (entry.id != null && this._compileErrors) {
+        this._compileErrors.set(entry.id, { id: entry.id, source: entry.source, mode: entry.mode, error: e.message });
+      }
       return text;
     }
   }

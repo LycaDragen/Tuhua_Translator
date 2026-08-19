@@ -28,10 +28,12 @@ CRITICAL RULES — follow all of them exactly:
 2. NEVER translate or modify: proper names, character names, game/book/movie titles, brand names, or technical terms. Keep them exactly as written.
 3. Preserve the speaker's tone, register, and emotional nuance.
 4. Translate naturally — not word-for-word, but meaning-for-meaning.
-5. Maintain consistency with any previously established terminology.
-
-Input: {TEXT}
-Output:`;
+5. Maintain consistency with any previously established terminology.`;
+    // v3.13.55: the prompt used to end with "Input: {TEXT}\nOutput:" — a
+    // completion-style placeholder that was never interpolated (the actual
+    // text is sent as a separate `user` message below, not substituted into
+    // the system prompt), so the model literally saw the string "{TEXT}".
+    // Leftover from an earlier completion-API design ported to chat messages.
 
     const messages = [
       {

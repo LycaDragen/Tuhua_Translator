@@ -7,6 +7,10 @@
         let glossaryEntries = [];
         let profileGlossaryEntries = [];
         let currentGlossaryScope = 'global';
+        // v3.13.55: ids of entries whose pattern failed to compile (invalid
+        // regex, typically) — see glossary.js getCompileErrors(). Populated
+        // by loadGlossary(), read by renderGlossary() for the warning badge.
+        let glossaryCompileErrorIds = new Set();
         let historyEntries = [];
         let profileList = [];
         let translationActive = true;
@@ -1505,6 +1509,10 @@
                 const result = await api.getGlossary();
                 glossaryEntries = result.global || [];
                 profileGlossaryEntries = result.profile || [];
+                // v3.13.55: entries whose pattern (regex, typically) failed to
+                // compile — see glossary.js getCompileErrors(). Keyed by id so
+                // renderGlossary() can look each row up in O(1).
+                glossaryCompileErrorIds = new Set((result.compileErrors || []).map(e => e.id));
                 renderGlossary();
             } catch (e) { console.error('Failed to load glossary:', e); }
         }
@@ -1545,8 +1553,17 @@
                 return;
             }
 
-            list.innerHTML = entries.map(entry => `
-                <div class="flex items-center gap-2 p-2 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 text-xs">
+            const t = translations[currentLang] || translations['en'];
+            list.innerHTML = entries.map(entry => {
+                // v3.13.55: an id with no compile error is the common case;
+                // this only ever fires for a 'regex' entry with bad syntax.
+                const isInvalid = glossaryCompileErrorIds.has(entry.id);
+                const warningIcon = isInvalid ? `
+                    <svg class="w-3.5 h-3.5 text-amber-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" title="${escapeHtml(t.glossary_invalid_pattern)}"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l6.518 11.59c.75 1.334-.213 2.987-1.743 2.987H3.482c-1.53 0-2.493-1.653-1.743-2.987l6.518-11.59zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+                ` : '';
+                return `
+                <div class="flex items-center gap-2 p-2 rounded-lg bg-gray-50 dark:bg-dark-900/50 border ${isInvalid ? 'border-amber-400 dark:border-amber-500' : 'border-gray-200 dark:border-dark-600'} text-xs">
+                    ${warningIcon}
                     <div class="flex-1 min-w-0">
                         <span class="font-mono text-gray-700 dark:text-gray-200 truncate block">${escapeHtml(entry.source)}</span>
                         <span class="text-emerald-600 dark:text-emerald-400 truncate block">→ ${escapeHtml(entry.target)}</span>
@@ -1556,7 +1573,8 @@
                         <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
                     </button>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         }
 
         async function addGlossaryEntry() {
