@@ -77,9 +77,16 @@
             100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
         }
 
-        /* Dark mode dropdown menus — use dark background for option popups */
-        .dark select { color-scheme: dark; }
-        .dark select option { background-color: #1e293b; color: #e2e8f0; }
+        /* Dark mode dropdown menus — use dark background for option popups.
+           v3.13.6x (LLM engine overhaul, Fase 3 follow-up): this predates
+           the Fase 3 model field (#llm-model, an <input list="..."> paired
+           with <datalist id="llm-model-datalist">) and only ever covered
+           <select> — a datalist's suggestion popup is a different native
+           control that needs color-scheme set on the INPUT itself, not
+           just on <select> elements, or Chromium renders it with its
+           default light theme regardless of the rest of the page. */
+        .dark select, .dark input[list] { color-scheme: dark; }
+        .dark select option, .dark datalist option { background-color: #1e293b; color: #e2e8f0; }
         .dark select optgroup { background-color: #1e293b; color: #94a3b8; }
 
         /* Regex filter hover tooltip — v3.11.35: JS-positioned fixed tooltip */

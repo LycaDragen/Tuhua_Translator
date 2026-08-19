@@ -123,6 +123,45 @@ check('fuzzy-match-respects-engineClass-llm-does-not-reuse-mt', () => {
   return { pass: result === null, actual: result };
 });
 
+// ─── variant compatibility (Fase 9 testing follow-up — real bug found by
+// Lyca: switching prompt presets on an already-seen line kept returning
+// the OLD preset's translation, because TM never knew the prompt changed) ─
+check('a-different-prompt-variant-is-a-tm-miss-for-the-same-line', () => {
+  const tm = freshTM();
+  tm.set('こんにちは', 'ja', 'es', 'Hola (Balanceado)', 'openai', 'p1', 'llm', 'hash-balanced');
+  const sameVariant = tm.get('こんにちは', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  const differentVariant = tm.get('こんにちは', 'ja', 'es', 'p1', 'llm', 'hash-literal');
+  return {
+    pass: sameVariant === 'Hola (Balanceado)' && differentVariant === null,
+    actual: { sameVariant, differentVariant }
+  };
+}, 'The bug reproduced exactly: reload a save, switch prompt preset, reload the same line — before this fix, the SECOND lookup silently returned the FIRST preset\'s cached text instead of re-translating.');
+
+check('missing-variant-on-either-side-never-blocks-a-match', () => {
+  const tm = freshTM();
+  tm.set('legacy line', 'ja', 'es', 'Legacy translation', 'openai', 'p1', 'llm'); // no variant — pre-this-fix shape
+  const hit = tm.get('legacy line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  return { pass: hit === 'Legacy translation', actual: hit };
+}, 'Same "unknown never blocks" leniency as engineClass — a pre-existing TM entry (this session had 549 real entries when the bug was found) must not become orphaned the moment this ships.');
+
+check('an-mt-engine-with-empty-variant-is-unaffected-by-variant-compatibility', () => {
+  const tm = freshTM();
+  tm.set('こんにちは', 'ja', 'es', 'Hola (DeepL)', 'deepl', 'p1', 'mt', '');
+  const hit = tm.get('こんにちは', 'ja', 'es', 'p1', 'mt', '');
+  return { pass: hit === 'Hola (DeepL)', actual: hit };
+}, "_cacheVariant() always returns '' for non-glossaryPrompt engines (DeepL, Google, ...) — variant compatibility must be a no-op for the whole MT half of the fallback chain.");
+
+check('fuzzy-match-respects-variant-too', () => {
+  const tm = freshTM({ fuzzyEnabled: true, fuzzyThreshold: 0.5 });
+  tm.set('灰音とロゼは幼馴染で仲がいい', 'ja', 'es', 'Balanceado version', 'openai', 'p1', 'llm', 'hash-balanced');
+  const sameVariant = tm.getWithFuzzy('灰音とロゼは幼馴染で仲が良い', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  const differentVariant = tm.getWithFuzzy('灰音とロゼは幼馴染で仲が良い', 'ja', 'es', 'p1', 'llm', 'hash-literal');
+  return {
+    pass: !!sameVariant && differentVariant === null,
+    actual: { sameVariant, differentVariant }
+  };
+});
+
 function run() {
   const args = parseArgs(process.argv.slice(2));
   return (async () => {

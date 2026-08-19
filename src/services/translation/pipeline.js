@@ -624,7 +624,7 @@ class TranslationPipeline extends EventEmitter {
 
     // 2b. v3.11.25: Translation Memory — exact match first, then fuzzy.
     // This saves money and reduces latency for repeated or near-matching dialogue.
-    const tmResult = this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang, profileId, engineClass);
+    const tmResult = this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang, profileId, engineClass, variant);
     if (tmResult) {
       this.stats.tmHits++;
       const matchType = tmResult.fuzzy ? 'fuzzy' : 'exact';
@@ -686,7 +686,7 @@ class TranslationPipeline extends EventEmitter {
       if (!result.truncated) {
         this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, result.text, variant);
         // v3.11.23: Also store in Translation Memory (engine-agnostic) for cross-engine reuse
-        this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, result.text, engineName, profileId, engineClass);
+        this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, result.text, engineName, profileId, engineClass, variant);
       }
       this.stats.totalTranslations++;
 
@@ -754,7 +754,7 @@ class TranslationPipeline extends EventEmitter {
           // not read/write under the primary's cache slot.
           this.cache.set(cacheKey, effectiveSrcLang, tgtLang, fallback, fallbackResult.text, this._cacheVariant(this.getEngine(fallback)));
           // v3.11.23: Also store in Translation Memory
-          this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, fallbackResult.text, fallback, profileId, this._engineClass(this.getEngine(fallback)));
+          this.translationMemory.set(cacheKey, effectiveSrcLang, tgtLang, fallbackResult.text, fallback, profileId, this._engineClass(this.getEngine(fallback)), this._cacheVariant(this.getEngine(fallback)));
         }
         this.stats.totalTranslations++;
 

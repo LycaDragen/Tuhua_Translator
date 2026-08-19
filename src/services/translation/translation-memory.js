@@ -41,6 +41,26 @@ function isEngineClassCompatible(queryClass, storedClass) {
   return !(queryClass === 'llm' && storedClass === 'mt');
 }
 
+// v3.13.6x (LLM engine overhaul, Fase 9 testing follow-up): found by real
+// testing (Lyca, Nekopara Vol.1) — reloading a save and comparing prompt
+// presets (Balanceado/Literal/Localizado) on the SAME line showed no
+// difference, because TM had no idea the prompt had changed at all. This
+// is the exact same 5th key component cache.js's 24h cache already gates
+// on (`variant` — a hash of providerId|model|promptTemplate|temperature|
+// fewShotEnabled, see pipeline.js's _cacheVariant and cache.js's Fase 7c
+// header) — TM was only ever given `engineClass` (Fase 7d), never this.
+// Unlike engineClass's llm>mt asymmetry, there's no "better" variant here
+// — two prompts are just different — so this is a plain equality check.
+// Same "unknown never blocks" leniency as isEngineClassCompatible: an
+// entry written before this fix (no variant stored) stays reachable
+// rather than orphaning every pre-existing TM entry the moment this
+// ships. MT entries always carry variant '' (see _cacheVariant), so this
+// is a no-op for the non-LLM case either way.
+function isVariantCompatible(queryVariant, storedVariant) {
+  if (!queryVariant || !storedVariant) return true;
+  return queryVariant === storedVariant;
+}
+
 class TranslationMemory {
   constructor(options = {}) {
     this.maxSize = options.maxSize || 10000;
@@ -65,7 +85,7 @@ class TranslationMemory {
     this.store = new Store({
       name: 'translation-memory',
       defaults: {
-        entries: {},   // key -> { sourceText, translation, srcLang, tgtLang, timestamp, originalEngine, engineClass, profileId }
+        entries: {},   // key -> { sourceText, translation, srcLang, tgtLang, timestamp, originalEngine, engineClass, profileId, variant }
         order: []      // LRU order (most recent last)
       }
     });
@@ -86,7 +106,7 @@ class TranslationMemory {
    * Exact match lookup.
    * Returns translation string or null.
    */
-  get(text, srcLang, targetLang, profileId = '', engineClass = '') {
+  get(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
     if (!this.enabled) return null;
 
     const key = this._makeKey(text, srcLang, targetLang, profileId);
@@ -110,6 +130,7 @@ class TranslationMemory {
     }
 
     if (!isEngineClassCompatible(engineClass, entry.engineClass)) return null;
+    if (!isVariantCompatible(variant, entry.variant)) return null;
 
     // Update LRU order
     const idx = order.indexOf(key);
@@ -139,9 +160,11 @@ class TranslationMemory {
    *   bleed is a real bug, not a feature.
    * @param {string} [engineClass] - v3.13.6x (Fase 7d): 'llm'|'mt', see
    *   isEngineClassCompatible.
+   * @param {string} [variant] - v3.13.6x (Fase 9 follow-up): see
+   *   isVariantCompatible.
    * @returns {{ translation: string, score: number, originalText: string } | null}
    */
-  getFuzzy(text, srcLang, targetLang, profileId = '', engineClass = '') {
+  getFuzzy(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
     if (!this.enabled || !this.fuzzyEnabled) return null;
 
     // Rebuild fuzzy index if dirty
@@ -152,9 +175,11 @@ class TranslationMemory {
     const langKey = `${srcLang}|||${targetLang}|||${profileId}`;
     const allCandidates = this._fuzzyIndex.get(langKey);
     if (!allCandidates || allCandidates.length === 0) return null;
-    // Asymmetric, so it can't be folded into langKey the way profileId
-    // was — filtered here instead of at index-build time.
-    const candidates = allCandidates.filter((c) => isEngineClassCompatible(engineClass, c.engineClass));
+    // Asymmetric/non-hierarchical, so neither can be folded into langKey
+    // the way profileId was — filtered here instead of at index-build time.
+    const candidates = allCandidates
+      .filter((c) => isEngineClassCompatible(engineClass, c.engineClass))
+      .filter((c) => isVariantCompatible(variant, c.variant));
     if (candidates.length === 0) return null;
 
     const result = findBestMatch(text, candidates, this.fuzzyThreshold);
@@ -180,9 +205,9 @@ class TranslationMemory {
    * is at least 60% similar in MEANINGFUL characters (CJK + Latin letters),
    * not just overall string similarity.
    */
-  getWithFuzzy(text, srcLang, targetLang, profileId = '', engineClass = '') {
+  getWithFuzzy(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
     // 1. Try exact match first (O(1), always preferred)
-    const exact = this.get(text, srcLang, targetLang, profileId, engineClass);
+    const exact = this.get(text, srcLang, targetLang, profileId, engineClass, variant);
     if (exact) {
       return { translation: exact, fuzzy: false };
     }
@@ -191,7 +216,7 @@ class TranslationMemory {
     // v3.13.07: Validate fuzzy matches — skip if source texts differ
     // significantly in length, as this often indicates different dialogue
     // that happens to share character overlap (e.g., "行くよ！" vs "行かない！")
-    const fuzzyResult = this.getFuzzy(text, srcLang, targetLang, profileId, engineClass);
+    const fuzzyResult = this.getFuzzy(text, srcLang, targetLang, profileId, engineClass, variant);
     if (fuzzyResult) {
       // Length validation: if the original TM text is more than 2x shorter or
       // 2x longer than the current text, it's likely a different line of dialogue
@@ -214,7 +239,7 @@ class TranslationMemory {
     return null;
   }
 
-  set(text, srcLang, targetLang, translation, engineName, profileId = '', engineClass = '') {
+  set(text, srcLang, targetLang, translation, engineName, profileId = '', engineClass = '', variant = '') {
     if (!this.enabled) return;
 
     const key = this._makeKey(text, srcLang, targetLang, profileId);
@@ -230,7 +255,8 @@ class TranslationMemory {
         timestamp: Date.now(),
         originalEngine: engineName || entries[key].originalEngine,
         profileId,
-        engineClass: engineClass || entries[key].engineClass
+        engineClass: engineClass || entries[key].engineClass,
+        variant: variant || entries[key].variant
       };
       const idx = order.indexOf(key);
       if (idx !== -1) order.splice(idx, 1);
@@ -244,7 +270,8 @@ class TranslationMemory {
         timestamp: Date.now(),
         originalEngine: engineName || 'unknown',
         profileId,
-        engineClass
+        engineClass,
+        variant
       };
       order.push(key);
 
@@ -313,7 +340,8 @@ class TranslationMemory {
       this._fuzzyIndex.get(langKey).push({
         text: entry.sourceText,
         translation: entry.translation,
-        engineClass: entry.engineClass || ''
+        engineClass: entry.engineClass || '',
+        variant: entry.variant || ''
       });
     }
 
