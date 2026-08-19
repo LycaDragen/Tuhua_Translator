@@ -25,7 +25,12 @@ class OpenAIEngine extends OpenAICompatEngine {
       ],
       // Only ever set by scripts/test-llm-base.js — production code never
       // passes this, so llm-base.js's own axios default is what runs live.
-      httpClient: options.httpClient
+      httpClient: options.httpClient,
+      // v3.13.57 (Fase 2): defaults true in llm-base.js when omitted —
+      // forwarded explicitly here (rather than defaulting to true again in
+      // this file) so pipeline.js's `sanitize: s.llmSanitize !== false` is
+      // the one place that decides it.
+      sanitize: options.sanitize
     });
   }
 }

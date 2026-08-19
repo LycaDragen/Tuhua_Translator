@@ -312,14 +312,18 @@ class TranslationPipeline extends EventEmitter {
       case 'openai':
         this.engines[engineName] = new OpenAIEngine(s.openaiKey, {
           model: s.openaiModel || 'gpt-3.5-turbo',
-          systemPrompt: s.systemPrompt || ''
+          systemPrompt: s.systemPrompt || '',
+          // v3.13.57 (Fase 2): rollback interruptor for the output
+          // sanitizer — defaults on.
+          sanitize: s.llmSanitize !== false
         });
         break;
       case 'local-llm':
         this.engines[engineName] = new LocalLLMEngine({
           endpoint: s.customEndpoint || 'http://localhost:1234/v1',
           model: s.customModel || 'local-model',
-          systemPrompt: s.systemPrompt || ''
+          systemPrompt: s.systemPrompt || '',
+          sanitize: s.llmSanitize !== false
         });
         break;
       case 'libretranslate':
@@ -529,10 +533,18 @@ class TranslationPipeline extends EventEmitter {
     // Try primary engine
     const result = await this._tryEngine(engineName, preprocessed, effectiveSrcLang, tgtLang);
     if (result) {
-      // Cache the result
-      this.cache.set(preprocessed, effectiveSrcLang, tgtLang, engineName, result.text);
-      // v3.11.23: Also store in Translation Memory (engine-agnostic) for cross-engine reuse
-      this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, result.text);
+      // v3.13.57: a response the sanitizer flagged as cut off by
+      // max_tokens (llm-output.js verdict:'truncated') is still shown to
+      // the user (better than nothing), but must not poison the cache,
+      // the Translation Memory, or the context window — a truncated
+      // fragment is not what a full retranslation should return, and it's
+      // exactly the kind of thing that used to get cached for 24h as if
+      // it were a real translation. `!result.truncated` guards all three.
+      if (!result.truncated) {
+        this.cache.set(preprocessed, effectiveSrcLang, tgtLang, engineName, result.text);
+        // v3.11.23: Also store in Translation Memory (engine-agnostic) for cross-engine reuse
+        this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, result.text);
+      }
       this.stats.totalTranslations++;
 
       // Apply glossary post-processing
@@ -551,12 +563,15 @@ class TranslationPipeline extends EventEmitter {
         engine: engineName,
         cached: false,
         detectedLang: finalDetectedLang,
+        truncated: !!result.truncated,
         sourceLang: srcLang,
         targetLang: tgtLang,
         timestamp: Date.now()
       });
 
-      this.contextMemory.push(preprocessed, result.text);
+      if (!result.truncated) {
+        this.contextMemory.push(preprocessed, result.text);
+      }
 
       return postprocessed;
     }
@@ -583,9 +598,15 @@ class TranslationPipeline extends EventEmitter {
       const fallbackResult = await this._tryEngine(fallback, preprocessed, effectiveSrcLang, tgtLang);
       if (fallbackResult) {
         this.stats.fallbacks++;
-        this.cache.set(preprocessed, effectiveSrcLang, tgtLang, fallback, fallbackResult.text);
-        // v3.11.23: Also store in Translation Memory
-        this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, fallbackResult.text);
+        // v3.13.57: same guard as the primary-engine branch above — a
+        // fallback could itself be an LLM engine in a future FALLBACK_CHAIN
+        // configuration, so this stays correct even though today's chains
+        // only fall back to non-LLM engines that never set `truncated`.
+        if (!fallbackResult.truncated) {
+          this.cache.set(preprocessed, effectiveSrcLang, tgtLang, fallback, fallbackResult.text);
+          // v3.11.23: Also store in Translation Memory
+          this.translationMemory.set(preprocessed, effectiveSrcLang, tgtLang, fallbackResult.text);
+        }
         this.stats.totalTranslations++;
 
         const postprocessed = this.glossary.applyPostTranslation(fallbackResult.text);
@@ -597,12 +618,15 @@ class TranslationPipeline extends EventEmitter {
           engine: `${engineName}→${fallback}`,
           cached: false,
           isFallback: true,
+          truncated: !!fallbackResult.truncated,
           sourceLang: srcLang,
           targetLang: tgtLang,
           timestamp: Date.now()
         });
 
-        this.contextMemory.push(preprocessed, fallbackResult.text);
+        if (!fallbackResult.truncated) {
+          this.contextMemory.push(preprocessed, fallbackResult.text);
+        }
 
         return postprocessed;
       }

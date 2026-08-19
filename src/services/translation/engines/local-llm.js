@@ -24,7 +24,9 @@ class LocalLLMEngine extends OpenAICompatEngine {
       supportedLanguages: ['ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh'],
       // Only ever set by scripts/test-llm-base.js — production code never
       // passes this, so llm-base.js's own axios default is what runs live.
-      httpClient: options.httpClient
+      httpClient: options.httpClient,
+      // v3.13.57 (Fase 2): see the same comment in openai.js.
+      sanitize: options.sanitize
     });
   }
 

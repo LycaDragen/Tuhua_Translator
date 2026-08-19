@@ -90,6 +90,10 @@ app.whenReady().then(() => {
       maxContextHistory: 5,
       historyLimit: 5,
       systemPrompt: '',
+      // v3.13.57 (LLM engine overhaul, Fase 2): rollback interruptor for
+      // the LLM output sanitizer (llm-output.js) — set false to fall back
+      // to a bare .trim() with none of its heuristics.
+      llmSanitize: true,
       clickThrough: false,
       profiles: [],
       activeProfile: 'Por Defecto',

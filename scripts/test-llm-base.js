@@ -19,6 +19,7 @@
 const path = require('path');
 const OpenAIEngine = require(path.join('..', 'src', 'services', 'translation', 'engines', 'openai.js'));
 const LocalLLMEngine = require(path.join('..', 'src', 'services', 'translation', 'engines', 'local-llm.js'));
+const { LLMRefusalError, LLMPassthroughError } = require(path.join('..', 'src', 'services', 'translation', 'llm-output.js'));
 
 const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
 
@@ -50,6 +51,16 @@ function fakeHttpClient(responder) {
 
 const OK_RESPONSE = { data: { choices: [{ message: { content: '  Hola, ¿cómo estás?  ' } }] } };
 const EMPTY_RESPONSE = { data: { choices: [] } };
+
+// v3.13.57 (Fase 2): builds a fake response with a given content/finish_reason
+// so this bench can also assert on how llm-base.js WIRES UP the sanitizer
+// (llm-output.js) — the sanitizer's own heuristics are pinned separately and
+// exhaustively in scripts/test-llm-output.js; these checks are only about
+// the plumbing (does a refusal verdict actually become a thrown
+// LLMRefusalError, does truncated:true actually reach the caller, etc).
+function responseWith(content, finishReason = 'stop') {
+  return { data: { choices: [{ message: { content }, finish_reason: finishReason }] } };
+}
 
 function parseArgs(argv) {
   const args = { quiet: false };
@@ -214,6 +225,64 @@ check('empty-response-throws-a-named-error', async () => {
     threw = e.message;
   }
   return { pass: threw === 'Empty Local LLM (Ollama/LM Studio) response', actual: threw };
+});
+
+// ─── Fase 2 wiring: sanitizer verdicts become the right outcome ─────────
+check('refusal-verdict-throws-a-typed-non-retryable-error', async () => {
+  const http = fakeHttpClient(responseWith(
+    "I'm sorry, but I can't assist with that request as it involves explicit content that violates my usage policies."
+  ));
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  let threw = null;
+  try {
+    await engine.translate('服を脱いで、こっちに来て。', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  } catch (e) {
+    threw = e;
+  }
+  const pass = threw instanceof LLMRefusalError;
+  return { pass, actual: threw ? threw.constructor.name : null };
+}, 'pipeline.js relies on this being a plain thrown Error (any subclass) with no retryable signal — _isRetryable() must not match it, so a single failed attempt falls straight through to the fallback chain instead of retrying the same refusal.');
+
+check('passthrough-verdict-throws-a-typed-error', async () => {
+  const http = fakeHttpClient(responseWith('こんにちは、元気？')); // echoes the JA source verbatim
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  let threw = null;
+  try {
+    await engine.translate('こんにちは、元気？', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  } catch (e) {
+    threw = e;
+  }
+  const pass = threw instanceof LLMPassthroughError;
+  return { pass, actual: threw ? threw.constructor.name : null };
+});
+
+check('finish-reason-length-sets-truncated-true-on-the-result', async () => {
+  const http = fakeHttpClient(responseWith('Cuando llegamos a la ciudad, nos encontramos con', 'length'));
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  const result = await engine.translate('x', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const pass = result.truncated === true && result.text === 'Cuando llegamos a la ciudad, nos encontramos con';
+  return { pass, actual: result };
+}, 'This is what pipeline.js reads to skip caching/TM/context for a response cut off by max_tokens — see pipeline.js _doTranslate.');
+
+check('ok-verdict-result-has-no-truncated-flag', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http });
+  const result = await engine.translate('x', {});
+  const pass = result.truncated === false;
+  return { pass, actual: result };
+}, 'Explicitly false (not just falsy/absent) so pipeline.js\'s `!result.truncated` check is unambiguous either way.');
+
+check('llmSanitize-false-disables-the-sanitizer-entirely', async () => {
+  // With sanitize:false, an output that WOULD be flagged as a refusal must
+  // instead pass straight through untouched — this is the rollback path
+  // (settings.llmSanitize) for if the sanitizer ever misfires in the wild.
+  const http = fakeHttpClient(responseWith(
+    "I'm sorry, but I can't assist with that request today, sorry about that."
+  ));
+  const engine = new OpenAIEngine('key', { httpClient: http, sanitize: false });
+  const result = await engine.translate('x', { sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const pass = result.text === "I'm sorry, but I can't assist with that request today, sorry about that." && result.truncated === undefined;
+  return { pass, actual: result };
 });
 
 // ─── capabilities contract (read by later Fases, not yet by pipeline.js) ─

@@ -15,6 +15,7 @@
  * baseUrl, supportedLanguages).
  */
 const axios = require('axios');
+const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
 
 class OpenAICompatEngine {
   constructor({
@@ -27,7 +28,13 @@ class OpenAICompatEngine {
     systemPrompt = '',
     timeout = 30000,
     supportedLanguages = [],
-    httpClient = axios
+    httpClient = axios,
+    // v3.13.57 (Fase 2): the `llmSanitize` rollback interruptor — default
+    // on. Set false to fall back to the pre-Fase-2 behavior of a bare
+    // `.trim()` with none of sanitizeLLMOutput's heuristics, in case one of
+    // them misfires on a real setup in a way the ground-truth bench didn't
+    // catch.
+    sanitize = true
   } = {}) {
     this.name = name;
     this.displayName = displayName;
@@ -38,6 +45,7 @@ class OpenAICompatEngine {
     this.systemPrompt = systemPrompt;
     this.timeout = timeout;
     this.supportedLanguages = supportedLanguages;
+    this.sanitize = sanitize;
     // Injectable so scripts/test-llm-base.js can assert on the exact request
     // body/headers without making a real HTTP call — same idea as the
     // injectable `store` in glossary.js/profile-store.js.
@@ -117,15 +125,47 @@ CRITICAL RULES — follow all of them exactly:
       { timeout: this.timeout, headers }
     );
 
-    const translation = response.data?.choices?.[0]?.message?.content?.trim();
-    if (!translation) {
+    const rawContent = response.data?.choices?.[0]?.message?.content;
+    if (!rawContent || !rawContent.trim()) {
       throw new Error(`Empty ${this.displayName} response`);
     }
 
+    if (!this.sanitize) {
+      // Pre-Fase-2 behavior, kept reachable via the llmSanitize setting.
+      return { text: rawContent.trim(), detectedLang: null, engine: this.name };
+    }
+
+    const finishReason = response.data?.choices?.[0]?.finish_reason || null;
+    const sanitized = sanitizeLLMOutput(rawContent, {
+      sourceText: text,
+      sourceLangCode: sourceLang,
+      targetLangCode: targetLang,
+      finishReason
+    });
+
+    if (sanitized.actions.length) {
+      // v3.13.57: never apply a sanitizer intervention in silence — same
+      // discipline as TUHUA_STDOUT_RAWDUMP (v3.13.29): if this needs
+      // diagnosing later, it can only be diagnosed from a real log.
+      const level = sanitized.verdict === 'ok' ? 'log' : 'warn';
+      console[level](`[LLM sanitize] ${this.displayName} (${sanitized.verdict}): ${sanitized.actions.join(', ')}`);
+    }
+
+    if (sanitized.verdict === 'refusal') {
+      throw new LLMRefusalError(`${this.displayName} refused to translate`);
+    }
+    if (sanitized.verdict === 'passthrough') {
+      throw new LLMPassthroughError(`${this.displayName} returned the source text untranslated`);
+    }
+
     return {
-      text: translation,
+      text: sanitized.text,
       detectedLang: null,
-      engine: this.name
+      engine: this.name,
+      // v3.13.57: read by pipeline.js to skip caching/TM/context for a
+      // response that was cut off by max_tokens — see the comment there.
+      // Absent (undefined, falsy) for the normal 'ok' case.
+      truncated: sanitized.verdict === 'truncated'
     };
   }
 
