@@ -290,6 +290,24 @@ app.whenReady().then(() => {
     windowManager.hideOutputOverlay();
     windowManager.clearOverlayContent();
     log.info('Starting in XUAT mode — overlay hidden (XUAT renders in-game)');
+  } else if (settings.inputMethod === 'ocr') {
+    // v3.13.48: OCR always starts paused, regardless of the persisted
+    // translationActive flag — real bug: a user who left Tuhua "Active"
+    // in a DIFFERENT input method, then switched to OCR and closed the
+    // app, would relaunch straight into OCR still marked active. OCR
+    // needs its capture region repositioned every session (the game
+    // window isn't guaranteed to be in the same place), so silently
+    // staying "active" risks capturing/translating whatever happens to
+    // be under a stale region before the user gets a chance to
+    // reposition it. store.set (not just the in-memory flag) so the
+    // renderer's own get-settings call — which happens later, once the
+    // window has loaded — reflects the same paused state instead of
+    // showing a misleading "Active" toggle.
+    ipcHandlers._translationActive = false;
+    store.set('translationActive', false);
+    windowManager.hideOutputOverlay();
+    windowManager.clearOverlayContent();
+    log.info('Starting in OCR mode — forced to paused; position the capture area, then press ▶ Activo');
   }
 
   // Connect Textractor text events to translation pipeline

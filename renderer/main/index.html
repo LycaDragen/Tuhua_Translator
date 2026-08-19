@@ -544,9 +544,9 @@
                     <input type="text" id="glossary-target" class="w-full p-2 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Target translation (e.g. Hola)">
                     <div class="flex gap-2">
                         <select id="glossary-mode" class="flex-1 p-1.5 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs">
-                            <option value="exact">Exact Match</option>
-                            <option value="case-insensitive">Case Insensitive</option>
-                            <option value="regex">Regex</option>
+                            <option value="exact" data-i18n="mode_exact">Exact Match</option>
+                            <option value="case-insensitive" data-i18n="mode_case_insensitive">Case Insensitive</option>
+                            <option value="regex" data-i18n="mode_regex">Regex Pattern</option>
                         </select>
                         <button onclick="addGlossaryEntry()" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-md transition" data-i18n="glossary_add">Agregar</button>
                     </div>

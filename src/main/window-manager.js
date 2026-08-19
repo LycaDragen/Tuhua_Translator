@@ -64,6 +64,22 @@ class WindowManager {
    * @private
    */
   _reaffirmAlwaysOnTop() {
+    // v3.13.47: real bug found on Windows — this timer's own
+    // setAlwaysOnTop/moveTop calls (this tick included the word-prompt
+    // itself, added in v3.13.46 as Linux insurance) were dismissing the
+    // prompt's native <select> dropdown mid-interaction, closing it
+    // ~every 3s and making it impossible to actually pick a mode. Any
+    // z-order shuffle among topmost windows appears to do this to an
+    // open native popup, not just moving the OTHER window — so the safe
+    // fix is skipping this ENTIRE cycle while the prompt is open, not
+    // picking a "safer" subset of calls. Nothing is lost by skipping:
+    // the prompt is `parent`-owned by the overlay (see
+    // createWordSavePrompt), so Windows already enforces the
+    // above-overlay z-order invariant on its own for the few seconds
+    // the prompt is up, without any periodic reassertion.
+    if (this._wordPrompt && !this._wordPrompt.isDestroyed() && this._wordPrompt.isVisible()) {
+      return;
+    }
     const windows = [this.outputOverlay, this.captureArea];
     for (const win of windows) {
       if (win && !win.isDestroyed() && win.isVisible()) {
@@ -504,15 +520,44 @@ class WindowManager {
    * edge. Reuses overlay-preload.js (see that file's own comment on why)
    * and the output-overlay's dark glass visual language.
    */
-  createWordSavePrompt(word, scope, scopeLabel, strings) {
+  createWordSavePrompt(word, scope, scopeLabel, strings, originalText, sourceClickable) {
     if (this._wordPrompt && !this._wordPrompt.isDestroyed()) {
       this._wordPrompt.close();
     }
 
     const width = 300;
-    const height = 170;
+    // v3.13.45: +30px for the mode select (Exact/Case Insensitive/Regex),
+    // added so this flow isn't stuck hardcoding case-insensitive.
+    // v3.13.46: +30px baseline for the new "Término" (source term) input
+    // — every case needs it now, CJK included, since saving used to
+    // (wrongly) reuse the clicked TRANSLATED word as the glossary
+    // entry's source. +50px more on top when sourceClickable, for the
+    // clickable original-line row (see overlay-word-context-menu in
+    // ipc-handlers.js for how that's decided).
+    // v3.13.49: +40px more on both — visual polish pass added a field
+    // label above each input plus a divider under the header row. Sized
+    // here, not left to the renderer, since this window doesn't
+    // auto-resize the way the output overlay does.
+    const height = sourceClickable ? 320 : 270;
+    // v3.13.54: real gap Lyca caught — mainWindow/outputOverlay/
+    // captureArea all remember where the user last dragged them
+    // (store 'moved' → *Bounds, restored on next createX()); this
+    // window never did, always resetting to "centered under the
+    // overlay" every single time. Only width/height are NOT restored
+    // (they're computed above from sourceClickable, not user-resizable
+    // — resizable:false on this window) — just the position. Re-clamped
+    // to the nearest display's work area even when restoring, in case
+    // the saved point is now off-screen (resolution/monitor changed).
+    const savedPos = this.store.get('wordPromptBounds');
     let x, y;
-    if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
+    if (savedPos && typeof savedPos.x === 'number' && typeof savedPos.y === 'number') {
+      x = savedPos.x;
+      y = savedPos.y;
+      const display = screen.getDisplayNearestPoint({ x, y });
+      const area = display.workArea;
+      x = Math.min(Math.max(x, area.x), area.x + area.width - width);
+      y = Math.min(Math.max(y, area.y), area.y + area.height - height);
+    } else if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
       const bounds = this.outputOverlay.getBounds();
       x = Math.round(bounds.x + (bounds.width - width) / 2);
       y = bounds.y + bounds.height + 8;
@@ -522,12 +567,25 @@ class WindowManager {
       y = Math.min(Math.max(y, area.y), area.y + area.height - height);
     }
 
+    // v3.13.46: real bug — both this window and the output overlay used
+    // the same 'screen-saver' alwaysOnTop level, so which one actually
+    // rendered on top came down to whichever last won the OS's internal
+    // "most recently raised topmost window" race. The output overlay's
+    // OWN blur handler (createOutputOverlay, ~100ms after losing focus —
+    // which opening THIS window causes) re-asserts its topmost level,
+    // and could win that race, burying the prompt behind it depending on
+    // timing/position. `parent` sidesteps the race instead of tuning it:
+    // on Windows an owned window is a hard z-order invariant — the OS
+    // will never let the owner (outputOverlay) paint above its owned
+    // window, regardless of either window's alwaysOnTop reassertions.
+    const hasOverlay = this.outputOverlay && !this.outputOverlay.isDestroyed();
     const win = new BrowserWindow({
       width, height, x, y,
       frame: false,
       transparent: true,
       resizable: false,
       alwaysOnTop: true,
+      parent: hasOverlay ? this.outputOverlay : undefined,
       skipTaskbar: true,
       show: false,
       hasShadow: false,
@@ -540,12 +598,22 @@ class WindowManager {
     });
     win.setAlwaysOnTop(true, 'screen-saver');
     win.loadFile(path.join(RENDERER_BASE, 'word-save-prompt', 'index.html'));
-    win.once('ready-to-show', () => win.show());
+    win.once('ready-to-show', () => { win.show(); win.moveTop(); });
     win.webContents.on('did-finish-load', () => {
-      win.webContents.send('word-prompt-context', { word, scope, scopeLabel, strings });
+      win.webContents.send('word-prompt-context', { word, scope, scopeLabel, strings, originalText, sourceClickable });
     });
     // Dismiss like a popup/context menu when the user clicks elsewhere.
     win.on('blur', () => { if (!win.isDestroyed()) win.close(); });
+    // v3.13.54: remember where the user drags it, same as the other
+    // windows (see this method's own comment above on why this one
+    // never did). Position only — width/height are recomputed fresh
+    // every open based on sourceClickable, not something to restore.
+    win.on('moved', () => {
+      if (!win.isDestroyed()) {
+        const b = win.getBounds();
+        this.store.set('wordPromptBounds', { x: b.x, y: b.y });
+      }
+    });
     win.on('closed', () => { if (this._wordPrompt === win) this._wordPrompt = null; });
 
     this._wordPrompt = win;

@@ -76,13 +76,17 @@
             flex-shrink: 0;      /* v3.13.03: Buttons NEVER shrink — always visible */
         }
 
-        /* Status indicator — NOW IN THE TITLE BAR to avoid overlapping game text */
+        /* Status indicator — NOW IN THE TITLE BAR to avoid overlapping game text.
+           v3.13.53: no-drag removed — real bug: nothing in here is
+           interactive (just a status dot + text), so marking it no-drag
+           only carved out a dead zone in the title bar where dragging
+           silently didn't work. It correctly inherits drag from
+           #title-bar → .left now, like .grip and .label already did. */
         #status-indicator {
             display: flex;
             align-items: center;
             gap: 4px;
             margin-left: 6px;
-            -webkit-app-region: no-drag;
             flex-shrink: 1;      /* v3.13.03: Status indicator shrinks first when narrow */
             min-width: 0;        /* Allow clipping */
             overflow: hidden;    /* Clip text when narrow */
@@ -160,12 +164,6 @@
             border-color: rgba(16, 185, 129, 0.5);
         }
 
-        .tb-btn.close-btn:hover {
-            background: rgba(239, 68, 68, 0.2);
-            color: #ef4444;
-            border-color: rgba(239, 68, 68, 0.5);
-        }
-
         .tb-btn.pause-btn.paused {
             border-color: rgba(234, 179, 8, 0.5);
             color: #eab308;
@@ -218,22 +216,32 @@
         <div class="left">
             <span class="grip">⠿</span>
             <span class="label">OCR</span>
-            <!-- Status indicator moved into title bar -->
+            <!-- Status indicator moved into title bar.
+                 v3.13.50: starts on "Escaneo pausado" — see the
+                 isScanPaused=true default below, this just matches it. -->
             <div id="status-indicator">
-                <span class="dot idle"></span>
-                <span id="status-text">Escaneando</span>
+                <span class="dot paused"></span>
+                <span id="status-text">Escaneo pausado</span>
             </div>
         </div>
         <div class="right">
-            <button class="tb-btn pause-btn" id="btn-pause" title="Pausar/Reanudar escaneo" onclick="toggleScan()">⏸</button>
+            <button class="tb-btn pause-btn paused" id="btn-pause" title="Pausar/Reanudar escaneo" onclick="toggleScan()">▶</button>
             <button class="tb-btn" id="btn-capture" title="Capturar ahora" onclick="manualCapture()">📸</button>
-            <button class="tb-btn close-btn" id="btn-close" title="Cerrar" onclick="closeCaptureArea()">✕</button>
         </div>
     </div>
 
+    <!-- v3.13.50: no close ("✕") button here anymore — real bug: closing
+         this window from here left no way to reopen it short of pausing
+         and resuming all of Tuhua. Pausing scan (⏸/▶ above) is the
+         actual "I don't want this running right now" control; the
+         window itself is meant to persist for the OCR session, closed
+         only by the backend (switching input method away from OCR, or
+         Tuhua pausing) — see closeCaptureArea() call sites in
+         window-manager.js/ipc-handlers.js. -->
+
     <!-- Scan region — dashed border indicates the section being scanned for OCR text.
-         No status indicator here anymore — it's in the title bar. -->
-    <div id="scan-region">
+         Starts "paused" (yellow) to match isScanPaused=true below. -->
+    <div id="scan-region" class="paused">
         <!-- Corner Indicators -->
         <div class="corner-indicator tl"></div>
         <div class="corner-indicator tr"></div>
@@ -253,7 +261,11 @@
 
     <script>
         const api = window.tuhuaOverlay;
-        let isScanPaused = false;
+        // v3.13.50: starts true — the capture area (and the backend
+        // scanning loop behind it, see _startOcrCapture in
+        // ipc-handlers.js) always opens paused now, so the user has a
+        // chance to reposition the region before anything gets scanned.
+        let isScanPaused = true;
 
         // ===== TOGGLE SCAN PAUSE/RESUME =====
         function toggleScan() {
@@ -299,13 +311,6 @@
             }
         }
 
-        // ===== CLOSE =====
-        function closeCaptureArea() {
-            if (api && api.ocrCloseCaptureArea) {
-                api.ocrCloseCaptureArea();
-            }
-        }
-
         // ===== STATUS UPDATE =====
         function updateStatus(state, text) {
             const indicator = document.getElementById('status-indicator');
@@ -335,8 +340,8 @@
             });
         }
 
-        // Initialize status
-        updateStatus('idle', 'Escaneando');
+        // Initialize status — matches isScanPaused=true above.
+        updateStatus('paused', 'Escaneo pausado');
     </script>
 </body>
 </html>

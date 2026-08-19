@@ -45,7 +45,9 @@ const api = {
   // one. save-glossary is otherwise a main-window-only channel (see
   // ALLOWED_INVOKE_CHANNELS in main-preload.js); invoking it here is
   // deliberate, same as resize-overlay above (see this file's header).
-  requestWordContextMenu: (word) => ipcRenderer.send('overlay-word-context-menu', word),
+  // v3.13.46: originalText travels along too — see the doc comment on
+  // overlay-word-context-menu in ipc-handlers.js for what it's used for.
+  requestWordContextMenu: (word, originalText) => ipcRenderer.send('overlay-word-context-menu', word, originalText),
   onWordPromptContext: (callback) => {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('word-prompt-context', handler);

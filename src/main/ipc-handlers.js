@@ -152,9 +152,17 @@ class IpcHandlers {
               console.warn('[Tuhua] Error stopping OCR on method switch:', e.message);
             }
           }
-          // v3.13.04: Re-show output overlay for clipboard mode
+          // v3.13.04: Re-show output overlay for clipboard mode.
+          // v3.13.48: ...and HIDE it when paused — real bug: this only
+          // ever showed the overlay, never hid it, so switching input
+          // methods while paused left whatever was already on screen
+          // (stale content from the PREVIOUS method) visibly stuck
+          // there. Same fix applied to the ocr/textractor branches below.
           if (this._translationActive) {
             this.windowManager.showOutputOverlay();
+          } else {
+            this.windowManager.hideOutputOverlay();
+            this.windowManager.clearOverlayContent();
           }
           this.clipboardWatcher.start();
           // Notify renderer of new status
@@ -168,8 +176,32 @@ class IpcHandlers {
           this.clipboardWatcher.stop();
           if (this.xuatServer) await this.xuatServer.stop();  // v3.11.3: AWAITED
           console.log('[Tuhua] OCR input method selected');
-          // Don't auto-start OCR here — let the user click "Start OCR" in the settings
-          // Just notify renderer of the mode
+          // v3.13.48: this branch never touched the overlay at all
+          // before — switching TO ocr while it was showing a translation
+          // from the PREVIOUS input method left that stale text stuck on
+          // screen indefinitely, since OCR itself has nothing new to
+          // show it until the user manually starts a capture.
+          if (this._translationActive) {
+            this.windowManager.showOutputOverlay();
+            // v3.13.50: actually START the OCR capture session (creates
+            // the capture area window, initializes the engine) when
+            // switching TO ocr while Tuhua is already active — real bug:
+            // this branch used to leave everything uninitialized, so the
+            // capture area silently never appeared unless the user
+            // separately paused/resumed Tuhua (which DOES call this,
+            // via ocr-start). _startOcrCapture() itself now always
+            // leaves scanning paused (see its doc comment), so this
+            // doesn't start grabbing screenshots before the user
+            // repositions the region either.
+            const startResult = await this._startOcrCapture();
+            if (!startResult.success) {
+              console.error('[Tuhua] Failed to auto-start OCR on method switch:', startResult.error);
+            }
+          } else {
+            this.windowManager.hideOutputOverlay();
+            this.windowManager.clearOverlayContent();
+          }
+          // Notify renderer of the mode
           setTimeout(() => {
             this.windowManager.sendToMainWindow('textractor-status', 'ocr');
           }, 300);
@@ -223,9 +255,14 @@ class IpcHandlers {
               console.warn('[Tuhua] Error stopping OCR on method switch:', e.message);
             }
           }
-          // v3.13.04: Re-show output overlay for Textractor mode (was hidden for XUAT)
+          // v3.13.04: Re-show output overlay for Textractor mode (was hidden for XUAT).
+          // v3.13.48: ...and hide it when paused, same fix as the
+          // clipboard/ocr branches above (see their comments).
           if (this._translationActive) {
             this.windowManager.showOutputOverlay();
+          } else {
+            this.windowManager.hideOutputOverlay();
+            this.windowManager.clearOverlayContent();
           }
           // Textractor mode: always try to connect TCP as a secondary channel
           // (CLI stdout is primary, but TCP works if "Start Server" extension is present)
@@ -760,7 +797,8 @@ class IpcHandlers {
       }
     });
 
-    // ===== Word → Glossary (right-click on the output overlay) =====
+    // ===== Word → Glossary (right-click, or the overlay's own toolbar
+    // button, on the output overlay) =====
     // v3.13.42: Textractor/clipboard/OCR all render through the SAME
     // output-overlay window, so this covers all three input methods at
     // once — no per-method wiring needed. `.on`, not `.handle`: the
@@ -771,10 +809,35 @@ class IpcHandlers {
     // (global vs. this profile) is picked from the menu directly; the
     // follow-up prompt window (word-save-prompt/, created by
     // windowManager.createWordSavePrompt) only asks for the meaning.
-    ipcMain.on('overlay-word-context-menu', (event, word) => {
-      if (typeof word !== 'string' || !word.trim()) return;
-      const cleanWord = word.trim();
+    //
+    // v3.13.51: `word` can be an empty string now — the overlay's new
+    // toolbar button (📖+, next to the OUTPUT label) opens this SAME
+    // flow without any specific word attached, for exactly the reason
+    // Lyca raised: right-clicking one word implied to the user that THAT
+    // word would be the one saved, which stopped being true once the
+    // Término field became independently editable (v3.13.47) — a
+    // generic entry point removes the false expectation. Right-click on
+    // a word still works too (kept as a convenience), it just no longer
+    // has any special claim over the popup's content either.
+    ipcMain.on('overlay-word-context-menu', (event, word, originalText) => {
+      const cleanWord = (typeof word === 'string' ? word : '').trim();
       const active = this.profileStore.getActive();
+      // v3.13.46: whether the ORIGINAL line can be split into clickable
+      // words for the prompt (see createWordSavePrompt) — real fix for
+      // the backwards flow Lyca flagged: this used to save the CLICKED
+      // (translated) word as the glossary entry's `source`, when a
+      // source→target glossary needs the actual source-language term.
+      // Whitespace segmentation only means something for word-delimited
+      // scripts — CJK (Hiragana/Katakana/Han/Hangul) has none, so those
+      // stay a plain typed field instead of a false-precision word list
+      // (Lyca's own call: fine for this to just not work for CJK rather
+      // than guess wrong).
+      const cleanOriginal = typeof originalText === 'string' ? originalText.trim() : '';
+      // Same Hiragana/Katakana/Han/Hangul ranges as translatableCharCount
+      // above (぀-ゟ, ゠-ヿ, 一-鿿, 가-힯);
+      // verified directly against real strings in each script (node -e)
+      // rather than trusting hand-typed literal CJK boundary characters.
+      const sourceClickable = cleanOriginal.length > 0 && !/[぀-ゟ゠-ヿ一-鿿가-힯]/.test(cleanOriginal);
       // Resolved here (not in the prompt window) because that window has
       // no translations.js of its own — same reasoning as mainT() itself,
       // see its doc comment near the top of this file.
@@ -784,21 +847,37 @@ class IpcHandlers {
         placeholder: mainT(this.store, 'word_save_meaning_placeholder'),
         emptyError: mainT(this.store, 'word_save_empty_meaning'),
         error: mainT(this.store, 'word_save_error'),
-        success: mainT(this.store, 'word_save_success')
+        success: mainT(this.store, 'word_save_success'),
+        // v3.13.45: match mode picker — same 3 modes/labels as the
+        // Glosario tab's manual "Agregar" form (mode_exact/
+        // mode_case_insensitive/mode_regex, reused as-is rather than
+        // adding new word_save_* duplicates for the exact same concept).
+        modeExact: mainT(this.store, 'mode_exact'),
+        modeCaseInsensitive: mainT(this.store, 'mode_case_insensitive'),
+        modeRegex: mainT(this.store, 'mode_regex'),
+        // v3.13.46: the new "Término" field and its click-a-word helper.
+        termLabel: mainT(this.store, 'word_save_term_label'),
+        termPlaceholder: mainT(this.store, 'word_save_term_placeholder'),
+        clickHint: mainT(this.store, 'word_save_click_hint'),
+        emptyTerm: mainT(this.store, 'word_save_empty_term'),
+        // v3.13.49: field label for the meaning input (visual polish pass).
+        meaningLabel: mainT(this.store, 'word_save_meaning_label'),
+        // v3.13.51: shown in the prompt window's header when there's no
+        // specific clicked word (opened via the toolbar button instead).
+        genericHeader: mainT(this.store, 'word_save_generic_header')
       };
       const globalLabel = mainT(this.store, 'word_save_scope_global');
-      const template = [
-        { label: `"${cleanWord}"`, enabled: false },
-        { type: 'separator' },
-        {
-          label: mainT(this.store, 'word_save_global'),
-          click: () => this.windowManager.createWordSavePrompt(cleanWord, 'global', globalLabel, strings)
-        }
-      ];
+      const template = cleanWord
+        ? [{ label: `"${cleanWord}"`, enabled: false }, { type: 'separator' }]
+        : [];
+      template.push({
+        label: mainT(this.store, 'word_save_global'),
+        click: () => this.windowManager.createWordSavePrompt(cleanWord, 'global', globalLabel, strings, cleanOriginal, sourceClickable)
+      });
       if (active) {
         template.push({
           label: mainT(this.store, 'word_save_profile').replace('{profile}', active.name),
-          click: () => this.windowManager.createWordSavePrompt(cleanWord, 'profile', active.name, strings)
+          click: () => this.windowManager.createWordSavePrompt(cleanWord, 'profile', active.name, strings, cleanOriginal, sourceClickable)
         });
       }
       Menu.buildFromTemplate(template).popup({ window: this.windowManager.outputOverlay });
@@ -1237,112 +1316,7 @@ class IpcHandlers {
 
     // ===== OCR =====
     ipcMain.handle('ocr-start', async () => {
-      try {
-        const settings = this.store.get();
-        const sourceLang = settings.sourceLang || 'ja';
-
-        // v3.13.01: Restore OCR engine from settings before initializing
-        if (settings.ocrEngine) {
-          this.ocrService.setOcrEngine(settings.ocrEngine);
-        }
-
-        // v3.13.08: Restore min confidence from settings (default: 0 = no minimum)
-        if (settings.ocrMinConfidence !== undefined) {
-          this.ocrService.setMinConfidence(settings.ocrMinConfidence);
-        }
-
-        // Create and show capture area window
-        this.windowManager.createCaptureArea();
-        this.windowManager.showCaptureArea();
-
-        // Initialize OCR service with the source language
-        await this.ocrService.initialize(sourceLang);
-
-        // v3.13.01-fix: Check if OCR service actually became ready after initialization.
-        // If PaddleOCR failed and auto-fell back to Tesseract, the service should be ready
-        // via Tesseract. If BOTH failed, we need to handle it here.
-        if (!this.ocrService._isReady) {
-          console.error('[OCR] Failed to initialize any OCR engine');
-          this.windowManager.closeCaptureArea();
-          return { success: false, error: 'Failed to initialize any OCR engine. Check logs for details.' };
-        }
-
-        // Forward OCR text events to the translation pipeline
-        this.ocrService.removeAllListeners('text'); // Remove previous listeners
-        this.ocrService.on('text', (text) => {
-          console.log(`[OCR] Text recognized: "${text.substring(0, 50)}..."`);
-          this._handleText(text);
-        });
-
-        // Forward OCR status to renderer
-        this.ocrService.removeAllListeners('status');
-        this.ocrService.on('status', (status) => {
-          this.windowManager.sendToMainWindow('ocr-status', status);
-          this.windowManager.sendToCaptureArea('shortcut-pressed', { action: 'ocr-status', state: status });
-        });
-
-        // Forward OCR errors
-        this.ocrService.removeAllListeners('error');
-        this.ocrService.on('error', (err) => {
-          console.error('[OCR] Error:', err.message);
-          this.windowManager.sendToMainWindow('ocr-status', 'error');
-        });
-
-        // v3.13.01-fix: Listen for PaddleOCR fallback event
-        this.ocrService.removeAllListeners('paddle-fallback');
-        this.ocrService.on('paddle-fallback', ({ reason }) => {
-          console.warn(`[OCR] PaddleOCR fell back to Tesseract: ${reason}`);
-          // Update the store to reflect the actual engine being used
-          this.store.set('ocrEngine', 'tesseract');
-          // Notify the renderer so the UI can update
-          this.windowManager.sendToMainWindow('ocr-engine-fallback', {
-            engine: 'tesseract',
-            reason: reason
-          });
-        });
-
-        this._ocrActive = true;
-
-        // v3.11.25: Register OCR capture callback for global hotkey (Ctrl+Shift+S)
-        // When the user presses the hotkey, it performs an immediate single capture
-        // and sends the result through the translation pipeline.
-        if (this.shortcutManager) {
-          this.shortcutManager.setOcrCaptureCallback(async () => {
-            if (!this._ocrActive || !this.ocrService._isReady) {
-              console.log('[OCR] Hotkey capture skipped: OCR not active/ready');
-              return;
-            }
-            try {
-              const imageBuffer = await this._captureScreenRegion();
-              if (!imageBuffer) return;
-              await this.ocrService.recognize(imageBuffer);
-            } catch (err) {
-              console.error('[OCR] Hotkey capture error:', err.message);
-            }
-          });
-        }
-
-        // Apply best preprocessing defaults automatically (grayscale ON, smart threshold)
-        this.ocrService.setPreprocessing({
-          grayscale: true,
-          threshold: false,
-          thresholdValue: 128,
-          contrast: false,
-          contrastValue: 1.5
-        });
-
-        // Always start auto-capture with smart change detection
-        this._startOcrAutoCapture();
-
-        // v3.13.01-fix: Return actual engine used (may differ from requested if fallback occurred)
-        const actualEngine = this.ocrService.getOcrEngine();
-        return { success: true, status: this.ocrService.getStatus(), engine: actualEngine };
-      } catch (err) {
-        console.error('[OCR] Start error:', err.message);
-        // Clean up: close capture area if start failed
-        this.windowManager.closeCaptureArea();
-        return { success: false, error: err.message };
-      }
+      return this._startOcrCapture();
     });
 
     ipcMain.handle('ocr-stop', async () => {
@@ -1878,7 +1852,7 @@ class IpcHandlers {
     const hasCJKIdeograph = /[\u4E00-\u9FFF\uAC00-\uD7AF]/.test(text);
     if (translatableCharCount < 2 && !hasCJKIdeograph) {
       console.log(`[Tuhua] Skipping translation — not enough translatable characters (${translatableCharCount}): "${text.substring(0, 40)}"`);
-      this.windowManager.sendToOutputOverlay('update-output', { text: text, targetLang: tgtLang });
+      this.windowManager.sendToOutputOverlay('update-output', { text: text, originalText: text, targetLang: tgtLang });
       return;
     }
 
@@ -1899,8 +1873,14 @@ class IpcHandlers {
         console.log(`[Tuhua] Translation became paused during translate — discarding result`);
         return;
       }
-      // Send translation to output overlay
-      this.windowManager.sendToOutputOverlay('update-output', { text: translation, targetLang: tgtLang });
+      // Send translation to output overlay. v3.13.46: originalText rides
+      // along too — needed so a right-click on a translated word can
+      // offer the ACTUAL original-language line for the user to pick the
+      // real source term from (see overlay-word-context-menu below),
+      // instead of the previous behavior of saving the CLICKED
+      // (translated) word as the glossary entry's `source` — backwards
+      // for a source→target glossary, and the exact bug Lyca flagged.
+      this.windowManager.sendToOutputOverlay('update-output', { text: translation, originalText: text, targetLang: tgtLang });
     } catch (err) {
       console.error(`[Tuhua] Translation error:`, err.message);
       this.windowManager.sendToOutputOverlay('update-output', {
@@ -1989,6 +1969,142 @@ class IpcHandlers {
     } catch (err) {
       console.error('[OCR] Screen capture error:', err.message);
       return null;
+    }
+  }
+
+  /**
+   * v3.13.50: extracted from the 'ocr-start' IPC handler so the SAME
+   * initialization path can be triggered from two places — the user
+   * pressing ▶ Activo in OCR mode (via ocr-start), AND switching the
+   * input method to OCR while Tuhua is already active (save-settings'
+   * input-method-switch block) — which used to just leave the capture
+   * area window uncreated until the user manually paused/resumed,
+   * exactly Lyca's report ("cambio a OCR estando activo y no aparece
+   * el overlay de input").
+   *
+   * Also where the "capture area always starts paused" fix lives: this
+   * used to unconditionally call _startOcrAutoCapture() at the end,
+   * meaning every fresh OCR session started scanning immediately,
+   * before the user had a chance to reposition the capture region.
+   * _ocrScanPaused is now force-set true on every call (it's a instance
+   * field that otherwise persists stale across an entire app session,
+   * not reset by ocr-stop) and auto-capture is deliberately NOT started
+   * here — only the user's own press of the capture area's ⏸/▶ button
+   * (ocr-toggle-scan) starts it, consistent with the same "user
+   * positions the region first" intent already documented for the
+   * ocr-start entry point.
+   */
+  async _startOcrCapture() {
+    try {
+      const settings = this.store.get();
+      const sourceLang = settings.sourceLang || 'ja';
+
+      // v3.13.01: Restore OCR engine from settings before initializing
+      if (settings.ocrEngine) {
+        this.ocrService.setOcrEngine(settings.ocrEngine);
+      }
+
+      // v3.13.08: Restore min confidence from settings (default: 0 = no minimum)
+      if (settings.ocrMinConfidence !== undefined) {
+        this.ocrService.setMinConfidence(settings.ocrMinConfidence);
+      }
+
+      // Create and show capture area window
+      this.windowManager.createCaptureArea();
+      this.windowManager.showCaptureArea();
+
+      // Initialize OCR service with the source language
+      await this.ocrService.initialize(sourceLang);
+
+      // v3.13.01-fix: Check if OCR service actually became ready after initialization.
+      // If PaddleOCR failed and auto-fell back to Tesseract, the service should be ready
+      // via Tesseract. If BOTH failed, we need to handle it here.
+      if (!this.ocrService._isReady) {
+        console.error('[OCR] Failed to initialize any OCR engine');
+        this.windowManager.closeCaptureArea();
+        return { success: false, error: 'Failed to initialize any OCR engine. Check logs for details.' };
+      }
+
+      // Forward OCR text events to the translation pipeline
+      this.ocrService.removeAllListeners('text'); // Remove previous listeners
+      this.ocrService.on('text', (text) => {
+        console.log(`[OCR] Text recognized: "${text.substring(0, 50)}..."`);
+        this._handleText(text);
+      });
+
+      // Forward OCR status to renderer
+      this.ocrService.removeAllListeners('status');
+      this.ocrService.on('status', (status) => {
+        this.windowManager.sendToMainWindow('ocr-status', status);
+        this.windowManager.sendToCaptureArea('shortcut-pressed', { action: 'ocr-status', state: status });
+      });
+
+      // Forward OCR errors
+      this.ocrService.removeAllListeners('error');
+      this.ocrService.on('error', (err) => {
+        console.error('[OCR] Error:', err.message);
+        this.windowManager.sendToMainWindow('ocr-status', 'error');
+      });
+
+      // v3.13.01-fix: Listen for PaddleOCR fallback event
+      this.ocrService.removeAllListeners('paddle-fallback');
+      this.ocrService.on('paddle-fallback', ({ reason }) => {
+        console.warn(`[OCR] PaddleOCR fell back to Tesseract: ${reason}`);
+        // Update the store to reflect the actual engine being used
+        this.store.set('ocrEngine', 'tesseract');
+        // Notify the renderer so the UI can update
+        this.windowManager.sendToMainWindow('ocr-engine-fallback', {
+          engine: 'tesseract',
+          reason: reason
+        });
+      });
+
+      this._ocrActive = true;
+      // v3.13.50: see this method's doc comment — always paused on a
+      // fresh start, regardless of whatever this flag was left at from
+      // a previous session (ocr-stop never resets it).
+      this._ocrScanPaused = true;
+
+      // v3.11.25: Register OCR capture callback for global hotkey (Ctrl+Shift+S)
+      // When the user presses the hotkey, it performs an immediate single capture
+      // and sends the result through the translation pipeline.
+      if (this.shortcutManager) {
+        this.shortcutManager.setOcrCaptureCallback(async () => {
+          if (!this._ocrActive || !this.ocrService._isReady) {
+            console.log('[OCR] Hotkey capture skipped: OCR not active/ready');
+            return;
+          }
+          try {
+            const imageBuffer = await this._captureScreenRegion();
+            if (!imageBuffer) return;
+            await this.ocrService.recognize(imageBuffer);
+          } catch (err) {
+            console.error('[OCR] Hotkey capture error:', err.message);
+          }
+        });
+      }
+
+      // Apply best preprocessing defaults automatically (grayscale ON, smart threshold)
+      this.ocrService.setPreprocessing({
+        grayscale: true,
+        threshold: false,
+        thresholdValue: 128,
+        contrast: false,
+        contrastValue: 1.5
+      });
+
+      // v3.13.50: auto-capture is NOT started here anymore — see this
+      // method's doc comment. The capture area opens paused; the user's
+      // own press of its ⏸/▶ button (ocr-toggle-scan) is what starts it.
+
+      // v3.13.01-fix: Return actual engine used (may differ from requested if fallback occurred)
+      const actualEngine = this.ocrService.getOcrEngine();
+      return { success: true, status: this.ocrService.getStatus(), engine: actualEngine };
+    } catch (err) {
+      console.error('[OCR] Start error:', err.message);
+      // Clean up: close capture area if start failed
+      this.windowManager.closeCaptureArea();
+      return { success: false, error: err.message };
     }
   }
 
