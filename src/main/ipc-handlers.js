@@ -1382,6 +1382,14 @@ class IpcHandlers {
       this._handleText(text);
     });
 
+    // v3.13.6x (Fase 9 testing follow-up): one shared channel for the
+    // overlay's new "↻" toolbar button AND the Ctrl+Shift+R global
+    // shortcut (fixed here too — see _retranslateCurrent's own comment
+    // for why it did nothing before this).
+    ipcMain.on('request-retranslate', () => {
+      this._retranslateCurrent();
+    });
+
     // v3.13.40-fix: sendSync (not invoke/handle) — main-preload.js calls
     // this synchronously while building the `api` object, so app.getVersion()
     // needs to be available before contextBridge.exposeInMainWorld runs.
@@ -1998,6 +2006,60 @@ class IpcHandlers {
     }
   }
 
+  /**
+   * v3.13.6x (Fase 9 testing follow-up): re-translate whatever line is
+   * CURRENTLY shown, using CURRENT settings — the overlay's new "↻" toolbar
+   * button, next to 📖+. Real bug found by Lyca: Ctrl+Shift+R has fired
+   * `shortcut-pressed{action:'retranslate'}` since it was added, but
+   * handleShortcut() in renderer.js only ever handled
+   * 'toggle-clickthrough' — 'retranslate' silently did nothing, ever. This
+   * replaces it with an actual, verified path.
+   *
+   * Deliberately input-method-agnostic: `_lastHandledText`/
+   * `_lastSpeakerName` are already set by _handleText() for every input
+   * method (Textractor/Clipboard/OCR/XUAT all funnel through it), so one
+   * implementation covers all of them — no per-input-method branching
+   * needed, unlike OCR's separate "📸 Capturar ahora" button (that one
+   * re-reads the SCREEN; this one re-reads the last text Tuhua already
+   * received, which is the only thing Textractor/Clipboard even have).
+   *
+   * Uses translateNow() (no debounce) like the existing engine/language
+   * auto-retranslate above, but — unlike that one — explicitly pushes the
+   * result to the output overlay: translateNow()'s return value alone only
+   * reaches the main window's small preview panel via pipeline's own
+   * 'translation' event (see index.js), never the floating overlay.
+   */
+  async _retranslateCurrent() {
+    if (!this._lastHandledText) {
+      console.log('[Tuhua] Retranslate requested but there is no last text yet — ignoring');
+      return;
+    }
+    const settings = this.store.get();
+    const srcLang = settings.sourceLang || 'ja';
+    const tgtLang = settings.targetLang || 'es';
+    const engineName = settings.engine || 'google-free';
+    console.log(`[Tuhua] Manual retranslate requested: engine=${engineName} (${srcLang} → ${tgtLang})`);
+    try {
+      const translation = await this.pipeline.translateNow(this._lastHandledText, {
+        source: srcLang,
+        target: tgtLang,
+        engine: engineName,
+        speaker: this._lastSpeakerName
+      });
+      this.windowManager.sendToOutputOverlay('update-output', {
+        text: translation,
+        originalText: this._lastHandledText,
+        targetLang: tgtLang
+      });
+    } catch (err) {
+      if (err.code === 'SUPERSEDED') return;
+      console.error('[Tuhua] Manual retranslate failed:', err.message);
+      this.windowManager.sendToOutputOverlay('update-output', {
+        text: `[Error] ${err.message}`
+      });
+    }
+  }
+
   // v3.13.20: _deduplicateText and _removeIncrementalPattern moved to
   // src/services/text-cleaning.js (cleanHookText, detectGrowingPrefix) as
   // part of consolidating the previously-duplicated dedup logic that used
@@ -2269,6 +2331,7 @@ class IpcHandlers {
     ipcMain.removeAllListeners('manual-translate');
     ipcMain.removeAllListeners('get-app-version');
     ipcMain.removeAllListeners('overlay-word-context-menu');
+    ipcMain.removeAllListeners('request-retranslate');
     // Cleanup OCR
     if (this.ocrService) {
       this.ocrService.stopAutoCapture();

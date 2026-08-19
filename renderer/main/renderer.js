@@ -905,14 +905,68 @@
             if (betaNote) betaNote.classList.toggle('hidden', !(provider && provider.beta));
 
             const modelInput = document.getElementById('llm-model');
-            const modelDatalist = document.getElementById('llm-model-datalist');
-            if (modelDatalist) {
-                modelDatalist.innerHTML = (provider?.models || []).map((m) => `<option value="${escapeHtml(m)}"></option>`).join('');
-            }
+            // v3.13.6x (Fase 9 testing follow-up): replaces a native
+            // <datalist> — kept on the input's own dataset (not a global)
+            // so a provider swap always has the RIGHT list even if the
+            // user never re-focuses the field before switching providers.
             if (modelInput) {
+                modelInput.dataset.models = JSON.stringify(provider?.models || []);
                 modelInput.placeholder = provider?.defaultModel || '';
             }
         }
+
+        // v3.13.6x (Fase 9 testing follow-up): the Modelo field's
+        // suggestions list — see index.html's llm-model-row comment for
+        // why this replaced a native <datalist> (Chromium's native
+        // datalist popup and its input chrome both ignore authored CSS;
+        // two rounds of CSS-only attempts confirmed this on real hardware).
+        function renderModelSuggestions(models) {
+            const box = document.getElementById('llm-model-suggestions');
+            if (!box) return;
+            if (!models.length) {
+                box.classList.add('hidden');
+                box.innerHTML = '';
+                return;
+            }
+            box.innerHTML = models.map((m) =>
+                `<div class="model-option" data-model="${escapeHtml(m)}">${escapeHtml(m)}</div>`
+            ).join('');
+            box.classList.remove('hidden');
+        }
+
+        function showModelSuggestions() {
+            const modelInput = document.getElementById('llm-model');
+            if (!modelInput) return;
+            const models = JSON.parse(modelInput.dataset.models || '[]');
+            renderModelSuggestions(models);
+        }
+
+        function filterModelSuggestions() {
+            const modelInput = document.getElementById('llm-model');
+            if (!modelInput) return;
+            const models = JSON.parse(modelInput.dataset.models || '[]');
+            const query = modelInput.value.trim().toLowerCase();
+            const filtered = query ? models.filter((m) => m.toLowerCase().includes(query)) : models;
+            renderModelSuggestions(filtered);
+        }
+
+        // Click a suggestion (event delegation — the list is rebuilt on
+        // every render, so binding once here beats re-binding per item).
+        document.addEventListener('click', (e) => {
+            const option = e.target.closest('#llm-model-suggestions .model-option');
+            if (option) {
+                const modelInput = document.getElementById('llm-model');
+                modelInput.value = option.dataset.model;
+                document.getElementById('llm-model-suggestions').classList.add('hidden');
+                markUnsaved();
+                return;
+            }
+            // Click anywhere outside the field+list closes it.
+            if (!e.target.closest('#llm-model-row')) {
+                const box = document.getElementById('llm-model-suggestions');
+                if (box) box.classList.add('hidden');
+            }
+        });
 
         function onLlmProviderChange() {
             const newProviderId = document.getElementById('llm-provider-select').value;
@@ -1307,6 +1361,15 @@
                 toggle.checked = data.state;
                 // Also save the new state so it persists
                 api.saveSettings({ clickThrough: data.state });
+            } else if (data.action === 'retranslate') {
+                // v3.13.6x (Fase 9 testing follow-up): real bug — this
+                // shortcut has fired since it was registered, but this
+                // branch never existed, so Ctrl+Shift+R has done nothing,
+                // ever. requestRetranslate() re-translates whatever the
+                // overlay is currently showing with current settings (see
+                // ipc-handlers.js's _retranslateCurrent) — same action the
+                // overlay's new "↻" toolbar button triggers.
+                api.requestRetranslate();
             }
         }
 

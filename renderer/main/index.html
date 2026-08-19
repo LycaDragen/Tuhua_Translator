@@ -77,28 +77,34 @@
             100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
         }
 
-        /* Dark mode dropdown menus — use dark background for option popups.
-           v3.13.6x (LLM engine overhaul, Fase 3 follow-up): this predates
-           the Fase 3 model field (#llm-model, an <input list="..."> paired
-           with <datalist id="llm-model-datalist">) and only ever covered
-           <select> — a datalist's suggestion popup is a different native
-           control that needs color-scheme set on the INPUT itself, not
-           just on <select> elements, or Chromium renders it with its
-           default light theme regardless of the rest of the page. */
-        .dark select, .dark input[list] { color-scheme: dark; }
-        .dark select option, .dark datalist option { background-color: #1e293b; color: #e2e8f0; }
+        /* Dark mode dropdown menus — use dark background for option popups. */
+        .dark select { color-scheme: dark; }
+        .dark select option { background-color: #1e293b; color: #e2e8f0; }
         .dark select optgroup { background-color: #1e293b; color: #94a3b8; }
-        /* v3.13.6x: color-scheme: dark above fixes the SUGGESTIONS POPUP,
-           but Chromium also paints its own native "has a list" combobox
-           chrome on the input box itself (the small ▼ indicator's
-           container) using its dark widget skin — a flat medium gray, not
-           this app's actual dark-900. Found by Lyca testing: the field
-           looked visibly lighter than every other field in the same panel
-           once a value was picked from the list. Force the real
-           background back explicitly; #0f172a matches tailwind.config's
-           dark.900 exactly, same color every other field in this box
-           already uses (see #api-key/#llm-custom-baseurl next to it). */
-        .dark input[list] { background-color: #0f172a !important; }
+        /* v3.13.6x: the Modelo field's suggestion list (#llm-model-suggestions)
+           used to be a native <datalist> — TWO rounds of CSS-only fixes here
+           (color-scheme, forced background-color) both failed on real
+           hardware, because Chromium's datalist popup and its "has a list"
+           input chrome are native widgets that don't fully respect authored
+           CSS. Replaced with a plain div list (see index.html's llm-model-row
+           and renderModelSuggestions() in renderer.js) — regular Tailwind
+           classes are enough for that, no special-casing needed here. */
+        #llm-model-suggestions .model-option {
+            padding: 6px 8px;
+            font-size: 11px;
+            font-family: ui-monospace, monospace;
+            cursor: pointer;
+            color: #92400e;
+        }
+        .dark #llm-model-suggestions .model-option {
+            color: #e2e8f0;
+        }
+        #llm-model-suggestions .model-option:hover {
+            background-color: #fef3c7;
+        }
+        .dark #llm-model-suggestions .model-option:hover {
+            background-color: #1e293b;
+        }
 
         /* Regex filter hover tooltip — v3.11.35: JS-positioned fixed tooltip */
         .regex-tip { cursor: help; }
@@ -240,11 +246,25 @@
                         <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_base_url_label">URL Base</label>
                         <input type="text" id="llm-custom-baseurl" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" placeholder="https://mi-gateway.ejemplo.com/v1" oninput="markUnsaved()">
                     </div>
-                    <!-- v3.13.58: replaces the hardcoded 'gpt-3.5-turbo' — free text + datalist (not a &lt;select&gt;, the model landscape moves faster than Tuhua releases) populated per-provider by onLlmProviderChange(). Empty = use the provider's own default. -->
-                    <div id="llm-model-row" class="hidden mt-2">
+                    <!-- v3.13.58: free text (not a &lt;select&gt;, the model landscape
+                         moves faster than Tuhua releases), populated per-provider by
+                         onLlmProviderChange(). Empty = use the provider's own default.
+                         v3.13.6x (Fase 9 testing follow-up): the original used a native
+                         &lt;input list&gt;+&lt;datalist&gt; — found by Lyca to be
+                         unfixably wrong in dark mode: Chromium's native suggestions
+                         popup and its "has a list" combobox chrome on the input itself
+                         BOTH ignore authored CSS (this is a well-documented Chromium
+                         limitation for &lt;datalist&gt;&lt;option&gt;, not something a
+                         color-scheme/background-color rule can ever fully override —
+                         two rounds of CSS-only fixes here both failed on real hardware).
+                         Replaced with a plain styled div list this app fully controls,
+                         same pattern as every other dropdown-shaped element in this
+                         panel — see renderModelSuggestions()/showModelSuggestions()
+                         below. -->
+                    <div id="llm-model-row" class="hidden mt-2 relative">
                         <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_model_label">Modelo</label>
-                        <input type="text" id="llm-model" list="llm-model-datalist" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" oninput="markUnsaved()">
-                        <datalist id="llm-model-datalist"></datalist>
+                        <input type="text" id="llm-model" autocomplete="off" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" oninput="markUnsaved(); filterModelSuggestions()" onfocus="showModelSuggestions()">
+                        <div id="llm-model-suggestions" class="hidden absolute left-0 right-0 z-50 mt-1 max-h-40 overflow-y-auto rounded-md border border-amber-200 dark:border-amber-800 bg-white dark:bg-dark-900 shadow-lg scrollbar-thin"></div>
                     </div>
                     <!-- v3.11.23: DeepL Formality -->
                     <div id="deepl-formality-section" class="hidden mt-2">

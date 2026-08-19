@@ -81,7 +81,7 @@
            once Término became its own editable field. -webkit-app-region:
            no-drag is required — without it this sits inside the overlay's
            own drag area and clicks would just move the window instead. */
-        #glossary-btn {
+        #glossary-btn, #retranslate-btn {
             -webkit-app-region: no-drag;
             background: none;
             border: none;
@@ -92,7 +92,7 @@
             cursor: pointer;
             transition: color 0.15s ease;
         }
-        #glossary-btn:hover {
+        #glossary-btn:hover, #retranslate-btn:hover {
             color: rgba(16, 185, 129, 1);
         }
         .target-lang-badge {
@@ -142,10 +142,10 @@
         .theme-light .label {
             color: rgba(0, 0, 0, 0.3);
         }
-        .theme-light #glossary-btn {
+        .theme-light #glossary-btn, .theme-light #retranslate-btn {
             color: rgba(5, 150, 105, 0.6);
         }
-        .theme-light #glossary-btn:hover {
+        .theme-light #glossary-btn:hover, .theme-light #retranslate-btn:hover {
             color: rgba(5, 150, 105, 1);
         }
         .theme-light #text-content {
@@ -158,6 +158,7 @@
         <div class="drag-area"></div>
         <div class="target-lang-badge" id="target-lang-badge"></div>
         <div id="top-right-controls">
+            <button id="retranslate-btn" title="Volver a traducir">↻</button>
             <button id="glossary-btn" title="Agregar término al glosario">📖+</button>
             <span class="label">OUTPUT</span>
         </div>
@@ -255,6 +256,22 @@
             if (glossaryBtn) {
                 glossaryBtn.addEventListener('click', () => {
                     overlay.requestWordContextMenu('', currentOriginalText);
+                });
+            }
+
+            // v3.13.6x (Fase 9 testing follow-up): re-translate whatever
+            // line is on screen right now, with whatever settings are
+            // current right now — real request from testing (Lyca):
+            // comparing prompt presets on the same line needed a reliable
+            // way to force a fresh translation without pausing/navigating
+            // away, which could show a DIFFERENT line entirely. Works for
+            // Textractor/Clipboard/OCR alike — see ipc-handlers.js's
+            // _retranslateCurrent for why this needs no per-input-method
+            // branching here.
+            const retranslateBtn = document.getElementById('retranslate-btn');
+            if (retranslateBtn && overlay.requestRetranslate) {
+                retranslateBtn.addEventListener('click', () => {
+                    overlay.requestRetranslate();
                 });
             }
 

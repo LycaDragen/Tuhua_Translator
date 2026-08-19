@@ -77,7 +77,12 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
-  'manual-translate'
+  'manual-translate',
+  // v3.13.6x (Fase 9 testing follow-up): fixes Ctrl+Shift+R, which fired
+  // shortcut-pressed{action:'retranslate'} since it was registered but
+  // handleShortcut() in renderer.js never had a case for it — the
+  // shortcut has done nothing, ever, until now.
+  'request-retranslate'
 ]);
 
 const ALLOWED_RECEIVE_CHANNELS = new Set([
@@ -266,6 +271,7 @@ const api = {
     if (typeof text !== 'string') throw new Error('Text must be a string');
     secureSend('manual-translate', text);
   },
+  requestRetranslate: () => secureSend('request-retranslate'),
 
   // Connection test
   testConnection: (host, port) => {

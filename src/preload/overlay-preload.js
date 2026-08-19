@@ -48,6 +48,11 @@ const api = {
   // v3.13.46: originalText travels along too — see the doc comment on
   // overlay-word-context-menu in ipc-handlers.js for what it's used for.
   requestWordContextMenu: (word, originalText) => ipcRenderer.send('overlay-word-context-menu', word, originalText),
+  // v3.13.6x (Fase 9 testing follow-up): re-translate whatever line is
+  // CURRENTLY shown, with whatever settings are current right now — the
+  // overlay's "↻" toolbar button. Shared channel with Ctrl+Shift+R (see
+  // ipc-handlers.js's request-retranslate handler / _retranslateCurrent).
+  requestRetranslate: () => ipcRenderer.send('request-retranslate'),
   onWordPromptContext: (callback) => {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('word-prompt-context', handler);
