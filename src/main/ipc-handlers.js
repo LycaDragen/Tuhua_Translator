@@ -14,6 +14,7 @@ const { profileToSettings, settingsToProfile } = require('../services/profiles/p
 const glossaryEntries = require('../services/translation/glossary-entries');
 const textCleaning = require('../services/text-cleaning');
 const llmProviders = require('../services/translation/llm-providers');
+const promptPresets = require('../services/translation/prompt-presets');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
 // check), so it's requirable here too — used for the few strings the
@@ -118,6 +119,18 @@ class IpcHandlers {
           defaultModel: p.defaultModel, models: p.models, beta: !!p.beta, docsUrl: p.docsUrl || ''
         })),
         localPresets: llmProviders.LOCAL_ENDPOINT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey }))
+      };
+    });
+
+    // v3.13.59 (LLM engine overhaul, Fase 4): read-only, same reasoning as
+    // get-llm-providers just above — prompt-presets.js lives in the main
+    // process; this is what feeds the renderer's preset <select> and lets
+    // it match a saved/typed template back to a preset id (or 'custom')
+    // without duplicating the actual prompt prose text into renderer.js.
+    ipcMain.handle('get-prompt-presets', () => {
+      return {
+        presets: promptPresets.PROMPT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey, template: p.template })),
+        defaultTemplate: promptPresets.DEFAULT_TEMPLATE
       };
     });
 
@@ -2170,6 +2183,8 @@ class IpcHandlers {
       'get-settings', 'save-settings',
       // v3.13.58 (LLM engine overhaul, Fase 3)
       'get-llm-providers',
+      // v3.13.59 (Fase 4)
+      'get-prompt-presets',
       'get-glossary', 'save-glossary', 'delete-glossary-entry',
       'import-glossary', 'export-glossary', 'browse-save-json', 'browse-open-json',
       'get-history', 'clear-history', 'export-history', 'clear-context',

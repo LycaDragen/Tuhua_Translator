@@ -334,7 +334,20 @@ class TranslationPipeline extends EventEmitter {
           // provider's URL); ignored otherwise since options.baseUrl only
           // wins when non-empty.
           baseUrl: providerId === 'custom' ? (s.llmCustomBaseUrl || '') : undefined,
-          systemPrompt: s.systemPrompt || '',
+          // v3.13.59 (Fase 4): renamed from `systemPrompt` — no longer
+          // destructive when set (see llm-base.js/prompt-template.js). The
+          // profile-level override (`profile.promptTemplate`) the plan
+          // designs for is deliberately NOT wired here yet: reading it
+          // needs a `profileStore` reference this pipeline doesn't have —
+          // that injection is Fase 7's job, alongside the other
+          // profile-derived template variables ({game}/{vnTitle}/
+          // {speaker}). Adding the schema field without a working read
+          // path would be a setting that silently does nothing, which is
+          // worse than not having it yet.
+          promptTemplate: s.promptTemplate || '',
+          // Deliberately decoupled from promptTemplate — see fewShotEnabled's
+          // own doc comment in llm-base.js for why the old coupling was a bug.
+          fewShotEnabled: s.llmFewShot !== false,
           temperature: s.llmTemperature,
           maxTokens: s.llmMaxTokens,
           topP: s.llmTopP,
@@ -355,7 +368,9 @@ class TranslationPipeline extends EventEmitter {
         this.engines[engineName] = new LocalLLMEngine({
           endpoint,
           model: s.customModel || 'local-model',
-          systemPrompt: s.systemPrompt || '',
+          // v3.13.59 (Fase 4): see the same comment in the 'openai' case above.
+          promptTemplate: s.promptTemplate || '',
+          fewShotEnabled: s.llmFewShot !== false,
           temperature: s.llmTemperature,
           maxTokens: s.llmMaxTokens,
           topP: s.llmTopP,

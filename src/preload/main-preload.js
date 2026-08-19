@@ -12,6 +12,8 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'save-settings',
   // v3.13.58 (LLM engine overhaul, Fase 3)
   'get-llm-providers',
+  // v3.13.59 (Fase 4)
+  'get-prompt-presets',
   'get-glossary',
   'save-glossary',
   'delete-glossary-entry',
@@ -151,6 +153,10 @@ const api = {
   // see ipc-handlers.js's get-llm-providers for why it can't just be a
   // require() of llm-providers.js from here (sandboxed renderer).
   getLlmProviders: () => secureInvoke('get-llm-providers'),
+  // v3.13.59 (Fase 4): feeds the prompt preset <select> — same reasoning
+  // as getLlmProviders just above (prompt-presets.js's actual template
+  // prose lives only in the main process).
+  getPromptPresets: () => secureInvoke('get-prompt-presets'),
 
   // Glossary (v3.13.40: two layers — scope is 'global' or 'profile')
   getGlossary: () => secureInvoke('get-glossary'),

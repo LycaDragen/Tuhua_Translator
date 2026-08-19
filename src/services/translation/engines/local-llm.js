@@ -19,7 +19,9 @@ class LocalLLMEngine extends OpenAICompatEngine {
       requiresKey: false,
       model: options.model || 'local-model',
       baseUrl: options.endpoint || 'http://localhost:1234/v1',
-      systemPrompt: options.systemPrompt || '',
+      // v3.13.59 (Fase 4): renamed from systemPrompt — see llm-base.js.
+      promptTemplate: options.promptTemplate || '',
+      fewShotEnabled: options.fewShotEnabled,
       timeout: 60000, // Local models can be slower
       supportedLanguages: ['ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh'],
       // v3.13.58 (Fase 3): no `providerId` — local servers aren't in the

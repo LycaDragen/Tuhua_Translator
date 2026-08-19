@@ -20,21 +20,27 @@ const path = require('path');
 const OpenAIEngine = require(path.join('..', 'src', 'services', 'translation', 'engines', 'openai.js'));
 const LocalLLMEngine = require(path.join('..', 'src', 'services', 'translation', 'engines', 'local-llm.js'));
 const { LLMRefusalError, LLMPassthroughError } = require(path.join('..', 'src', 'services', 'translation', 'llm-output.js'));
+const { renderPromptTemplate } = require(path.join('..', 'src', 'services', 'translation', 'prompt-template.js'));
+const { DEFAULT_TEMPLATE } = require(path.join('..', 'src', 'services', 'translation', 'prompt-presets.js'));
 
 const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
 
-// The literal default prompt text both engines fall back to when no custom
-// systemPrompt is set — pinned here so a future edit to llm-base.js can't
-// silently reintroduce the v3.13.55 "{TEXT}" bug (or any other prompt
-// regression) without this bench noticing.
-const DEFAULT_PROMPT = `You are a professional translator for visual novels and games. Your task is to translate text from Japanese to Spanish.
-
-CRITICAL RULES — follow all of them exactly:
-1. Output ONLY the translated text. No notes, no explanations, no added content.
-2. NEVER translate or modify: proper names, character names, game/book/movie titles, brand names, or technical terms. Keep them exactly as written.
-3. Preserve the speaker's tone, register, and emotional nuance.
-4. Translate naturally — not word-for-word, but meaning-for-meaning.
-5. Maintain consistency with any previously established terminology.`;
+// v3.13.59 (Fase 4): the default prompt is now a rendered TEMPLATE
+// (prompt-presets.js's DEFAULT_TEMPLATE), not a static string — computed
+// here via the real renderPromptTemplate() for the exact ja->es/no-context
+// case these checks exercise, rather than a second hardcoded copy that
+// could drift from the template. prompt-template.js's own exhaustive
+// behavior (the collapse rule, unknown-variable warnings, context
+// formatting, ...) is covered by scripts/test-prompt-template.js — these
+// checks are only about whether llm-base.js WIRES to it correctly.
+const DEFAULT_PROMPT_JA_ES = renderPromptTemplate(DEFAULT_TEMPLATE, {
+  sentence: 'こんにちは',
+  srclang: 'Japanese',
+  tgtlang: 'Spanish',
+  srclangcode: 'ja',
+  tgtlangcode: 'es',
+  context: []
+}).text;
 
 function fakeHttpClient(responder) {
   const calls = [];
@@ -125,53 +131,74 @@ check('default-prompt-matches-pinned-text-and-has-no-unresolved-placeholder', as
   await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
   const systemMsg = http.calls[0].body.messages[0];
   const pass = systemMsg.role === 'system'
-    && systemMsg.content === DEFAULT_PROMPT
-    && !systemMsg.content.includes('{TEXT}');
+    && systemMsg.content === DEFAULT_PROMPT_JA_ES
+    && !/\{[A-Za-z]+\}/.test(systemMsg.content);
   return { pass, actual: systemMsg };
-}, 'Regression guard for the v3.13.55 fix: the prompt must never contain a literal, unresolved {TEXT} placeholder again.');
+}, 'Regression guard for the v3.13.55 fix: the rendered prompt must never contain a literal, unresolved {variable} placeholder — {TEXT} was the original bug, but any leftover {name} is the same class of mistake.');
 
-check('custom-system-prompt-is-used-verbatim-and-disables-fewshot', async () => {
+check('custom-prompt-template-with-no-variables-renders-verbatim', async () => {
   const http = fakeHttpClient(OK_RESPONSE);
-  const engine = new OpenAIEngine('key', { httpClient: http, systemPrompt: 'Translate literally, word for word.' });
+  const engine = new OpenAIEngine('key', { httpClient: http, promptTemplate: 'Translate literally, word for word.' });
   await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
   const { messages } = http.calls[0].body;
-  // system + final user only — no few-shot pair, no context turns.
-  const pass = messages.length === 2
+  // v3.13.59 (Fase 4): a custom template no longer disables few-shot (the
+  // OLD `if (!this.systemPrompt)` coupling is exactly what this Fase
+  // removes) — fewShotEnabled defaults true, so ja->es's 2 examples are
+  // still expected here: system, 2x(user+assistant) fewshot, final user.
+  const pass = messages.length === 6
     && messages[0].content === 'Translate literally, word for word.'
-    && messages[1].role === 'user' && messages[1].content === 'こんにちは';
+    && messages[5].role === 'user' && messages[5].content === 'こんにちは';
+  return { pass, actual: messages };
+}, "A template with no {variables} at all is a valid, if minimal, template — renderPromptTemplate() must pass it through unchanged rather than erroring or mangling it.");
+
+check('fewShotEnabled-false-disables-fewshot-independently-of-the-template', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, fewShotEnabled: false });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const { messages } = http.calls[0].body;
+  // system + final user only — no few-shot pair, even with the DEFAULT
+  // template (which would otherwise get ja->es's 2 examples).
+  const pass = messages.length === 2 && messages[1].content === 'こんにちは';
   return { pass, actual: messages };
 });
 
-check('fewshot-added-for-ja-es-but-not-for-ja-pt', async () => {
+check('fewshot-keyed-by-language-CODE-ja-es-has-examples-ja-pt-does-not', async () => {
+  // v3.13.59: keyed by CODE now (fewshot-examples.js), not by comparing
+  // the English NAME of the language the way the old hardcoded `if` did —
+  // sourceLangName/targetLangName are passed here too but must NOT be
+  // what decides this.
   const httpEs = fakeHttpClient(OK_RESPONSE);
   const esEngine = new OpenAIEngine('key', { httpClient: httpEs });
-  await esEngine.translate('こんにちは', { sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  await esEngine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
 
   const httpPt = fakeHttpClient(OK_RESPONSE);
   const ptEngine = new OpenAIEngine('key', { httpClient: httpPt });
-  await ptEngine.translate('こんにちは', { sourceLangName: 'Japanese', targetLangName: 'Portuguese' });
+  await ptEngine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'pt', sourceLangName: 'Japanese', targetLangName: 'Portuguese' });
 
-  const esHasFewshot = httpEs.calls[0].body.messages.length === 4; // system, user-example, assistant-example, user
-  const ptHasFewshot = httpPt.calls[0].body.messages.length === 4;
+  const esHasFewshot = httpEs.calls[0].body.messages.length === 6; // system, 2x(user+assistant), final user
+  const ptHasFewshot = httpPt.calls[0].body.messages.length === 6;
   const pass = esHasFewshot === true && ptHasFewshot === false;
   return { pass, actual: { esMessageCount: httpEs.calls[0].body.messages.length, ptMessageCount: httpPt.calls[0].body.messages.length } };
 });
 
-check('context-turns-appended-in-order-before-final-user-message', async () => {
+check('context-renders-into-the-system-prompt-text-not-as-chat-turns', async () => {
+  // v3.13.59 (Fase 4): real conversation context moved from fake
+  // user/assistant turns into {contextBoth} in the system prompt text —
+  // see llm-base.js's capabilities.context ('prompt-template' now, was
+  // 'chat-turns'). Few-shot is disabled here to isolate this check to
+  // context only, same isolation technique the old version of this check used.
   const http = fakeHttpClient(OK_RESPONSE);
-  const engine = new OpenAIEngine('key', { httpClient: http, systemPrompt: 'x' }); // custom prompt disables few-shot, isolating this check to context only
+  const engine = new OpenAIEngine('key', { httpClient: http, fewShotEnabled: false });
   const context = [
     { source: 'おはよう', translation: 'Buenos días' },
     { source: 'ただいま', translation: 'Ya llegué' }
   ];
-  await engine.translate('こんにちは', { sourceLangName: 'Japanese', targetLangName: 'Spanish', context });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish', context });
   const { messages } = http.calls[0].body;
-  const pass = messages.length === 6
-    && messages[1].role === 'user' && messages[1].content === 'おはよう'
-    && messages[2].role === 'assistant' && messages[2].content === 'Buenos días'
-    && messages[3].role === 'user' && messages[3].content === 'ただいま'
-    && messages[4].role === 'assistant' && messages[4].content === 'Ya llegué'
-    && messages[5].role === 'user' && messages[5].content === 'こんにちは';
+  const systemContainsContext = messages[0].content.includes('おはよう → Buenos días')
+    && messages[0].content.includes('ただいま → Ya llegué');
+  // system + final user only — context is text now, not extra turns.
+  const pass = messages.length === 2 && systemContainsContext;
   return { pass, actual: messages };
 });
 
@@ -375,11 +402,13 @@ check('llmSanitize-false-disables-the-sanitizer-entirely', async () => {
 check('capabilities-shape-is-consistent-across-both-engines', () => {
   const openaiCaps = new OpenAIEngine('key').capabilities;
   const localCaps = new LocalLLMEngine().capabilities;
-  const expected = { prompt: true, context: 'chat-turns', glossaryPrompt: true, abort: false };
+  // v3.13.59 (Fase 4): context changed from 'chat-turns' to
+  // 'prompt-template' — see the field's own doc comment in llm-base.js.
+  const expected = { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: false };
   const matches = (caps) => JSON.stringify(caps) === JSON.stringify(expected);
   const pass = matches(openaiCaps) && matches(localCaps);
   return { pass, actual: { openaiCaps, localCaps } };
-}, 'Pins the Fase-1 contract Fase 3-5 will read instead of hardcoding engine names — abort stays false until Fase 9 wires an AbortController.');
+}, 'Pins the contract Fase 5 will read instead of hardcoding engine names — abort stays false until Fase 9 wires an AbortController.');
 
 async function run() {
   const args = parseArgs(process.argv.slice(2));

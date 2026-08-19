@@ -848,13 +848,35 @@
                             <input type="range" id="debounce-range" min="100" max="2000" step="50" value="300" class="w-full" oninput="document.getElementById('debounce-val').innerText=this.value+'ms'; markUnsaved()">
                             <p class="text-[9px] text-gray-400" data-i18n="debounce_desc">Wait time before translating new text.</p>
                         </div>
-                        <!-- System Prompt with Reset Button -->
+                        <!-- v3.13.59 (LLM engine overhaul, Fase 4): replaces the old bare
+                             textarea. That textarea was destructive by design — anything typed
+                             into it REPLACED the whole default prompt (losing the language names
+                             and disabling few-shot, see prompt-template.js's header comment) and
+                             a blank box with no starting point is exactly how a user ends up
+                             writing something that breaks it. A preset picker with a working
+                             default, plus this box collapsed behind "Advanced" for whoever wants
+                             to hand-edit it, is the fix on the UI side. -->
                         <div class="space-y-2">
                             <div class="flex items-center justify-between">
-                                <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="system_prompt">System Prompt (LLM)</label>
-                                <button onclick="resetSystemPrompt()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1" data-i18n="reset_prompt_btn">Restablecer</button>
+                                <label class="block text-[10px] font-bold text-gray-400 uppercase" data-i18n="prompt_template_label">Plantilla de Prompt (LLM)</label>
+                                <button onclick="resetPromptTemplate()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1" data-i18n="reset_prompt_btn">Restablecer</button>
                             </div>
-                            <textarea id="system-prompt" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono resize-none" data-i18n-ph="system_prompt_ph" placeholder="Custom instructions for LLM engines..." oninput="markUnsaved()"></textarea>
+                            <select id="prompt-preset-select" onchange="onPromptPresetChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs cursor-pointer"></select>
+                            <p id="prompt-preset-desc" class="text-[9px] text-gray-500"></p>
+                            <!-- v3.13.59: independent of the template — see fewShotEnabled's
+                                 doc comment in llm-base.js for why this used to be silently
+                                 tied to whether the prompt was customized. -->
+                            <label class="flex items-center gap-1.5 text-[9px] text-gray-500 cursor-pointer">
+                                <input type="checkbox" id="llm-fewshot-enabled" checked onchange="markUnsaved()">
+                                <span data-i18n="prompt_fewshot_toggle">Usar ejemplos de muestra (few-shot)</span>
+                            </label>
+                            <details>
+                                <summary class="cursor-pointer text-[10px] font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 select-none" data-i18n="prompt_advanced_label">Avanzado: editar plantilla</summary>
+                                <div class="mt-2 space-y-1">
+                                    <textarea id="prompt-template" rows="10" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" oninput="onPromptTemplateEdited()"></textarea>
+                                    <p class="text-[9px] text-gray-500" data-i18n="prompt_variables_hint">Variables: {sentence} {srclang} {tgtlang} {srclangcode} {tgtlangcode} {contextBoth[N]} {contextOriginal[N]} {contextTranslation[N]} {glossary} {game} {vnTitle} {speaker} {inputMethod} {ocrNote}</p>
+                                </div>
+                            </details>
                         </div>
                         <!-- v3.13.58 (LLM engine overhaul, Fase 3): shared by both LLM engines (openai/local-llm) — toggled in toggleInputFields(). Global rather than per-profile: how deterministic a translation should be is a user preference, not a per-game setting the way the provider/model themselves are (see profile-schema.js). -->
                         <div id="llm-params-section" class="hidden space-y-2">

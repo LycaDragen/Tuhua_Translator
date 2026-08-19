@@ -24,6 +24,9 @@
         // renderer's cached copy, fetched once via loadLlmProviders(). Used to
         // populate the provider/local-preset selects and the model datalist.
         let llmProvidersCatalog = { providers: [], localPresets: [] };
+        // v3.13.59 (Fase 4): prompt-presets.js's actual template prose lives
+        // only in the main process — fetched once via loadPromptPresets().
+        let promptPresetsCatalog = { presets: [], defaultTemplate: '' };
         // v3.10.8: Staged changes — settings changes are held in the UI
         // until the user clicks "Aplicar y Guardar". Only operational
         // controls (play/pause, theme, language UI, Textractor) auto-save.
@@ -208,6 +211,9 @@
             // and toggleInputFields() (when engine==='openai') reads the provider
             // select's value to decide what to show/populate.
             await loadLlmProviders();
+            // v3.13.59 (Fase 4): populates #prompt-preset-select — read below
+            // once settings.promptTemplate is known.
+            await loadPromptPresets();
 
             // Apply saved settings
             if (settings.uiLanguage) {
@@ -338,7 +344,18 @@
             // right after Tuhua restarts, without the user re-typing it.
             if (settings.gamePid) document.getElementById('game-pid').value = settings.gamePid;
             if (settings.debounceMs) { document.getElementById('debounce-range').value = settings.debounceMs; document.getElementById('debounce-val').innerText = settings.debounceMs + 'ms'; }
-            if (settings.systemPrompt) document.getElementById('system-prompt').value = settings.systemPrompt;
+            // v3.13.59 (Fase 4): `settings.systemPrompt` is no longer read here
+            // at all — the one-time migration (src/main/index.js) already
+            // promoted a non-empty legacy value into `promptTemplate` verbatim
+            // before this ever runs. '' resolves to the balanced preset both
+            // at render time (llm-base.js) and for the dropdown's initial value
+            // (matchPromptPresetId treats '' as "matches balanced").
+            const promptTemplateText = settings.promptTemplate || promptPresetsCatalog.defaultTemplate;
+            document.getElementById('prompt-template').value = promptTemplateText;
+            const matchedPresetId = matchPromptPresetId(settings.promptTemplate || '');
+            document.getElementById('prompt-preset-select').value = matchedPresetId;
+            updatePromptPresetDesc(matchedPresetId);
+            document.getElementById('llm-fewshot-enabled').checked = settings.llmFewShot !== false;
             if (settings.maxContextHistory !== undefined) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
             if (settings.historyLimit) { document.getElementById('history-limit-range').value = settings.historyLimit; document.getElementById('history-limit-val').innerText = settings.historyLimit; }
 
@@ -648,13 +665,6 @@
         }
 
         // Reset System Prompt to default
-        function resetSystemPrompt() {
-            document.getElementById('system-prompt').value = '';
-            api.saveSettings({ systemPrompt: '' });
-            const t = translations[currentLang] || translations['en'];
-            showToast(t.prompt_reset || 'Prompt restablecido al valor por defecto');
-        }
-
         // Apply settings from modal (saves everything)
         async function applySettingsModal() {
             const config = {
@@ -666,7 +676,9 @@
                 overlayOpacity: parseInt(document.getElementById('opacity-range').value),
                 clickThrough: document.getElementById('click-through-toggle').checked,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
-                systemPrompt: document.getElementById('system-prompt').value,
+                // v3.13.59 (Fase 4): renamed from systemPrompt
+                promptTemplate: document.getElementById('prompt-template').value,
+                llmFewShot: document.getElementById('llm-fewshot-enabled').checked,
                 maxContextHistory: parseInt(document.getElementById('context-range').value),
                 historyLimit: parseInt(document.getElementById('history-limit-range').value)
             };
@@ -730,7 +742,9 @@
                 debounceMs: 300,
                 maxContextHistory: 5,
                 historyLimit: 5,
-                systemPrompt: '',
+                // v3.13.59 (Fase 4): renamed from systemPrompt
+                promptTemplate: '',
+                llmFewShot: true,
                 clickThrough: false,
                 enableRegexFilter: true
             };
@@ -930,6 +944,81 @@
                 endpointInput.classList.add('opacity-60');
             }
             markUnsaved();
+        }
+
+        // ===== PROMPT TEMPLATE (v3.13.59, Fase 4) =====
+        const PROMPT_PRESET_DESC_KEYS = {
+            balanced: 'prompt_preset_balanced_desc',
+            literal: 'prompt_preset_literal_desc',
+            localized: 'prompt_preset_localized_desc',
+            uncensored: 'prompt_preset_uncensored_desc',
+            custom: ''
+        };
+
+        async function loadPromptPresets() {
+            try {
+                promptPresetsCatalog = await api.getPromptPresets();
+            } catch (e) {
+                console.error('Failed to load prompt presets:', e);
+                return;
+            }
+            const t = translations[currentLang] || translations['en'];
+            const select = document.getElementById('prompt-preset-select');
+            const presetOptions = promptPresetsCatalog.presets.map((p) =>
+                `<option value="${p.id}" data-i18n="${p.labelKey}">${t[p.labelKey] || p.id}</option>`
+            ).join('');
+            select.innerHTML = presetOptions + `<option value="custom" data-i18n="prompt_preset_custom">${t.prompt_preset_custom || 'Custom'}</option>`;
+        }
+
+        // Matches the CURRENT textarea text against the catalog the same way
+        // prompt-presets.js's matchPresetId() does server-side (byte-identical
+        // text = that preset), but also treats '' as "matches balanced" — ''
+        // is what an unset/reset promptTemplate setting actually stores (it
+        // resolves to DEFAULT_TEMPLATE at render time, llm-base.js), so the
+        // dropdown should show "Balanced" selected, not "Custom", for a fresh
+        // install that has never touched this field.
+        function matchPromptPresetId(text) {
+            const effectiveText = text || promptPresetsCatalog.defaultTemplate;
+            const preset = promptPresetsCatalog.presets.find((p) => p.template === effectiveText);
+            return preset ? preset.id : 'custom';
+        }
+
+        function updatePromptPresetDesc(presetId) {
+            const t = translations[currentLang] || translations['en'];
+            const descKey = PROMPT_PRESET_DESC_KEYS[presetId] || '';
+            document.getElementById('prompt-preset-desc').innerText = descKey ? (t[descKey] || '') : '';
+        }
+
+        function onPromptPresetChange() {
+            const presetId = document.getElementById('prompt-preset-select').value;
+            if (presetId !== 'custom') {
+                const preset = promptPresetsCatalog.presets.find((p) => p.id === presetId);
+                if (preset) document.getElementById('prompt-template').value = preset.template;
+            }
+            // 'custom' selected directly (rather than reached by editing):
+            // leave the textarea as whatever it already had — nothing to fill in.
+            updatePromptPresetDesc(presetId);
+            markUnsaved();
+        }
+
+        // Keeps the preset <select> in sync while the user hand-edits the
+        // advanced textarea, WITHOUT calling onPromptPresetChange() (that would
+        // overwrite what they just typed back to a preset's canned text).
+        function onPromptTemplateEdited() {
+            const text = document.getElementById('prompt-template').value;
+            const matchedId = matchPromptPresetId(text);
+            document.getElementById('prompt-preset-select').value = matchedId;
+            updatePromptPresetDesc(matchedId);
+            markUnsaved();
+        }
+
+        function resetPromptTemplate() {
+            document.getElementById('prompt-template').value = promptPresetsCatalog.defaultTemplate;
+            document.getElementById('prompt-preset-select').value = 'balanced';
+            updatePromptPresetDesc('balanced');
+            api.saveSettings({ promptTemplate: '' });
+            const t = translations[currentLang] || translations['en'];
+            showToast(t.prompt_reset || 'Prompt restablecido al valor por defecto');
         }
 
         // ===== ENGINE FIELDS =====
@@ -2521,7 +2610,9 @@
                 gamePid: parseInt(document.getElementById('game-pid').value) || 0,
                 inputMethod: currentInputMethod,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
-                systemPrompt: document.getElementById('system-prompt').value,
+                // v3.13.59 (Fase 4): renamed from systemPrompt
+                promptTemplate: document.getElementById('prompt-template').value,
+                llmFewShot: document.getElementById('llm-fewshot-enabled').checked,
                 maxContextHistory: parseInt(document.getElementById('context-range').value),
                 historyLimit: parseInt(document.getElementById('history-limit-range').value),
                 libretranslateEndpoint: document.getElementById('libretranslate-endpoint').value,

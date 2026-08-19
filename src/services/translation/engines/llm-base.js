@@ -17,6 +17,9 @@
 const axios = require('axios');
 const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
 const { getRequestParamOverrides } = require('../llm-providers');
+const { renderPromptTemplate } = require('../prompt-template');
+const { DEFAULT_TEMPLATE } = require('../prompt-presets');
+const { getFewshotExamples } = require('../fewshot-examples');
 
 class OpenAICompatEngine {
   constructor({
@@ -26,7 +29,13 @@ class OpenAICompatEngine {
     apiKey = '',
     model,
     baseUrl,
-    systemPrompt = '',
+    // v3.13.59 (Fase 4): renamed from `systemPrompt` — '' means "use
+    // prompt-presets.js's DEFAULT_TEMPLATE", same empty-means-default
+    // convention as before, but no longer destructive when non-empty (see
+    // translate() below: the old code did `this.systemPrompt ||
+    // defaultPrompt`, a straight replacement that dropped the language
+    // names and disabled few-shot the moment a user typed anything).
+    promptTemplate = '',
     timeout = 30000,
     supportedLanguages = [],
     httpClient = axios,
@@ -48,7 +57,11 @@ class OpenAICompatEngine {
     // v3.13.58: unset (not 0) by default — top_p is a real sampling
     // parameter with meaningful behavior at 0, so "not sent" and "sent as
     // 0" must be distinguishable. null/undefined means "don't send it".
-    topP = null
+    topP = null,
+    // v3.13.59 (Fase 4): decoupled from whether a custom promptTemplate is
+    // set — the OLD coupling (`if (!this.systemPrompt)`) is exactly what
+    // silently killed few-shot for anyone who customized the prompt.
+    fewShotEnabled = true
   } = {}) {
     this.name = name;
     this.displayName = displayName;
@@ -56,7 +69,7 @@ class OpenAICompatEngine {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl;
-    this.systemPrompt = systemPrompt;
+    this.promptTemplate = promptTemplate;
     this.timeout = timeout;
     this.supportedLanguages = supportedLanguages;
     this.sanitize = sanitize;
@@ -64,6 +77,7 @@ class OpenAICompatEngine {
     this.temperature = temperature;
     this.maxTokens = maxTokens;
     this.topP = topP;
+    this.fewShotEnabled = fewShotEnabled;
     // Injectable so scripts/test-llm-base.js can assert on the exact request
     // body/headers without making a real HTTP call — same idea as the
     // injectable `store` in glossary.js/profile-store.js.
@@ -71,12 +85,22 @@ class OpenAICompatEngine {
     // v3.13.19: Context is owned by the pipeline's ContextMemory, passed in
     // via options.context — see context-memory.js.
     //
-    // v3.13.56: `capabilities` is what pipeline.js will read once Fase 3-5
-    // land (prompt templates, glossary-as-prompt, abort/streaming) instead
-    // of hardcoding engine names in a list — see the now-deleted
-    // `LLM_ENGINES` array this replaces the intent of. `abort` stays false
-    // until Fase 9 actually wires an AbortController through translate().
-    this.capabilities = { prompt: true, context: 'chat-turns', glossaryPrompt: true, abort: false };
+    // v3.13.56: `capabilities` is what pipeline.js will read once Fase 5
+    // lands (glossary-as-prompt, abort/streaming) instead of hardcoding
+    // engine names in a list — see the now-deleted `LLM_ENGINES` array
+    // this replaces the intent of. `abort` stays false until Fase 9
+    // actually wires an AbortController through translate().
+    //
+    // v3.13.59 (Fase 4): `context` changed from 'chat-turns' to
+    // 'prompt-template' — the real conversation context (recent game
+    // dialogue) now renders into the system prompt text via
+    // {contextBoth}/{contextOriginal}/{contextTranslation} instead of
+    // being injected as fake user/assistant turns. Few-shot EXAMPLES
+    // (fewshot-examples.js) still go in as real chat turns — those are
+    // illustrative teaching pairs, not prior dialogue, and turn-based
+    // few-shot is a well-established prompting technique independent of
+    // this change. See translate() below for exactly where each lives.
+    this.capabilities = { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: false };
   }
 
   async translate(text, options = {}) {
@@ -86,40 +110,58 @@ class OpenAICompatEngine {
       throw new Error(`${this.displayName} API key is required`);
     }
 
-    const defaultPrompt = `You are a professional translator for visual novels and games. Your task is to translate text from ${sourceLangName} to ${targetLangName}.
+    // v3.13.59 (Fase 4): {game}/{vnTitle}/{speaker}/{glossary} are Fase
+    // 5/7 concerns — pipeline.js doesn't pass them yet, so they simply
+    // come through as undefined here and their template line collapses
+    // (see prompt-template.js's AUTO_COLLAPSIBLE_VARS). Nothing in this
+    // file needs to change when those Fases wire real values through
+    // `options` — only pipeline.js's call site does.
+    const ocrNote = options.inputMethod === 'ocr'
+      ? ' Recognition errors are possible — if a word looks garbled, infer the most likely intended reading rather than transcribing the garble.'
+      : '';
+    const rendered = renderPromptTemplate(this.promptTemplate || DEFAULT_TEMPLATE, {
+      sentence: text,
+      srclang: sourceLangName,
+      tgtlang: targetLangName,
+      srclangcode: sourceLang,
+      tgtlangcode: targetLang,
+      context: options.context || [],
+      glossary: options.glossary,
+      game: options.game,
+      vnTitle: options.vnTitle,
+      speaker: options.speaker,
+      inputMethod: options.inputMethod,
+      ocrNote
+    });
+    if (rendered.warnings.length) {
+      // Same "never apply/skip in silence" discipline as the sanitizer
+      // below — an unknown {variable} in a user-edited template is a typo
+      // the user can only find by reading a log.
+      console.warn(`[Prompt template] ${this.displayName}: ${rendered.warnings.join('; ')}`);
+    }
 
-CRITICAL RULES — follow all of them exactly:
-1. Output ONLY the translated text. No notes, no explanations, no added content.
-2. NEVER translate or modify: proper names, character names, game/book/movie titles, brand names, or technical terms. Keep them exactly as written.
-3. Preserve the speaker's tone, register, and emotional nuance.
-4. Translate naturally — not word-for-word, but meaning-for-meaning.
-5. Maintain consistency with any previously established terminology.`;
+    const messages = [{ role: 'system', content: rendered.text }];
 
-    const messages = [
-      {
-        role: 'system',
-        content: this.systemPrompt || defaultPrompt
-      }
-    ];
-
-    // Add few-shot example for better small model performance
-    if (!this.systemPrompt) {
-      if (sourceLangName === 'Japanese' && targetLangName === 'Spanish') {
-        messages.push({ role: 'user', content: 'こんにちは、元気？' });
-        messages.push({ role: 'assistant', content: 'Hola, ¿cómo estás?' });
-      } else if (sourceLangName === 'Japanese' && targetLangName === 'English') {
-        messages.push({ role: 'user', content: 'こんにちは、元気？' });
-        messages.push({ role: 'assistant', content: 'Hello, how are you?' });
+    // Few-shot examples — real chat turns, independent of whether the
+    // template is custom (see fewShotEnabled's own doc comment above for
+    // why this is no longer coupled to promptTemplate being non-empty).
+    if (this.fewShotEnabled) {
+      for (const example of getFewshotExamples(sourceLang, targetLang)) {
+        messages.push({ role: 'user', content: example.user });
+        messages.push({ role: 'assistant', content: example.assistant });
       }
     }
 
-    // Add context history for better translation quality
-    for (const ctx of options.context || []) {
-      messages.push({ role: 'user', content: ctx.source });
-      messages.push({ role: 'assistant', content: ctx.translation });
+    // v3.13.59: the line to translate rides in the system prompt itself
+    // ONLY if the template explicitly references {sentence} (a power-user
+    // escape hatch for a completion-style template) — otherwise it's
+    // appended here as the final `user` turn, same as every template
+    // shipped with Tuhua (none of the four presets reference {sentence}).
+    // This — not a hardcoded "Input: {TEXT}" — is what v3.13.55's Fase 0
+    // fix pointed at doing properly.
+    if (!rendered.containsSentence) {
+      messages.push({ role: 'user', content: text });
     }
-
-    messages.push({ role: 'user', content: text });
 
     const headers = { 'Content-Type': 'application/json' };
     // v3.13.56: only send Authorization when there's actually a key to send.

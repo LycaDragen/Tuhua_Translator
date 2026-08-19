@@ -39,7 +39,9 @@ class OpenAIEngine extends OpenAICompatEngine {
       // request outright is correct there, silently calling OpenAI's API
       // with their key would not be.
       baseUrl: options.baseUrl || provider.baseUrl,
-      systemPrompt: options.systemPrompt || '',
+      // v3.13.59 (Fase 4): renamed from systemPrompt — see llm-base.js.
+      promptTemplate: options.promptTemplate || '',
+      fewShotEnabled: options.fewShotEnabled,
       timeout: 30000,
       supportedLanguages: [
         'ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh', 'ar', 'hi', 'th', 'vi'

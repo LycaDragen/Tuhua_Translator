@@ -23,6 +23,7 @@ const ProfileStore = require('../services/profiles/profile-store');
 const RegexFilterService = require('../services/regex-filter');
 const HookCleaningSettingsService = require('../services/hook-cleaning-settings');
 const llmProviders = require('../services/translation/llm-providers');
+const promptPresets = require('../services/translation/prompt-presets');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -90,7 +91,20 @@ app.whenReady().then(() => {
       deeplLanguageFeatures: null,
       maxContextHistory: 5,
       historyLimit: 5,
+      // v3.13.59 (LLM engine overhaul, Fase 4): kept as a default (not
+      // deleted) purely so the one-time migration below has something to
+      // read from on an existing install — nothing in the app reads
+      // `systemPrompt` for translation anymore, see promptTemplate below.
       systemPrompt: '',
+      // '' means "use prompt-presets.js's DEFAULT_TEMPLATE" — see
+      // llm-base.js/prompt-template.js. Global only for now; a per-profile
+      // override is designed (see the plan) but not wired until Fase 7
+      // injects profileStore into the pipeline.
+      promptTemplate: '',
+      // Independent of promptTemplate — see fewShotEnabled's doc comment
+      // in llm-base.js for why the old `if (!systemPrompt)` coupling was
+      // a real bug (a custom prompt silently killed few-shot).
+      llmFewShot: true,
       // v3.13.57 (LLM engine overhaul, Fase 2): rollback interruptor for
       // the LLM output sanitizer (llm-output.js) — set false to fall back
       // to a bare .trim() with none of its heuristics.
@@ -173,6 +187,15 @@ app.whenReady().then(() => {
   if (seededProviderKeys) {
     store.set('llmProviderKeys', seededProviderKeys);
     log.info('Seeded llmProviderKeys from legacy openaiKey.', { providers: Object.keys(seededProviderKeys) });
+  }
+
+  // v3.13.59 (LLM engine overhaul, Fase 4): same one-time seed pattern —
+  // promotes a non-empty legacy `systemPrompt` into `promptTemplate`
+  // verbatim. See prompt-presets.js's seedPromptTemplateFromLegacySystemPrompt.
+  const seededPromptTemplate = promptPresets.seedPromptTemplateFromLegacySystemPrompt(store.get());
+  if (seededPromptTemplate !== null) {
+    store.set('promptTemplate', seededPromptTemplate);
+    log.info('Seeded promptTemplate from legacy systemPrompt.');
   }
 
   const settings = store.get();
