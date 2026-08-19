@@ -47,14 +47,53 @@
             cursor: move;
             z-index: 10;
         }
+        /* v3.13.51: top-right label + the new "add glossary term" button
+           share a row now (see #top-right-controls below) instead of
+           .label being independently positioned.
+           v3.13.53: explicit drag added — real bug: this div sits ABOVE
+           .drag-area (z-index 11 vs 10) but is a SIBLING of it, not a
+           descendant, so it never inherited .drag-area's drag region.
+           The "OUTPUT" label (and any empty space around it) was
+           silently undraggable — exactly the dead-zone Lyca reported.
+           #glossary-btn's own no-drag below still overrides this for
+           just the button, so it stays clickable. */
+        #top-right-controls {
+            position: absolute;
+            top: 5px;
+            right: 8px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            z-index: 11;
+            -webkit-app-region: drag;
+        }
         .label {
             font-size: 9px;
             text-transform: uppercase;
             letter-spacing: 0.1em;
             color: rgba(255, 255, 255, 0.3);
-            position: absolute;
-            top: 6px;
-            right: 10px;
+        }
+        /* v3.13.51: opens the same "save a glossary term" flow as
+           right-clicking a word (see requestGlossaryButton below), but
+           without implying any specific word is the one being saved —
+           real feedback: right-click alone made the user expect the
+           clicked word to be what gets saved, which stopped being true
+           once Término became its own editable field. -webkit-app-region:
+           no-drag is required — without it this sits inside the overlay's
+           own drag area and clicks would just move the window instead. */
+        #glossary-btn {
+            -webkit-app-region: no-drag;
+            background: none;
+            border: none;
+            padding: 0;
+            font-size: 11px;
+            line-height: 1;
+            color: rgba(16, 185, 129, 0.55);
+            cursor: pointer;
+            transition: color 0.15s ease;
+        }
+        #glossary-btn:hover {
+            color: rgba(16, 185, 129, 1);
         }
         .target-lang-badge {
             font-size: 9px;
@@ -103,6 +142,12 @@
         .theme-light .label {
             color: rgba(0, 0, 0, 0.3);
         }
+        .theme-light #glossary-btn {
+            color: rgba(5, 150, 105, 0.6);
+        }
+        .theme-light #glossary-btn:hover {
+            color: rgba(5, 150, 105, 1);
+        }
         .theme-light #text-content {
             text-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
         }
@@ -112,7 +157,10 @@
     <div id="box" class="theme-dark">
         <div class="drag-area"></div>
         <div class="target-lang-badge" id="target-lang-badge"></div>
-        <div class="label">OUTPUT</div>
+        <div id="top-right-controls">
+            <button id="glossary-btn" title="Agregar término al glosario">📖+</button>
+            <span class="label">OUTPUT</span>
+        </div>
         <div id="text-content" style="font-size: 24px; font-family: 'Segoe UI', 'Noto Sans JP', sans-serif;">Waiting for translation...</div>
     </div>
     <script>
@@ -185,14 +233,33 @@
                 }
             }
 
+            // v3.13.46: remembers the ORIGINAL (source-language) line
+            // behind whatever translation is currently shown, so a
+            // right-click can hand it to the save-to-glossary prompt —
+            // that's what lets the prompt offer the real source term
+            // instead of (wrongly) treating the clicked TRANSLATED word
+            // as the glossary entry's source.
+            let currentOriginalText = '';
+
             content.addEventListener('contextmenu', (e) => {
                 const wordEl = e.target.closest('.word');
                 if (!wordEl || !wordEl.dataset.word) return;
                 e.preventDefault();
-                overlay.requestWordContextMenu(wordEl.dataset.word);
+                overlay.requestWordContextMenu(wordEl.dataset.word, currentOriginalText);
             });
 
+            // v3.13.51: the toolbar button — same flow, but with no word
+            // attached (see the ipc-handlers.js comment on
+            // overlay-word-context-menu for why that matters).
+            const glossaryBtn = document.getElementById('glossary-btn');
+            if (glossaryBtn) {
+                glossaryBtn.addEventListener('click', () => {
+                    overlay.requestWordContextMenu('', currentOriginalText);
+                });
+            }
+
             overlay.onOutputText((data) => {
+                currentOriginalText = data.originalText || '';
                 renderClickableText(data.text || '');
                 if (data.targetLang && langBadge) {
                     langBadge.innerText = LANG_NAMES[data.targetLang] || data.targetLang.toUpperCase();

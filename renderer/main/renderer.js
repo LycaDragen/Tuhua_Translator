@@ -772,6 +772,15 @@
             if (method !== 'ocr' && ocrSessionActive) {
                 stopOcrSession();
             }
+            // v3.13.50: mirror what the backend now does on this same
+            // switch (see the OCR branch of save-settings' input-method
+            // handling in ipc-handlers.js) — without this, ocrSessionActive
+            // would go stale (stay false even though a session is really
+            // running), and a LATER switch away from OCR wouldn't call
+            // stopOcrSession() to clean up the Settings panel's status text.
+            if (method === 'ocr' && translationActive && inputMethodInitialized) {
+                ocrSessionActive = true;
+            }
 
             // v3.11.3: Start/stop XUAT server when switching methods
             // NOTE: We do NOT start/stop the server here — saveSettings handles it.

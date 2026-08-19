@@ -12,59 +12,147 @@
             -webkit-user-select: none;
             font-family: 'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif;
         }
+        /* v3.13.52: same shape/corner as output-overlay.html/
+           capture-area.html (the asymmetric 10px 0 10px 10px corner is
+           that family's signature) — real feedback was that the
+           previous gradient/pill-badge/icon-button redesign read as a
+           different visual system than the rest of Tuhua's overlay
+           windows.
+           v3.13.53: background is now fully OPAQUE (solid, no alpha,
+           no blur) — real feedback: unlike the translation overlay
+           (which deliberately stays translucent so it doesn't block the
+           game underneath), this is a form the user is actively editing
+           and needs to read clearly without whatever's behind it
+           showing through. #1a1d24 matches the dark surface tone used
+           elsewhere in Tuhua (renderer/main's dark-800). */
         #box {
-            background-color: rgba(20, 22, 28, 0.96);
-            backdrop-filter: blur(10px);
-            -webkit-backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 10px;
+            background-color: #1a1d24;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 10px 0 10px 10px;
             color: white;
-            padding: 12px 14px;
+            padding: 0 14px 12px 14px;
             height: 100vh;
-            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
             display: flex;
             flex-direction: column;
-            gap: 8px;
+            gap: 7px;
         }
+        /* v3.13.52: draggable, like output-overlay's own .drag-area —
+           real bug: this window had no way to move it at all before.
+           v3.13.53: padding-top moved from #box onto this row instead
+           of staying as #box's own top padding — real bug: a plain
+           app-region:drag on a flex child's box does NOT cover its
+           parent's padding, so the strip right at the window's actual
+           top edge (where a user naturally grabs first) fell outside
+           #word-row's hit region entirely and silently refused to drag. */
         #word-row {
             display: flex;
-            align-items: baseline;
+            align-items: center;
             gap: 6px;
             min-width: 0;
+            padding: 12px 0 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            -webkit-app-region: drag;
+            cursor: move;
         }
         #word-label {
-            font-size: 16px;
-            font-weight: 600;
+            font-size: 10.5px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(255, 255, 255, 0.4);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
         #scope-badge {
-            font-size: 10px;
-            color: rgba(16, 185, 129, 0.9);
-            background: rgba(16, 185, 129, 0.15);
-            padding: 1px 6px;
-            border-radius: 999px;
+            font-size: 9px;
+            letter-spacing: 0.05em;
+            color: rgba(16, 185, 129, 0.8);
             white-space: nowrap;
             flex-shrink: 0;
+            margin-left: auto;
         }
-        #meaning-input {
+        .field-label {
+            font-size: 9px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: rgba(255, 255, 255, 0.3);
+            margin-bottom: 3px;
+        }
+        .field-block { display: flex; flex-direction: column; }
+        #term-input, #meaning-input {
             width: 100%;
-            padding: 7px 8px;
+            padding: 6px 8px;
             border-radius: 6px;
             border: 1px solid rgba(255, 255, 255, 0.15);
             background: rgba(255, 255, 255, 0.06);
             color: white;
             font-size: 13px;
             outline: none;
+            -webkit-app-region: no-drag;
         }
-        #meaning-input:focus {
+        #term-input:focus, #meaning-input:focus {
             border-color: rgba(16, 185, 129, 0.6);
         }
+        #term-input::placeholder, #meaning-input::placeholder {
+            color: rgba(255, 255, 255, 0.28);
+        }
+        /* v3.13.46: the clickable original-line row — same interaction
+           as the output overlay's own clickable translated words, so a
+           user who's already used that once understands this one for
+           free. Only shown when the source language segments cleanly by
+           whitespace (see overlay-word-context-menu in ipc-handlers.js). */
+        #original-line-wrap.hidden { display: none; }
+        #original-line {
+            max-height: 44px;
+            overflow-y: auto;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 2px 4px;
+            padding: 4px 6px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 12px;
+            line-height: 1.5;
+            -webkit-app-region: no-drag;
+        }
+        #original-line .word {
+            cursor: pointer;
+            border-radius: 3px;
+            padding: 0 2px;
+            transition: background-color 0.15s ease;
+        }
+        #original-line .word:hover {
+            background-color: rgba(16, 185, 129, 0.25);
+        }
+        #original-line .word.picked {
+            background-color: rgba(16, 185, 129, 0.4);
+        }
+        #mode-select {
+            width: 100%;
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: rgba(255, 255, 255, 0.06);
+            color: rgba(255, 255, 255, 0.85);
+            font-size: 11.5px;
+            outline: none;
+            font-family: inherit;
+            cursor: pointer;
+            -webkit-app-region: no-drag;
+        }
+        #mode-select:focus {
+            border-color: rgba(16, 185, 129, 0.6);
+        }
+        #mode-select option {
+            background: #1a1c22;
+            color: white;
+        }
         #error-msg {
-            font-size: 11px;
+            font-size: 10.5px;
             color: #f87171;
-            min-height: 14px;
+            min-height: 13px;
         }
         #error-msg.hidden { visibility: hidden; }
         .buttons {
@@ -72,11 +160,16 @@
             justify-content: flex-end;
             gap: 6px;
             margin-top: auto;
+            -webkit-app-region: no-drag;
         }
+        /* v3.13.52: same button treatment as the rest of Tuhua's UI
+           (renderer.js's own showTextPrompt/showConfirm popups use the
+           identical bg-emerald-600/hover:bg-emerald-500 pair — #059669/
+           #10b981 — and rounded-md/font-bold/text-xs proportions). */
         button {
             font-size: 11px;
-            font-weight: 600;
-            padding: 6px 12px;
+            font-weight: 700;
+            padding: 6px 13px;
             border-radius: 6px;
             border: none;
             cursor: pointer;
@@ -92,7 +185,7 @@
             color: white;
         }
         #save-btn:hover { background: #10b981; }
-        #save-btn:disabled { opacity: 0.6; cursor: default; }
+        #save-btn:disabled { opacity: 0.55; cursor: default; }
     </style>
 </head>
 <body>
@@ -101,7 +194,23 @@
             <span id="word-label"></span>
             <span id="scope-badge"></span>
         </div>
-        <input type="text" id="meaning-input" autocomplete="off" spellcheck="false">
+        <div class="field-block">
+            <span class="field-label" id="term-field-label"></span>
+            <input type="text" id="term-input" autocomplete="off" spellcheck="false">
+        </div>
+        <div id="original-line-wrap" class="hidden field-block">
+            <span class="field-label" id="original-line-hint"></span>
+            <div id="original-line"></div>
+        </div>
+        <div class="field-block">
+            <span class="field-label" id="meaning-field-label"></span>
+            <input type="text" id="meaning-input" autocomplete="off" spellcheck="false">
+        </div>
+        <select id="mode-select">
+            <option value="exact" id="mode-option-exact"></option>
+            <option value="case-insensitive" id="mode-option-case-insensitive" selected></option>
+            <option value="regex" id="mode-option-regex"></option>
+        </select>
         <div id="error-msg" class="hidden"></div>
         <div class="buttons">
             <button id="cancel-btn"></button>
@@ -112,10 +221,21 @@
         const overlay = window.tuhuaOverlay;
         const wordLabel = document.getElementById('word-label');
         const scopeBadge = document.getElementById('scope-badge');
-        const input = document.getElementById('meaning-input');
+        const termFieldLabel = document.getElementById('term-field-label');
+        const meaningFieldLabel = document.getElementById('meaning-field-label');
+        const termInput = document.getElementById('term-input');
+        const originalLineWrap = document.getElementById('original-line-wrap');
+        const originalLineHint = document.getElementById('original-line-hint');
+        const originalLine = document.getElementById('original-line');
+        const meaningInput = document.getElementById('meaning-input');
+        const modeSelect = document.getElementById('mode-select');
+        const modeOptionExact = document.getElementById('mode-option-exact');
+        const modeOptionCaseInsensitive = document.getElementById('mode-option-case-insensitive');
+        const modeOptionRegex = document.getElementById('mode-option-regex');
         const errorMsg = document.getElementById('error-msg');
         const saveBtn = document.getElementById('save-btn');
         const cancelBtn = document.getElementById('cancel-btn');
+        const fields = [termInput, originalLineWrap, meaningInput, modeSelect, document.querySelector('.buttons')];
 
         let ctx = null;
 
@@ -124,38 +244,97 @@
             errorMsg.classList.remove('hidden');
         }
 
+        // v3.13.46: same whitespace-split-into-spans trick as the output
+        // overlay's renderClickableText — clicking a word here fills
+        // term-input instead of opening a menu. Only called when
+        // sourceClickable is true (whitespace-segmentable source
+        // language — see overlay-word-context-menu in ipc-handlers.js).
+        function renderOriginalLine(text) {
+            originalLine.innerHTML = '';
+            const parts = String(text).split(/(\s+)/);
+            for (const part of parts) {
+                if (part === '' || /^\s+$/.test(part)) continue;
+                const span = document.createElement('span');
+                span.className = 'word';
+                span.textContent = part;
+                const clean = part.replace(/^[¿¡"'“‘(\[]+|["'”’.,!?;:)\]]+$/g, '');
+                span.dataset.word = clean || part;
+                span.onclick = () => {
+                    originalLine.querySelectorAll('.word.picked').forEach((el) => el.classList.remove('picked'));
+                    span.classList.add('picked');
+                    termInput.value = span.dataset.word;
+                    errorMsg.classList.add('hidden');
+                };
+                originalLine.appendChild(span);
+            }
+        }
+
         if (overlay && overlay.onWordPromptContext) {
             overlay.onWordPromptContext((data) => {
                 ctx = data;
-                wordLabel.textContent = data.word;
-                wordLabel.title = data.word;
+                const strings = data.strings || {};
+                // v3.13.51: no specific word when opened from the
+                // overlay's toolbar button — show a generic header
+                // instead of an empty pair of quotes.
+                wordLabel.textContent = data.word ? `"${data.word}"` : (strings.genericHeader || 'Nuevo término de glosario');
+                if (data.word) wordLabel.title = data.word;
                 scopeBadge.textContent = data.scopeLabel;
-                input.placeholder = (data.strings && data.strings.placeholder) || '';
-                saveBtn.textContent = (data.strings && data.strings.save) || 'Guardar';
-                cancelBtn.textContent = (data.strings && data.strings.cancel) || 'Cancelar';
-                input.focus();
+                termFieldLabel.textContent = strings.termLabel || 'Término';
+                meaningFieldLabel.textContent = strings.meaningLabel || 'Nuevo significado';
+                termInput.placeholder = strings.termPlaceholder || '';
+                // v3.13.47: NOT pre-filled with the clicked translated
+                // word — real feedback was that seeing your own
+                // target-language word sitting in "what should this mean"
+                // reads as "confirm this," when the whole point of the
+                // field is to let you assign a DIFFERENT meaning than
+                // what the engine already gave it.
+                meaningInput.placeholder = strings.placeholder || '';
+                meaningInput.value = '';
+                termInput.value = '';
+                saveBtn.textContent = strings.save || 'Guardar';
+                cancelBtn.textContent = strings.cancel || 'Cancelar';
+                modeOptionExact.textContent = strings.modeExact || 'Exact Match';
+                modeOptionCaseInsensitive.textContent = strings.modeCaseInsensitive || 'Case Insensitive';
+                modeOptionRegex.textContent = strings.modeRegex || 'Regex Pattern';
+
+                if (data.sourceClickable && data.originalText) {
+                    originalLineWrap.classList.remove('hidden');
+                    originalLineHint.textContent = strings.clickHint || '';
+                    renderOriginalLine(data.originalText);
+                } else {
+                    originalLineWrap.classList.add('hidden');
+                }
+                termInput.focus();
             });
         }
 
         cancelBtn.onclick = () => window.close();
         document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.close(); });
-        input.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveBtn.click(); });
-        input.addEventListener('input', () => errorMsg.classList.add('hidden'));
+        termInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') meaningInput.focus(); });
+        meaningInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveBtn.click(); });
+        termInput.addEventListener('input', () => errorMsg.classList.add('hidden'));
+        meaningInput.addEventListener('input', () => errorMsg.classList.add('hidden'));
 
         saveBtn.onclick = async () => {
             if (!ctx || !overlay || !overlay.saveGlossaryEntry) return;
-            const meaning = input.value.trim();
+            const term = termInput.value.trim();
+            const meaning = meaningInput.value.trim();
             const strings = ctx.strings || {};
+            if (!term) {
+                showError(strings.emptyTerm || 'Escribí el término original primero');
+                termInput.focus();
+                return;
+            }
             if (!meaning) {
                 showError(strings.emptyError || 'Escribí un significado primero');
-                input.focus();
+                meaningInput.focus();
                 return;
             }
             errorMsg.classList.add('hidden');
             saveBtn.disabled = true;
             try {
                 const result = await overlay.saveGlossaryEntry(
-                    { source: ctx.word, target: meaning, mode: 'case-insensitive', enabled: true },
+                    { source: term, target: meaning, mode: modeSelect.value, enabled: true },
                     ctx.scope
                 );
                 if (!result || result.success === false) {
@@ -163,9 +342,12 @@
                     saveBtn.disabled = false;
                     return;
                 }
+                // v3.13.52: back to a simple text swap (no separate
+                // checkmark view) — matches the rest of Tuhua's small
+                // popups, which just confirm in place rather than
+                // switching to a whole different layout.
                 wordLabel.textContent = strings.success || 'Guardado ✓';
-                input.style.display = 'none';
-                document.querySelector('.buttons').style.display = 'none';
+                fields.forEach((el) => { if (el) el.style.display = 'none'; });
                 scopeBadge.style.display = 'none';
                 setTimeout(() => window.close(), 700);
             } catch (e) {
