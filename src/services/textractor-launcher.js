@@ -25,13 +25,14 @@
  *   - Hook discovery and selector UI
  *   - Stdin-only attach (no CLI arguments)
  */
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, exec } = require('child_process');
 const { StringDecoder } = require('string_decoder');
 const EventEmitter = require('events');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const textCleaning = require('./text-cleaning');
+const { detectGameEngine } = require('./game-engine-detect');
 
 /**
  * Interpret Windows exit codes into human-readable messages.
@@ -345,6 +346,11 @@ class TextractorLauncher extends EventEmitter {
     // deleting the fallback.
     this._legacyParseCount = 0;
     this._gamePid = null;
+    // v3.13.76: result of detectGameEngine() for the current game process,
+    // set async right after attach — null until it resolves (or forever, if
+    // resolution fails silently, see _resolveExePathFromPid). Surfaced to the
+    // UI via _emitHookDiscovery()'s `gameEngine` payload field.
+    this._gameEngine = null;
     this._launchTime = null;
     this._diagnosticTimer = null;
     // v3.13.29: previously bare, uncancelable setTimeout calls — see
@@ -858,6 +864,103 @@ class TextractorLauncher extends EventEmitter {
       console.warn(`[TextractorLauncher] PID liveness check failed (non-fatal): ${e.message}`);
       return null;
     }
+  }
+
+  /**
+   * v3.13.76: resolve a running process's own .exe path from its PID, so the
+   * game engine can be detected (see _detectAndEmitGameEngine below) without
+   * the user ever having to point Tuhua at the game folder separately —
+   * Textractor already requires a PID to attach, so this is "free" info.
+   *
+   * Hermano directo de _checkPidIsRunning above, with one deliberate
+   * deviation: this uses async `exec`, not `execSync`. `_checkPidIsRunning`
+   * can afford execSync because `tasklist` is a native binary that answers
+   * in ~50ms; PowerShell cold-starts in 1-2s, and execSync-ing that would
+   * block the main process's event loop for that whole window right at
+   * spawn time — a real regression, not a theoretical one. Same
+   * fail-silently contract as _checkPidIsRunning: every failure path calls
+   * back with `null` and only warns, never touches the attach itself.
+   *
+   * @param {number} pid
+   * @param {(exePath: string|null) => void} cb
+   */
+  _resolveExePathFromPid(pid, cb) {
+    if (process.platform !== 'win32') return cb(null);
+    if (!Number.isInteger(pid) || pid <= 0) return cb(null);
+
+    const warnUnresolved = () => {
+      // v3.13.76: specific message on purpose, not a generic warn — without
+      // it, "engine detection never fired" is indistinguishable between two
+      // causes with opposite fixes: the engine genuinely being unknown (add
+      // a marker) vs. Tuhua simply lacking permission to read the path
+      // (elevate it). The elevated-game case is the likely one in practice —
+      // plenty of people launch VNs as admin.
+      console.warn(`[EngineDetect] Cannot resolve exe path for PID ${pid} — process may be elevated (try running Tuhua as admin), or the PID already died. Engine detection skipped for this session.`);
+      cb(null);
+    };
+
+    // Primary: PowerShell Get-Process. -NoProfile -NonInteractive is not
+    // optional — without them a user's PowerShell profile can print prose
+    // to stdout ahead of the value, or the shell can sit waiting on input.
+    exec(
+      `powershell -NoProfile -NonInteractive -Command "(Get-Process -Id ${pid} -ErrorAction Stop).Path"`,
+      { encoding: 'utf8', windowsHide: true, timeout: 5000 },
+      (err, stdout) => {
+        const resolved = (stdout || '').trim();
+        if (!err && resolved.toLowerCase().endsWith('.exe')) return cb(resolved);
+
+        // Fallback: WMIC. Deprecated on Windows 11 24H2+, so it goes second,
+        // but still present on most machines today.
+        exec(
+          `wmic process where processid=${pid} get ExecutablePath /value`,
+          { encoding: 'utf8', windowsHide: true, timeout: 5000 },
+          (err2, stdout2) => {
+            const m = /ExecutablePath=(.+\.exe)/i.exec(stdout2 || '');
+            if (!err2 && m) return cb(m[1].trim());
+            warnUnresolved();
+          }
+        );
+      }
+    );
+  }
+
+  /**
+   * v3.13.76: proactively detect the target game's engine right after
+   * attach, and — if it's a class of engine Textractor structurally cannot
+   * read (or one XUAT handles far better) — surface that immediately
+   * instead of leaving the user to burn a 60s hook-discovery window (or
+   * several arch-fallback cycles) figuring it out by trial and error. This
+   * is what closes the Amorous/FNA case: real diagnostics in seconds, not a
+   * 10-minute dead end. See game-engine-detect.js for the detection logic
+   * and the anti-annoyance confidence gate; see the plan this shipped from
+   * (ya-veo-claro-ocr-cuddly-quokka.md) for why this is proactive
+   * (file-marker-based, works even with zero hooks) rather than reactive
+   * (waiting to see whether hooks "look like" dialogue — already documented
+   * elsewhere in this file as too fragile an axis, see the 10s→3-stage
+   * escalation above _attemptArchFallback).
+   *
+   * Fire-and-forget from launch()'s perspective: never blocks or delays the
+   * spawn, and a failure to resolve the exe path (see
+   * _resolveExePathFromPid) just means no advisory ever appears for this
+   * session — degrades to exactly today's behavior, silently.
+   *
+   * @param {number} pid
+   */
+  _detectAndEmitGameEngine(pid) {
+    this._resolveExePathFromPid(pid, (exePath) => {
+      if (!exePath) return;
+      // A relaunch/arch-fallback or a fresh attach to a different game may
+      // have happened while the async resolve above was in flight — only
+      // apply the result if it's still for the PID we asked about.
+      if (this._gamePid !== pid) return;
+      this._gameEngine = detectGameEngine(exePath);
+      if (this._gameEngine.adviceKey) {
+        // Don't wait for the next scheduled discovery update (debounced
+        // every 500ms, or the 3s phase-complete timer) — an advisory this
+        // actionable should reach the UI as soon as it's known.
+        this._emitHookDiscovery();
+      }
+    });
   }
 
   validatePath(cliPath) {
@@ -2037,7 +2140,20 @@ class TextractorLauncher extends EventEmitter {
       autoSelectedHookKey: this._autoSelectedHookKey,
       activeHookKey,
       totalHooks: hooks.length,
-      noRealHookFound
+      noRealHookFound,
+      // v3.13.76: `gameEngine` (see _detectAndEmitGameEngine) rides on this
+      // existing, already-allowlisted event instead of getting a channel of
+      // its own — deliberate, to keep IPC surface flat (see
+      // test-ipc-channels.js checks 1/4/5). The cost: this couples "what
+      // engine the game is" to "what hooks exist", and this function stops
+      // being pure over just `this._hooks`.
+      // TRIGGER TO PROMOTE THIS TO ITS OWN CHANNEL: the moment the advisory
+      // needs to appear outside the Textractor flow — OCR or XUAT mode,
+      // where TextractorLauncher never runs at all, so this event is never
+      // emitted and the advisory would simply never reach those screens.
+      // Until then, this coupling is correct: the advisory only ever needs
+      // to be seen from here.
+      gameEngine: this._gameEngine
     });
   }
 
@@ -2759,6 +2875,16 @@ class TextractorLauncher extends EventEmitter {
     // resolvedPath naturally yields the other arch's label.
     if (pidRunning !== false) {
       this.emit('search-started', { arch: this._detectArch(resolvedPath), durationMs: ARCH_FALLBACK_CHECK_MAX_MS });
+
+      // v3.13.76: detect the game's engine right as the discovery window
+      // opens, not reactively after it — see _detectAndEmitGameEngine's doc.
+      // Reset first: a fresh launch() (new PID) must not keep showing a
+      // stale advisory from whatever game was attached before. Re-running
+      // this on an _attemptArchFallback retry (same PID) just re-resolves
+      // the same result — a redundant PowerShell call, not a correctness
+      // issue, and far cheaper than the 60s it's saving the user from.
+      this._gameEngine = null;
+      this._detectAndEmitGameEngine(gamePid);
     }
 
     try {

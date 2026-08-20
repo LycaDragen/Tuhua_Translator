@@ -22,6 +22,7 @@ const os = require('os');
 const { EventEmitter } = require('events');
 const axios = require('axios');
 const { execSync } = require('child_process');
+const { detectGameEngine } = require('./game-engine-detect');
 
 class XuatInstaller extends EventEmitter {
   constructor() {
@@ -30,105 +31,21 @@ class XuatInstaller extends EventEmitter {
   }
 
   /**
-   * Detect if the selected path is a Unity game
-   * v3.11.9: Simplified IL2CPP detection — reduced log spam.
-   * All detection methods still run but only a single summary line is logged.
+   * Detect if the selected path is a Unity game.
+   * v3.13.76: delegates to game-engine-detect.js's detectGameEngine(), the
+   * shared/pure detector also used by the proactive "Textractor can't read
+   * this game" advisory (textractor-launcher.js). This method's signature
+   * and legacy return shape (isUnity/gameDir/gameName/dataDir/hasUnityPlayer/
+   * hasManaged/isIL2CPP) are kept identical on purpose — runFullInstall()
+   * below and the `xuat-detect-game` IPC handler (ipc-handlers.js) only ever
+   * read those 7 fields and don't need to change; detectGameEngine() returns
+   * them as a superset alongside the newer engine/family/confidence/advice
+   * fields neither of those two callers uses.
    * @param {string} exePath - Path to the game .exe
    * @returns {{isUnity: boolean, gameDir: string, gameName: string, dataDir: string|null, isIL2CPP: boolean}}
    */
   detectUnityGame(exePath) {
-    try {
-      const gameDir = path.dirname(exePath);
-      const exeName = path.basename(exePath, '.exe');
-
-      // List files in game directory
-      let dirFiles = [];
-      let dataFiles = [];
-      try {
-        dirFiles = fs.readdirSync(gameDir);
-      } catch (dirErr) {
-        console.error(`[XUAT] CRITICAL: Cannot read game directory "${gameDir}": ${dirErr.message}`);
-      }
-
-      // Look for *_Data folder next to the exe (standard Unity convention)
-      const dataDir = path.join(gameDir, `${exeName}_Data`);
-      const dataDirExists = fs.existsSync(dataDir);
-
-      if (dataDirExists) {
-        try {
-          dataFiles = fs.readdirSync(dataDir);
-        } catch (e) { /* ignore */ }
-      }
-
-      // Also check for UnityPlayer.dll as a secondary indicator
-      const hasUnityPlayer = fs.existsSync(path.join(gameDir, 'UnityPlayer.dll'));
-
-      // Check for Managed folder inside _Data
-      let hasManaged = false;
-      if (dataDirExists) {
-        hasManaged = fs.existsSync(path.join(dataDir, 'Managed'));
-      }
-
-      // ===== IL2CPP DETECTION =====
-      // Run all checks silently, then log a single summary line
-      let isIL2CPP = false;
-      const gameAssemblyPath = path.join(gameDir, 'GameAssembly.dll');
-      let detectionMethod = 'none';
-
-      // Check 1: GameAssembly.dll (primary IL2CPP indicator)
-      if (!isIL2CPP && fs.existsSync(gameAssemblyPath)) {
-        isIL2CPP = true;
-        detectionMethod = 'GameAssembly.dll (existsSync)';
-      }
-
-      // Check 3: Il2CppAssemblies folder in _Data
-      if (!isIL2CPP && dataDirExists && dataFiles.some(f => f.toLowerCase() === 'il2cppassemblies')) {
-        isIL2CPP = true;
-        detectionMethod = 'Il2CppAssemblies';
-      }
-
-      // Check 4: il2cpp_data folder in _Data
-      if (!isIL2CPP && dataDirExists && dataFiles.some(f => f.toLowerCase() === 'il2cpp_data')) {
-        isIL2CPP = true;
-        detectionMethod = 'il2cpp_data';
-      }
-
-      // Check 5: global-metadata.dat in _Data/il2cpp_data/Metadata/
-      if (!isIL2CPP && dataDirExists) {
-        const metadataPath = path.join(dataDir, 'il2cpp_data', 'Metadata', 'global-metadata.dat');
-        if (fs.existsSync(metadataPath)) {
-          isIL2CPP = true;
-          detectionMethod = 'global-metadata.dat';
-        }
-      }
-
-      // v3.11.9: Single summary log line instead of 12+ lines
-      console.log(`[XUAT] Game: ${exeName} | IL2CPP: ${isIL2CPP}${isIL2CPP ? ` (detected via ${detectionMethod})` : ' (Mono — no IL2CPP indicators found)'} | Data: ${dataDirExists} | Files: ${dirFiles.length}`);
-
-      const isUnity = dataDirExists || hasUnityPlayer;
-
-      return {
-        isUnity,
-        gameDir,
-        gameName: exeName,
-        dataDir: dataDirExists ? dataDir : null,
-        hasUnityPlayer,
-        hasManaged,
-        isIL2CPP
-      };
-    } catch (err) {
-      console.error(`[XUAT] detectUnityGame error: ${err.message}`);
-      return {
-        isUnity: false,
-        gameDir: path.dirname(exePath),
-        gameName: path.basename(exePath, '.exe'),
-        dataDir: null,
-        hasUnityPlayer: false,
-        hasManaged: false,
-        isIL2CPP: false,
-        error: err.message
-      };
-    }
+    return detectGameEngine(exePath);
   }
 
   /**

@@ -529,6 +529,10 @@
             // language's label, not whatever was cached from the last event.
             recomputeBadge();
 
+            // v3.13.76: same reason as recomputeBadge() right above — the
+            // game-engine advisory's text is computed, not [data-i18n].
+            renderEngineAdvice();
+
             // v3.13.40: same reason as recomputeBadge() above — the
             // profile cards' default-name label and "Default" badge are
             // computed strings (displayProfileName()), not static
@@ -3055,6 +3059,14 @@
             recomputeBadge();
             document.getElementById('btn-kill-cli').classList.add('hidden');
 
+            // v3.13.76: the advisory belongs to the PID that just died —
+            // without clearing it, the previous game's engine advisory
+            // survives into whatever gets attached next, at least until a
+            // fresh one arrives (which may take a while if the next game's
+            // engine detection resolves to `unknown`/silent).
+            _lastEngineAdvice = null;
+            renderEngineAdvice();
+
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
             const t = translations[currentLang] || translations['en'];
@@ -3340,6 +3352,11 @@
 
         // ===== HOOK SELECTOR (v3.8.22) =====
         let _discoveredHooks = []; // Cache of discovered hooks
+        // v3.13.76: sticky cache of the last gameEngine advisory — separate
+        // from _discoveredHooks because it must render even with zero hooks
+        // (the Ren'Py/Godot/FNA case: those engines can produce no hooks at
+        // all, but the advisory still has to show). See renderEngineAdvice().
+        let _lastEngineAdvice = null;
 
         function onHookSelected(hookKey) {
             // Send the hook selection to the backend
@@ -3383,7 +3400,7 @@
         }
 
         function updateHookSelector(data) {
-            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks, noRealHookFound }
+            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks, noRealHookFound, gameEngine }
             _discoveredHooks = data.hooks || [];
             const section = document.getElementById('hook-selector-section');
             const selector = document.getElementById('hook-selector');
@@ -3402,6 +3419,12 @@
             if (noRealWarning) {
                 noRealWarning.classList.toggle('hidden', !data.noRealHookFound);
             }
+
+            // v3.13.76: deliberately OUTSIDE the `_discoveredHooks.length > 0`
+            // gate above — the engine advisory (Ren'Py/Godot/FNA in
+            // particular) must be able to show up with ZERO hooks discovered.
+            if (data.gameEngine) _lastEngineAdvice = data.gameEngine;
+            renderEngineAdvice();
 
             countBadge.textContent = _discoveredHooks.length + ' hook' + (_discoveredHooks.length !== 1 ? 's' : '');
 
@@ -3462,6 +3485,54 @@
             if (activeHook) {
                 updateHookPreview(activeHook, !data.selectedHookKey);
             }
+        }
+
+        // v3.13.76: paint (or re-paint, e.g. on a language change) the
+        // proactive game-engine advisory from _lastEngineAdvice. Split out of
+        // updateHookSelector so changeLanguage() can call it too — the text
+        // is computed (has a runtime {engine}/{method} substitution), not
+        // [data-i18n], so a language switch would otherwise leave it stuck in
+        // whatever language it was first painted in.
+        function renderEngineAdvice() {
+            const box = document.getElementById('engine-advice');
+            const textEl = document.getElementById('engine-advice-text');
+            const btn = document.getElementById('engine-advice-action');
+            if (!box || !textEl || !btn) return;
+
+            const advice = _lastEngineAdvice;
+            if (!advice || !advice.adviceKey) {
+                box.classList.add('hidden');
+                return;
+            }
+
+            const t = translations[currentLang] || translations['en'];
+            const template = t[advice.adviceKey];
+            if (!template) {
+                box.classList.add('hidden');
+                return;
+            }
+            textEl.textContent = template.replace('{engine}', advice.engineLabel || advice.engine || '');
+            box.classList.remove('hidden');
+
+            if (advice.recommendedMethod && advice.recommendedMethod !== currentInputMethod) {
+                const methodLabel = t['method_' + advice.recommendedMethod] || advice.recommendedMethod;
+                const btnTemplate = t.engine_advice_switch_btn || '→ Switch to {method}';
+                btn.textContent = btnTemplate.replace('{method}', methodLabel);
+                btn.classList.remove('hidden');
+            } else {
+                btn.classList.add('hidden');
+            }
+        }
+
+        // v3.13.76: the advisory's action button — always an explicit click,
+        // never an automatic switch (Lyca's requirement: suggest, don't
+        // decide for the user).
+        function applyEngineAdvice() {
+            const method = _lastEngineAdvice && _lastEngineAdvice.recommendedMethod;
+            if (!method) return;
+            setInputMethod(method); // already persists via api.saveSettings({inputMethod})
+            const box = document.getElementById('engine-advice');
+            if (box) box.classList.add('hidden');
         }
 
         // ===== HELPERS =====
