@@ -151,6 +151,27 @@ check('custom-prompt-template-with-no-variables-renders-verbatim', async () => {
   return { pass, actual: messages };
 }, "A template with no {variables} at all is a valid, if minimal, template — renderPromptTemplate() must pass it through unchanged rather than erroring or mangling it.");
 
+check('sentence-embedded-template-omits-fewshot-even-when-enabled', async () => {
+  // Real bug found testing against a live Ollama server: fewShotEnabled
+  // defaults true independently of the template (see the check above), but
+  // a template that embeds {sentence} rides the whole line inside the
+  // `system` message and appends NO trailing `user` turn (see the
+  // containsSentence branch further down in llm-base.js). Pushing few-shot
+  // pairs in that case left the conversation ending on an `assistant`
+  // turn with nothing asking the model to respond — Ollama returned
+  // finish_reason 'stop' with empty content rather than erroring, so this
+  // was silent until traced deliberately. Few-shot must be skipped
+  // whenever the template already contains {sentence}.
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, promptTemplate: 'Translate this: {sentence}' });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const { messages } = http.calls[0].body;
+  const pass = messages.length === 1
+    && messages[0].role === 'system'
+    && messages[0].content === 'Translate this: こんにちは';
+  return { pass, actual: messages };
+}, 'A completion-style template ({sentence} embedded in system) must never end up with few-shot turns and no trailing user turn — that combination reliably produced an empty response against a real local server.');
+
 check('fewShotEnabled-false-disables-fewshot-independently-of-the-template', async () => {
   const http = fakeHttpClient(OK_RESPONSE);
   const engine = new OpenAIEngine('key', { httpClient: http, fewShotEnabled: false });

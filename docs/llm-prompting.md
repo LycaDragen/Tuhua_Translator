@@ -47,10 +47,15 @@ el bug real que motivó este sistema (`{TEXT}` viajando sin resolver al
 modelo).
 
 Si la plantilla usa `{sentence}` en algún punto, el texto a traducir viaja
-ahí y no se agrega ningún turno de chat aparte. Si no la usa (caso de los
-4 presets de fábrica), el texto viaja como el último turno `user`,
-después del prompt de sistema — mismo comportamiento que la app tenía
-antes de que existiera este sistema de plantillas.
+ahí y no se agrega ningún turno de chat aparte — tampoco los ejemplos
+few-shot (ver más abajo), aunque estén activados: agregarlos dejaría la
+conversación terminando en un turno `assistant` sin ningún `user` final
+pidiéndole nada al modelo, lo que en la práctica produce una respuesta
+vacía en vez de un error. Si la plantilla no usa `{sentence}` (caso de
+los 4 presets de fábrica), el texto viaja como el último turno `user`,
+después del prompt de sistema y los ejemplos few-shot si están activados
+— mismo comportamiento que la app tenía antes de que existiera este
+sistema de plantillas.
 
 ### Presets de fábrica
 
@@ -70,7 +75,9 @@ el texto guardado es byte-idéntico al de ese preset.
 
 ### Ejemplos few-shot
 
-Independiente de la plantilla — setting `llmFewShot` (default activado).
+Independiente de la plantilla — setting `llmFewShot` (default activado),
+excepto cuando la plantilla usa `{sentence}` (ver arriba): ahí se omiten
+siempre, sin importar el setting.
 Agrega 2 turnos de ejemplo por par de idiomas soportado (`ja→es`, `ja→en`,
 `zh→es`, `ko→en`, `en→es`) antes del texto a traducir, elegidos para
 enseñar honoríficos y traducción de fragmentos. Un par no cubierto por la

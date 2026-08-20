@@ -41,6 +41,16 @@ function isEngineClassCompatible(queryClass, storedClass) {
   return !(queryClass === 'llm' && storedClass === 'mt');
 }
 
+// v3.13.6x (Fase 9 testing follow-up, ronda 6): whether a TM entry was
+// produced by an LLM engine or an MT one, for entries written before
+// `engineClass` existed (Fase 7d) or that had it stamped blank. Falls back
+// to `originalEngine`, which every entry has carried since v3.11.23 —
+// unlike `engineClass`, it's never been optional.
+const LLM_ENGINE_NAMES = new Set(['openai', 'local-llm']);
+function resolveEntryClass(entry) {
+  return entry.engineClass || (LLM_ENGINE_NAMES.has(entry.originalEngine) ? 'llm' : 'mt');
+}
+
 // v3.13.6x (LLM engine overhaul, Fase 9 testing follow-up): found by real
 // testing (Lyca, Nekopara Vol.1) — reloading a save and comparing prompt
 // presets (Balanceado/Literal/Localizado) on the SAME line showed no
@@ -50,15 +60,27 @@ function isEngineClassCompatible(queryClass, storedClass) {
 // fewShotEnabled, see pipeline.js's _cacheVariant and cache.js's Fase 7c
 // header) — TM was only ever given `engineClass` (Fase 7d), never this.
 // Unlike engineClass's llm>mt asymmetry, there's no "better" variant here
-// — two prompts are just different — so this is a plain equality check.
-// Same "unknown never blocks" leniency as isEngineClassCompatible: an
-// entry written before this fix (no variant stored) stays reachable
-// rather than orphaning every pre-existing TM entry the moment this
-// ships. MT entries always carry variant '' (see _cacheVariant), so this
-// is a no-op for the non-LLM case either way.
-function isVariantCompatible(queryVariant, storedVariant) {
-  if (!queryVariant || !storedVariant) return true;
-  return queryVariant === storedVariant;
+// — two prompts are just different — so a real stored variant means a
+// plain equality check.
+//
+// v3.13.6x (Fase 9 testing follow-up, ronda 6): tightened. The original
+// "unknown never blocks" leniency (either side blank matches anything) was
+// found, by real testing across 3 sessions, to be the actual reason prompt-
+// preset comparisons looked broken in normal play: hundreds of TM entries
+// written before `variant` existed answered EVERY preset for the rest of
+// their 30-day TTL, silently. The leniency is still correct and still
+// needed for MT engines — DeepL/Google always carry `variant=''` by
+// construction (see `_cacheVariant`'s early return for non-glossaryPrompt
+// engines), so an MT entry must stay reachable no matter what an LLM query
+// asks for; orphaning those was never the goal. What must stop matching is
+// a BLANK-variant entry that an LLM engine actually wrote — that's "some
+// unknown prompt produced this," which is precisely the ambiguity a real
+// `variant` exists to resolve. `entry` is passed whole here (not just its
+// `.variant`) so this can call `resolveEntryClass()`.
+function isVariantCompatible(queryVariant, entry) {
+  if (!queryVariant) return true; // the query itself has no preference (e.g. an MT engine)
+  if (entry.variant) return queryVariant === entry.variant;
+  return resolveEntryClass(entry) === 'mt';
 }
 
 class TranslationMemory {
@@ -103,10 +125,16 @@ class TranslationMemory {
   }
 
   /**
-   * Exact match lookup.
-   * Returns translation string or null.
+   * v3.13.6x (Fase 9 testing follow-up, ronda 6): the entry-fetching guts of
+   * `get()`, factored out so `getWithFuzzy()` can read `entry.variant` for
+   * its diagnostic logging (pipeline.js's "Translation Memory ... hit"
+   * line) without duplicating the TTL-eviction/LRU-touch side effects, and
+   * without changing `get()`'s own return type (a bare string|null) — that
+   * shape is load-bearing for every existing caller/test
+   * (scripts/test-translation-memory.js compares `tm.get(...) === 'X'`
+   * directly, dozens of times).
    */
-  get(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
+  _getEntry(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
     if (!this.enabled) return null;
 
     const key = this._makeKey(text, srcLang, targetLang, profileId);
@@ -130,7 +158,7 @@ class TranslationMemory {
     }
 
     if (!isEngineClassCompatible(engineClass, entry.engineClass)) return null;
-    if (!isVariantCompatible(variant, entry.variant)) return null;
+    if (!isVariantCompatible(variant, entry)) return null;
 
     // Update LRU order
     const idx = order.indexOf(key);
@@ -140,7 +168,16 @@ class TranslationMemory {
       this.store.set('order', order);
     }
 
-    return entry.translation;
+    return entry;
+  }
+
+  /**
+   * Exact match lookup.
+   * Returns translation string or null.
+   */
+  get(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
+    const entry = this._getEntry(text, srcLang, targetLang, profileId, engineClass, variant);
+    return entry ? entry.translation : null;
   }
 
   /**
@@ -179,7 +216,7 @@ class TranslationMemory {
     // the way profileId was — filtered here instead of at index-build time.
     const candidates = allCandidates
       .filter((c) => isEngineClassCompatible(engineClass, c.engineClass))
-      .filter((c) => isVariantCompatible(variant, c.variant));
+      .filter((c) => isVariantCompatible(variant, c));
     if (candidates.length === 0) return null;
 
     const result = findBestMatch(text, candidates, this.fuzzyThreshold);
@@ -188,7 +225,12 @@ class TranslationMemory {
       return {
         translation: result.match.translation,
         score: result.score,
-        originalText: result.match.text
+        originalText: result.match.text,
+        // v3.13.6x (Fase 9 testing follow-up, ronda 6): `result.match` IS
+        // the candidate object built in _rebuildFuzzyIndex(), which already
+        // carries `variant` — threaded through here for the same
+        // diagnostic reason as _getEntry() below.
+        variant: result.match.variant || ''
       };
     }
 
@@ -207,9 +249,14 @@ class TranslationMemory {
    */
   getWithFuzzy(text, srcLang, targetLang, profileId = '', engineClass = '', variant = '') {
     // 1. Try exact match first (O(1), always preferred)
-    const exact = this.get(text, srcLang, targetLang, profileId, engineClass, variant);
-    if (exact) {
-      return { translation: exact, fuzzy: false };
+    // v3.13.6x (Fase 9 testing follow-up, ronda 6): reads the full entry
+    // (via _getEntry) instead of just the translation string, so the
+    // returned `variant` can tell pipeline.js's diagnostic log whether this
+    // hit came from a legacy (blank-variant) entry — see _getEntry's own
+    // comment for why get() itself keeps returning a bare string.
+    const exactEntry = this._getEntry(text, srcLang, targetLang, profileId, engineClass, variant);
+    if (exactEntry) {
+      return { translation: exactEntry.translation, fuzzy: false, variant: exactEntry.variant || '' };
     }
 
     // 2. Try fuzzy match (O(n), fallback)
@@ -232,7 +279,8 @@ class TranslationMemory {
         translation: fuzzyResult.translation,
         fuzzy: true,
         score: fuzzyResult.score,
-        originalText: fuzzyResult.originalText
+        originalText: fuzzyResult.originalText,
+        variant: fuzzyResult.variant || ''
       };
     }
 
@@ -341,7 +389,11 @@ class TranslationMemory {
         text: entry.sourceText,
         translation: entry.translation,
         engineClass: entry.engineClass || '',
-        variant: entry.variant || ''
+        variant: entry.variant || '',
+        // v3.13.6x (Fase 9 testing follow-up, ronda 6): resolveEntryClass()
+        // needs this to classify a legacy blank-`engineClass` candidate —
+        // see isVariantCompatible's header comment.
+        originalEngine: entry.originalEngine || ''
       });
     }
 

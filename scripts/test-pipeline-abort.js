@@ -98,6 +98,13 @@ function freshPipeline() {
   // v3.13.6x: debounceMs kept short so these checks run fast, not because
   // production ever sets it this low — the default (300ms) is untouched.
   const pipeline = new TranslationPipeline({ engine: 'openai', debounceMs: 15, sourceLang: 'ja', targetLang: 'es' });
+  // v3.13.6x (Fase 9 testing follow-up, ronda 6): this pipeline constructs
+  // REAL on-disk cache/TM stores (electron-store) — without clearing them,
+  // the new context/bypassMemory checks below would be nondeterministic
+  // across runs (a leftover entry from a previous run answering a
+  // "unique" text isn't actually unique against disk state).
+  pipeline.cache.clear();
+  pipeline.translationMemory.clear();
   return pipeline;
 }
 
@@ -172,6 +179,183 @@ check('an-aborted-primary-does-not-emit-an-error-event', async () => {
   const pass = errorEmitted === false;
   return { pass, actual: { errorEmitted } };
 }, 'Same discipline as v3.13.55\'s SUPERSEDED fix for the debounce-only case: routine, expected supersession must never paint `[Error] ...` on the overlay — see ipc-handlers.js\'s _handleText catch.');
+
+check('a-superseding-translateNow-call-aborts-the-previous-translateNow-call', async () => {
+  // Real bug found testing the prompt-preset comparison workflow (change
+  // preset → click ↻, repeated): translate()'s debounce entry point
+  // aborted a stale in-flight request since Fase 9, but translateNow() —
+  // what the ↻ button / Ctrl+Shift+R actually call via
+  // _retranslateCurrent() — never did. Two translateNow() calls fired
+  // close together both ran to completion uncancelled; whichever response
+  // arrived LAST silently won, unrelated to which was requested last.
+  const pipeline = freshPipeline();
+  const primary = fakeHangingEngine();
+  pipeline.engines['openai'] = primary;
+  pipeline.engines['google-free'] = fakeSpyEngine('google-free');
+
+  const uniqueText = `translatenow-abort-test-${Date.now()}-${Math.random()}`;
+  const p1 = pipeline.translateNow(uniqueText, {});
+  p1.catch(() => {});
+
+  await waitFor(() => primary.calls.length > 0);
+  pipeline.translateNow(`${uniqueText}-two`, {}).catch(() => {});
+
+  let p1Error = null;
+  try {
+    await p1;
+  } catch (e) {
+    p1Error = e;
+  }
+
+  const pass = p1Error && p1Error.code === 'SUPERSEDED';
+  return { pass, actual: { p1ErrorCode: p1Error?.code, p1ErrorMessage: p1Error?.message } };
+}, 'A second translateNow() call must cancel the first one\'s in-flight request the same way translate() already does — otherwise both race to the overlay and whichever HTTP response happens to arrive last wins, regardless of which was actually requested last.');
+
+// ─── Context-poisoning fix (ronda 6) ─────────────────────────────────────────
+// Real bug: every _doTranslate() resolution path pushes (text, result) into
+// contextMemory BEFORE returning — so retranslating line X used to hand the
+// engine a prompt containing "X → X's own prior translation" under a header
+// telling the model to stay consistent with it. See context-memory.js's
+// getExcluding() and this method's own comment in pipeline.js's _tryEngine().
+
+check('the-line-being-translated-is-never-present-in-the-context-passed-to-the-engine', async () => {
+  const pipeline = freshPipeline();
+  const primary = fakeSpyEngine('openai');
+  pipeline.engines['openai'] = primary;
+
+  const lineA = `ctx-fix-A-${Date.now()}-${Math.random()}`;
+  const lineB = `ctx-fix-B-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(lineA, {});
+  await pipeline.translateNow(lineB, {});
+  // Retranslate lineA — bypassMemory so it reaches the engine again despite
+  // being cached from the first call, exactly like the ↻ button does.
+  await pipeline.translateNow(lineA, { bypassMemory: true });
+
+  const lastCall = primary.calls[primary.calls.length - 1];
+  const sources = lastCall.options.context.map((c) => c.source);
+  const pass = lastCall.text === lineA && !sources.includes(lineA);
+  return { pass, actual: { text: lastCall.text, contextSources: sources } };
+}, 'Reproduces the exact bug: on unfixed code, this call\'s context contained "lineA → <lineA\'s own prior answer>" plus a "stay consistent with the recent lines above" instruction — a model copying it byte-for-byte was the EXPECTED result of that prompt, not a mystery.');
+
+check('context-passed-to-the-engine-still-contains-the-other-recent-lines', async () => {
+  // Guards against an over-broad fix (e.g. clearing the whole window
+  // instead of filtering one entry) — the OTHER recent lines are real
+  // scene context and must survive the exclusion.
+  const pipeline = freshPipeline();
+  const primary = fakeSpyEngine('openai');
+  pipeline.engines['openai'] = primary;
+
+  const lineA = `ctx-keep-A-${Date.now()}-${Math.random()}`;
+  const lineB = `ctx-keep-B-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(lineA, {});
+  await pipeline.translateNow(lineB, {});
+  await pipeline.translateNow(lineA, { bypassMemory: true });
+
+  const lastCall = primary.calls[primary.calls.length - 1];
+  const sources = lastCall.options.context.map((c) => c.source);
+  return { pass: sources.includes(lineB), actual: sources };
+});
+
+check('a-cache-hit-still-pushes-to-the-context-window', async () => {
+  const pipeline = freshPipeline();
+  const primary = fakeSpyEngine('openai');
+  pipeline.engines['openai'] = primary;
+  const line = `cache-push-test-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(line, {}); // engine call, pushes to context
+  const sizeAfterFirst = pipeline.contextMemory.size;
+  await pipeline.translateNow(line, {}); // SAME text, cache hit this time (no bypassMemory)
+  const sizeAfterSecond = pipeline.contextMemory.size;
+  const entries = pipeline.contextMemory.get();
+
+  const pass = sizeAfterFirst === 1 && sizeAfterSecond === 1 && entries.length === 1 && entries[0].source === line;
+  return { pass, actual: { sizeAfterFirst, sizeAfterSecond, entries } };
+}, "Guards against reintroducing v3.13.19's Bug A (cache hit doesn't feed the context window) — the investigation deliberately did NOT stop pushing on cache/TM hits; it fixed the READ side (getExcluding) and the duplicate-append side (push()'s replace-and-promote) instead.");
+
+// ─── bypassMemory plumbing (ronda 6) ─────────────────────────────────────────
+// Real bug: "Settings changed while text is on-screen — auto-retranslating
+// ..." in a real log was immediately followed by a silent TM exact hit —
+// the engine was never called at all, so a settings change (or the ↻
+// button) could echo back a stale answer instead of a fresh one.
+
+check('translateNow-with-bypassMemory-calls-the-engine-even-when-the-cache-holds-the-line', async () => {
+  const pipeline = freshPipeline();
+  const primary = fakeSpyEngine('openai');
+  pipeline.engines['openai'] = primary;
+  const line = `bypass-read-test-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(line, {}); // caches it
+  const callsBefore = primary.calls.length;
+  await pipeline.translateNow(line, { bypassMemory: true });
+  const callsAfter = primary.calls.length;
+
+  return { pass: callsAfter === callsBefore + 1, actual: { callsBefore, callsAfter } };
+}, 'The ↻ button and the settings-change auto-retranslate are explicit "redo this now" requests — they must actually reach the engine, not silently echo a cached/TM answer.');
+
+check('translateNow-with-bypassMemory-still-writes-the-fresh-result-to-cache-and-TM', async () => {
+  const pipeline = freshPipeline();
+  let n = 0;
+  const primary = {
+    name: 'openai', displayName: 'Fake OpenAI',
+    capabilities: { prompt: true, context: 'prompt-template', glossaryPrompt: true, abort: true },
+    supportedLanguages: [],
+    async translate(text) {
+      n++;
+      return { text: `answer-v${n}`, detectedLang: null, engine: 'openai' };
+    }
+  };
+  pipeline.engines['openai'] = primary;
+  const line = `bypass-write-test-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(line, {}); // caches 'answer-v1'
+  await pipeline.translateNow(line, { bypassMemory: true }); // fresh call — must overwrite
+
+  const variant = pipeline._cacheVariant(primary);
+  const cached = pipeline.cache.get(line, 'ja', 'es', 'openai', variant);
+  return { pass: cached === 'answer-v2', actual: cached };
+}, 'bypassMemory only skips the READ — the fresh result must still overwrite the stale cache entry, or the very next occurrence of this line would serve the rejected old translation again. This is also what heals a legacy TM entry with no `variant` (see translation-memory.js\'s isVariantCompatible).');
+
+check('translateNow-without-bypassMemory-is-still-served-from-cache', async () => {
+  // xuat-server.js calls translateNow() as its NORMAL (non-debounced)
+  // translation path with no bypassMemory flag — this must keep its
+  // cache/TM hits, or every XUAT line would silently become a paid API
+  // call. A future "simplify" pass making bypass the default would break
+  // this without ever touching xuat-server.js itself.
+  const pipeline = freshPipeline();
+  const primary = fakeSpyEngine('openai');
+  pipeline.engines['openai'] = primary;
+  const line = `xuat-guard-test-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(line, {});
+  const callsBefore = primary.calls.length;
+  await pipeline.translateNow(line, {}); // default bypassMemory:false
+  const callsAfter = primary.calls.length;
+
+  return { pass: callsAfter === callsBefore, actual: { callsBefore, callsAfter } };
+});
+
+check('a-cache-hit-emits-a-log-line', async () => {
+  const pipeline = freshPipeline();
+  const primary = fakeSpyEngine('openai');
+  pipeline.engines['openai'] = primary;
+  const line = `log-visibility-test-${Date.now()}-${Math.random()}`;
+
+  await pipeline.translateNow(line, {});
+
+  const originalLog = console.log;
+  const logged = [];
+  console.log = (...args) => { logged.push(args.join(' ')); };
+  try {
+    await pipeline.translateNow(line, {}); // cache hit this time
+  } finally {
+    console.log = originalLog;
+  }
+
+  const pass = logged.some((l) => l.includes('Cache hit'));
+  return { pass, actual: logged };
+}, 'The cache-hit branch used to be completely silent — zero console output — which is exactly why "the prompt changed but the translation didn\'t" took 3 real testing sessions to root-cause. Silence here is now a test failure, not just an inconvenience.');
 
 check('a-translate-call-with-nothing-in-flight-does-not-throw-when-aborting', async () => {
   // The very first translate() call of a pipeline's life has no

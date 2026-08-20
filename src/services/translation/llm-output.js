@@ -156,6 +156,31 @@ const REFUSAL_PATTERNS_UNCONDITIONAL = [
   new RegExp(`^${LEAD_IN}non posso aiutart[ei] con questo\\.?\\s*$`, 'i')
 ];
 
+// Signal 2c (v3.13.6x, Fase 9 testing, ronda 4): refusal-specific TOPIC
+// phrases near the start of the output. Found by real testing (Lyca,
+// Nekopara Vol.1): a Clipboard hook briefly picked up an unrelated,
+// LONG paragraph of pasted text as "game text" — GPT refused in Spanish
+// ("Lo siento, no puedo proporcionar contenido adicional o modificar...")
+// and it sailed straight to the overlay uncaught. Neither existing signal
+// could have caught it: 2a assumes a refusal is LONGER than the dialogue
+// it displaces, which inverts when the SOURCE itself is the noisy/long
+// side (garbled hook buffer, or here, unrelated pasted text); 2b never
+// applies to a Latin-script target. This signal is independent of length
+// on both sides — it looks for what a refusal talks ABOUT (providing/
+// generating content, policies) rather than how long it or the source is.
+// Deliberately phrase-level (2+ words), not single keywords: "contenido"
+// alone is an everyday Spanish word (e.g. "tengo mucho contenido que
+// estudiar") that would false-positive constantly if matched bare.
+const REFUSAL_TOPIC_RE = new RegExp(
+  '(?:proporcionar|generar|crear|producir)\\s+(?:ese\\s+tipo\\s+de\\s+|dicho\\s+)?(?:contenido|texto)' +
+  '|(?:provide|generate|create|produce)\\s+(?:that\\s+(?:type|kind)\\s+of\\s+)?(?:content|text)' +
+  '|pol[ií]tica(?:s)?\\s+de\\s+(?:contenido|uso)' +
+  '|content\\s+policy|usage\\s+policy' +
+  '|(?:violar|infringir)\\s+(?:las\\s+|sus\\s+)?(?:normas|pol[ií]ticas|directrices)' +
+  '|violat\\w*\\s+(?:the\\s+)?(?:polic|guideline)',
+  'i'
+);
+
 function isLikelyRefusal(text, sourceText, targetLangCode) {
   if (REFUSAL_PATTERNS_UNCONDITIONAL.some((re) => re.test(text))) return true;
   if (!REFUSAL_PATTERNS.some((re) => re.test(text))) return false;
@@ -175,7 +200,9 @@ function isLikelyRefusal(text, sourceText, targetLangCode) {
   const dominant = dominantScript(text);
   const scriptMismatch = expected !== 'latin' && dominant !== 'none' && dominant !== expected && text.length > 20;
 
-  return lengthDisproportionate || scriptMismatch;
+  const topicMatch = REFUSAL_TOPIC_RE.test(text.slice(0, 250));
+
+  return lengthDisproportionate || scriptMismatch || topicMatch;
 }
 
 // ─── step 8: passthrough (model echoed the source instead of translating) ─

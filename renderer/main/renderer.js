@@ -1296,11 +1296,28 @@
             if (data.targetLang) {
                 updateTargetLangDisplay(data.targetLang);
             }
+            // v3.13.6x (Fase 9 testing follow-up, ronda 4): pipeline.js has
+            // sent isFallback:true since the fallback chain existed — this
+            // was the first UI code to ever read that field. Lyca noticed
+            // an invalid API key produced no visible signal at all (not
+            // even the persistent-toast pattern already used for the
+            // Textractor arch-fallback and PaddleOCR->Tesseract fallbacks).
+            if (data.isFallback) {
+                const t = translations[currentLang] || translations['en'];
+                const template = t.translation_fallback_toast || 'Primary translation engine failed, using fallback ({engine})';
+                showToast(template.replace('{engine}', data.engine || ''));
+            }
             loadHistory();
         }
 
         function updateLiveError(data) {
-            // Error handled silently — translation errors shown in overlay
+            // v3.13.6x (Fase 9 testing follow-up, ronda 4): pipeline.js's
+            // 'error' event (ALL engines including every fallback failed)
+            // had zero listeners on the renderer side — silently dropped,
+            // same gap as the isFallback case above.
+            const t = translations[currentLang] || translations['en'];
+            const template = t.translation_failed_toast || 'Translation failed: {error}';
+            showToast(template.replace('{error}', data.error || ''));
         }
 
         // ===== DEBUG LOGS (v3.10.0) =====
@@ -1321,16 +1338,29 @@
         // v3.13.41: stays on screen until the user closes it (X, top-right)
         // instead of auto-fading after 2s — real feedback was that longer
         // messages (import results, error details) didn't stay up long
-        // enough to read. Still a single-slot toast: a new call replaces
-        // whatever's showing, same as before, it just doesn't time out on
-        // its own anymore.
+        // enough to read.
+        // v3.13.6x (Fase 9 testing follow-up, ronda 5): was a single-slot
+        // toast (a new call replaced whatever was showing) — Lyca noticed
+        // that a fallback/error notification could fire while an earlier
+        // toast was still up unclosed, and the new one silently replaced
+        // it instead of both being visible. Now a stack: each call adds a
+        // toast to a fixed-position container (flex column-reverse, newest
+        // prepended so it lands in the bottom slot — the same slot the
+        // single toast used to occupy), older ones pushed upward. Closing
+        // one lets flexbox reflow the rest down to fill the gap on its
+        // own — no manual positioning math needed.
         function showToast(message) {
-            const existing = document.querySelector('.tuhua-toast');
-            if (existing) existing.remove();
+            let container = document.getElementById('tuhua-toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'tuhua-toast-container';
+                container.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column-reverse;align-items:center;gap:8px;max-width:min(420px,90vw);width:min(420px,90vw);';
+                document.body.appendChild(container);
+            }
 
             const toast = document.createElement('div');
             toast.className = 'tuhua-toast';
-            toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;align-items:flex-start;gap:10px;max-width:min(420px,90vw);padding:10px 10px 10px 16px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);';
+            toast.style.cssText = 'display:flex;align-items:flex-start;gap:10px;width:100%;box-sizing:border-box;padding:10px 10px 10px 16px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);transition:opacity 0.15s ease;';
 
             const text = document.createElement('span');
             text.style.cssText = 'flex:1;word-break:break-word;';
@@ -1342,11 +1372,19 @@
             closeBtn.style.cssText = 'flex-shrink:0;background:none;border:none;color:inherit;opacity:0.6;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;';
             closeBtn.onmouseenter = () => { closeBtn.style.opacity = '1'; };
             closeBtn.onmouseleave = () => { closeBtn.style.opacity = '0.6'; };
-            closeBtn.onclick = () => toast.remove();
+            closeBtn.onclick = () => {
+                toast.style.opacity = '0';
+                setTimeout(() => {
+                    toast.remove();
+                    if (!container.hasChildNodes()) container.remove();
+                }, 150);
+            };
 
             toast.appendChild(text);
             toast.appendChild(closeBtn);
-            document.body.appendChild(toast);
+            // Newest toast takes the bottom slot (the container's
+            // main-start in column-reverse) — prepend, not append.
+            container.prepend(toast);
         }
 
         // ===== CLICK THROUGH =====

@@ -147,6 +147,16 @@ class IpcHandlers {
 
       // Merge with existing settings instead of replacing
       const currentSettings = this.store.get();
+      // v3.13.6x (Fase 9 testing follow-up, ronda 5/6): diagnostic (ronda 5)
+      // plus now a real decision input (ronda 6) — see its two uses below,
+      // clearContext() and the auto-retranslate block. Confirms whether the
+      // RENDERER even included `promptTemplate` in this specific
+      // save-settings call, and whether its value actually differs from
+      // what was already stored.
+      const promptTemplateChanged = 'promptTemplate' in data && data.promptTemplate !== currentSettings.promptTemplate;
+      if (promptTemplateChanged) {
+        console.log(`[Tuhua] save-settings: promptTemplate changed (${(currentSettings.promptTemplate || '').length} chars -> ${(data.promptTemplate || '').length} chars)`);
+      }
       const mergedSettings = { ...currentSettings, ...data };
       this.store.set(mergedSettings);
 
@@ -356,22 +366,39 @@ class IpcHandlers {
       // context must be the same language as the new source) to actively
       // misleading (an LLM engine would see prior turns in the old target
       // language while being told to now answer in a different one).
-      if (engineChanged || sourceLangChanged || targetLangChanged || inputMethodChanged) {
+      // v3.13.6x (Fase 9 testing follow-up, ronda 6): `promptTemplateChanged`
+      // added — same reasoning as inputMethodChanged, weaker but real: even
+      // after pipeline.js's context-poisoning fix (the CURRENT line can no
+      // longer leak into its own context), the OTHER lines still in the
+      // window were translated under the OLD preset, and every preset's
+      // rule 6 explicitly tells the model to "stay consistent with the
+      // terminology and character voices established in the recent lines
+      // above" — pointing it right back at the style being compared away
+      // from. A prompt-preset A/B comparison should start from a clean
+      // window.
+      if (engineChanged || sourceLangChanged || targetLangChanged || inputMethodChanged || promptTemplateChanged) {
         this.pipeline.clearContext();
       }
 
-      if ((engineChanged || sourceLangChanged || targetLangChanged) && this._lastHandledText) {
+      if ((engineChanged || sourceLangChanged || targetLangChanged || promptTemplateChanged) && this._lastHandledText) {
         const newEngine = data.engine || currentSettings.engine || 'google-free';
         const newSourceLang = data.sourceLang || currentSettings.sourceLang || 'auto';
         const newTargetLang = data.targetLang || currentSettings.targetLang || 'es';
-        console.log(`[Tuhua] Settings changed while text is on-screen — auto-retranslating last text with ${newEngine} (${newSourceLang} → ${newTargetLang})`);
-        // Use translateNow (no debounce) for immediate retranslation
+        console.log(`[Tuhua] Settings changed while text is on-screen — auto-retranslating last text with ${newEngine} (${newSourceLang} → ${newTargetLang})${promptTemplateChanged ? ' [promptTemplate changed]' : ''}`);
+        // Use translateNow (no debounce) for immediate retranslation.
+        // v3.13.6x (Fase 9 testing follow-up, ronda 6): bypassMemory:true —
+        // this IS an explicit "redo with the settings I just changed"
+        // request; without it, a cache/TM hit could silently answer with
+        // the OLD settings' translation and this call would never reach
+        // the engine at all (reproduced for real: this exact log line
+        // followed immediately by a TM exact hit, in a real session).
         try {
           await this.pipeline.translateNow(this._lastHandledText, {
             source: newSourceLang,
             target: newTargetLang,
             engine: newEngine,
-            speaker: this._lastSpeakerName
+            speaker: this._lastSpeakerName,
+            bypassMemory: true
           });
         } catch (retransErr) {
           console.warn(`[Tuhua] Auto-retranslation failed: ${retransErr.message}`);
@@ -1461,7 +1488,11 @@ class IpcHandlers {
         if (!imageBuffer) {
           return { success: false, error: 'Failed to capture screen' };
         }
-        const result = await this.ocrService.recognize(imageBuffer);
+        // force:true — manual capture is an explicit user action, so it must
+        // bypass the similarity dedup that the auto-capture loop relies on
+        // (otherwise clicking the button while the same line is on screen
+        // silently does nothing, see v3.13.75 OCR test round)
+        const result = await this.ocrService.recognize(imageBuffer, { force: true });
         return { success: true, text: result.text, confidence: result.confidence };
       } catch (err) {
         console.error('[OCR] Capture error:', err.message);
@@ -1827,7 +1858,7 @@ class IpcHandlers {
    * Includes deduplication to prevent double-translation when the same text
    * arrives from both stdout and TCP channels.
    */
-  async _handleText(text) {
+  async _handleText(text, { force = false } = {}) {
     // v3.13.6x (LLM engine overhaul, Fase 7a): captured here, not lower —
     // the two builtin filters right below (angle-bracket removal, Japanese
     // quote extraction) both DESTROY the speaker's name on their way to
@@ -1910,7 +1941,9 @@ class IpcHandlers {
     if (isOcr) {
       // Light dedup: only skip if EXACT same text was just processed.
       // The heavy similarity dedup is done in ocr.js before emitting.
-      if (this._lastOcrTextHash === textHash) {
+      // force=true (manual capture button) bypasses this — the user explicitly
+      // asked to rescan, so an identical result must still reach the overlay.
+      if (!force && this._lastOcrTextHash === textHash) {
         console.log(`[Tuhua] OCR exact duplicate skipped: "${text.substring(0, 30)}..."`);
         return;
       }
@@ -1973,7 +2006,14 @@ class IpcHandlers {
         speaker: speakerName
       });
 
-      console.log(`[Tuhua] Translation result: "${translation?.substring(0, 60)}..."`);
+      // v3.13.6x (Fase 9 testing follow-up, ronda 4): was substring(0, 60)
+      // — too short to ever recover the FULL text of a real-world bad
+      // output (e.g. a refusal that slipped past the sanitizer) from an
+      // exported log, which is exactly what made a real refusal-leak find
+      // during testing un-rootcause-able after the fact. 300 is still a
+      // truncation (very long lines exist), but covers the actual refusal
+      // boilerplates seen so far with room to spare.
+      console.log(`[Tuhua] Translation result: "${translation?.substring(0, 300)}${translation && translation.length > 300 ? '...' : ''}"`);
       // v3.13.06: Double-check that translation is still active before sending
       // to overlay. There can be a race condition where the user pauses
       // translation while a pipeline.translate() call is in-flight.
@@ -2046,19 +2086,35 @@ class IpcHandlers {
     const engineName = settings.engine || 'google-free';
     console.log(`[Tuhua] Manual retranslate requested: engine=${engineName} (${srcLang} → ${tgtLang})`);
     try {
+      // v3.13.6x (Fase 9 testing follow-up, ronda 6): bypassMemory:true —
+      // the ↻ button IS an explicit "redo this now" request; without it, a
+      // cache/TM hit could answer from an OLD prompt/engine and this call
+      // would never reach the engine at all, which is exactly what made
+      // preset comparisons via this button look broken.
       const translation = await this.pipeline.translateNow(this._lastHandledText, {
         source: srcLang,
         target: tgtLang,
         engine: engineName,
-        speaker: this._lastSpeakerName
+        speaker: this._lastSpeakerName,
+        bypassMemory: true
       });
+      // v3.13.6x (Fase 9 testing follow-up, ronda 5): this path never
+      // logged its result at all — unlike _handleText's normal flow (see
+      // its own "[Tuhua] Translation result:" line), which made a real
+      // race condition here (fixed alongside this — see
+      // pipeline.js's translateNow()) much harder to diagnose from an
+      // exported log than it needed to be.
+      console.log(`[Tuhua] Manual retranslate result: "${translation?.substring(0, 300)}${translation && translation.length > 300 ? '...' : ''}"`);
       this.windowManager.sendToOutputOverlay('update-output', {
         text: translation,
         originalText: this._lastHandledText,
         targetLang: tgtLang
       });
     } catch (err) {
-      if (err.code === 'SUPERSEDED') return;
+      if (err.code === 'SUPERSEDED') {
+        console.log('[Tuhua] Manual retranslate superseded by a newer request — discarding');
+        return;
+      }
       console.error('[Tuhua] Manual retranslate failed:', err.message);
       this.windowManager.sendToOutputOverlay('update-output', {
         text: `[Error] ${err.message}`
@@ -2204,9 +2260,9 @@ class IpcHandlers {
 
       // Forward OCR text events to the translation pipeline
       this.ocrService.removeAllListeners('text'); // Remove previous listeners
-      this.ocrService.on('text', (text) => {
+      this.ocrService.on('text', (text, { force } = {}) => {
         console.log(`[OCR] Text recognized: "${text.substring(0, 50)}..."`);
-        this._handleText(text);
+        this._handleText(text, { force });
       });
 
       // Forward OCR status to renderer

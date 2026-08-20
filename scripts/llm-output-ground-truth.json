@@ -132,6 +132,17 @@
       "expectedActions": ["detected-refusal"]
     },
     {
+      "id": "refusal-in-spanish-answering-long-unrelated-source-caught-by-topic-signal",
+      "input": "Lo siento, no puedo proporcionar contenido adicional o modificar textos que no he generado yo.",
+      "sourceText": "Pendiente de testear en Textractor (Fases 0-9 del overhaul de motores LLM) — ya validado: traducción real end-to-end con OpenAI, cambio a DeepL, UI de Settings, los 3 bugs de las rondas 1-3. Alta prioridad (fácil de probar jugando normal):",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"],
+      "note": "The real bug found by Lyca (Nekopara Vol.1 session, ronda 4): a Clipboard hook briefly grabbed an unrelated pasted paragraph as 'game text'; GPT refused in Spanish and it sailed to the overlay uncaught. Neither prior signal could fire — the refusal is SHORTER than the (unusually long) source, so 2a's disproportion check fails; Spanish shares the Latin script with the target, so 2b never applies. This needs the topic-vocabulary signal (2c), independent of either side's length."
+    },
+    {
       "id": "passthrough-japanese-source-echoed-instead-of-translated-to-spanish",
       "input": "こんにちは、元気？",
       "sourceText": "こんにちは、元気？",
@@ -239,6 +250,17 @@
       "expectedText": "Ella dijo que no puedo ayudar con eso y se fue enojada.",
       "expectedVerdict": "ok",
       "note": "The unconditional refusal patterns are anchored to the whole string (short lead-in only, sentence must end there) precisely so real dialogue that mentions the same clause mid-paragraph, then keeps going, survives untouched."
+    },
+    {
+      "id": "everyday-use-of-the-word-contenido-is-not-flagged-by-topic-signal",
+      "input": "Lo siento, no puedo ir a la fiesta, tengo mucho contenido que estudiar para el examen.",
+      "sourceText": "ごめん、パーティーに行けない、試験のために勉強することがたくさんあるんだ。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Lo siento, no puedo ir a la fiesta, tengo mucho contenido que estudiar para el examen.",
+      "expectedVerdict": "ok",
+      "note": "'contenido' is an everyday Spanish word (course material, not 'explicit content') — the topic signal (2c) is deliberately phrase-level ('proporcionar/generar contenido', not bare 'contenido') so ordinary dialogue using the word alone must survive untouched."
     },
     {
       "id": "genuinely-different-translation-is-unaffected",

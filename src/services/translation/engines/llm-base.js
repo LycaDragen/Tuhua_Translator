@@ -150,7 +150,14 @@ class OpenAICompatEngine {
     // Few-shot examples — real chat turns, independent of whether the
     // template is custom (see fewShotEnabled's own doc comment above for
     // why this is no longer coupled to promptTemplate being non-empty).
-    if (this.fewShotEnabled) {
+    // Skipped when the template embeds {sentence}: that's a completion-style
+    // template (see the block below) with no trailing `user` turn, so
+    // appending few-shot pairs would leave the conversation ending on an
+    // `assistant` turn with nothing asking the model to respond — verified
+    // against a real local server, this reliably produces an empty
+    // completion (finish_reason 'stop', content '') rather than an error,
+    // which made it silent until traced deliberately.
+    if (this.fewShotEnabled && !rendered.containsSentence) {
       for (const example of getFewshotExamples(sourceLang, targetLang)) {
         messages.push({ role: 'user', content: example.user });
         messages.push({ role: 'assistant', content: example.assistant });

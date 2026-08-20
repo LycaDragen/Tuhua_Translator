@@ -137,12 +137,73 @@ check('a-different-prompt-variant-is-a-tm-miss-for-the-same-line', () => {
   };
 }, 'The bug reproduced exactly: reload a save, switch prompt preset, reload the same line — before this fix, the SECOND lookup silently returned the FIRST preset\'s cached text instead of re-translating.');
 
-check('missing-variant-on-either-side-never-blocks-a-match', () => {
+// v3.13.6x (Fase 9 testing follow-up, ronda 6): the leniency this check
+// used to pin ("missing-variant-on-either-side-never-blocks-a-match") was
+// found, by real testing across 3 sessions, to be the ACTUAL reason
+// prompt-preset comparisons looked broken during normal play — Lyca had
+// 571 real TM entries written before `variant` existed, and every one of
+// them answered EVERY preset for the rest of its 30-day TTL. It's replaced
+// below with the tightened rule: a blank-variant entry an LLM engine
+// itself wrote no longer satisfies a variant-specific query, but the same
+// blank-variant leniency stays fully intact for MT engines (DeepL/Google),
+// which never carry a real variant by design — orphaning THOSE was never
+// the goal. See isVariantCompatible()'s header comment in
+// translation-memory.js for the full reasoning.
+check('a-legacy-blank-variant-entry-written-by-an-llm-engine-does-not-answer-a-variant-specific-lookup', () => {
   const tm = freshTM();
-  tm.set('legacy line', 'ja', 'es', 'Legacy translation', 'openai', 'p1', 'llm'); // no variant — pre-this-fix shape
+  tm.set('legacy line', 'ja', 'es', 'Legacy translation', 'openai', 'p1', 'llm'); // explicit engineClass, no variant — pre-Fase-9 shape
   const hit = tm.get('legacy line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
-  return { pass: hit === 'Legacy translation', actual: hit };
-}, 'Same "unknown never blocks" leniency as engineClass — a pre-existing TM entry (this session had 549 real entries when the bug was found) must not become orphaned the moment this ships.');
+  return { pass: hit === null, actual: hit };
+});
+
+check('a-legacy-entry-with-no-engineClass-at-all-falls-back-to-originalEngine-and-an-mt-one-still-answers', () => {
+  const tm = freshTM();
+  tm.set('oldest shape mt line', 'ja', 'es', 'Legacy MT translation', 'deepl', 'p1'); // no engineClass, no variant — the OLDEST possible entry shape
+  const hit = tm.get('oldest shape mt line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  return { pass: hit === 'Legacy MT translation', actual: hit };
+}, "resolveEntryClass() falls back to originalEngine (present on every entry since v3.11.23, unlike engineClass) when engineClass itself is missing — a DeepL-originated entry must stay reachable no matter what an LLM variant-specific query asks for.");
+
+check('a-legacy-entry-with-no-engineClass-written-by-an-llm-engine-is-blocked-via-the-originalEngine-fallback-too', () => {
+  const tm = freshTM();
+  tm.set('oldest shape llm line', 'ja', 'es', 'Legacy LLM translation', 'openai', 'p1'); // no engineClass, no variant
+  const hit = tm.get('oldest shape llm line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  return { pass: hit === null, actual: hit };
+}, "originalEngine='openai' resolves to class 'llm' via LLM_ENGINE_NAMES even with engineClass entirely absent — the same block applies to the oldest-shape entries, not just ones that already had an explicit engineClass.");
+
+check('an-explicit-engineClass-wins-over-the-originalEngine-fallback', () => {
+  const tm = freshTM();
+  // engineClass explicitly 'llm' (so the pre-existing engineClass gate
+  // lets an 'llm' query through) but originalEngine is 'deepl' (an MT
+  // name) — if resolveEntryClass() wrongly consulted originalEngine ahead
+  // of the explicit engineClass, this blank-variant entry would
+  // incorrectly stay lenient for a variant-specific LLM query.
+  tm.set('contradictory line', 'ja', 'es', 'Should stay blocked', 'deepl', 'p1', 'llm');
+  const hit = tm.get('contradictory line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  return { pass: hit === null, actual: hit };
+}, "resolveEntryClass() must read entry.engineClass first and only consult originalEngine when it's absent — an explicit classification is never silently overridden by the fallback.");
+
+check('rewriting-a-legacy-entry-with-a-real-variant-heals-it', () => {
+  const tm = freshTM();
+  tm.set('healable line', 'ja', 'es', 'Old translation', 'openai', 'p1', 'llm'); // no variant
+  const beforeHeal = tm.get('healable line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  // Simulates a retranslate: pipeline.js's bypassMemory:true still WRITES
+  // the fresh result (see _doTranslate's own comment on why) — this is the
+  // set() call that does it.
+  tm.set('healable line', 'ja', 'es', 'New translation', 'openai', 'p1', 'llm', 'hash-balanced');
+  const afterHealSameVariant = tm.get('healable line', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  const afterHealDifferentVariant = tm.get('healable line', 'ja', 'es', 'p1', 'llm', 'hash-literal');
+  return {
+    pass: beforeHeal === null && afterHealSameVariant === 'New translation' && afterHealDifferentVariant === null,
+    actual: { beforeHeal, afterHealSameVariant, afterHealDifferentVariant }
+  };
+}, 'One explicit retranslate quietly retires one of the entries that used to answer every preset — set()\'s existing update branch (`variant || entries[key].variant`) stamps a real variant onto what was a blank-variant legacy entry.');
+
+check('fuzzy-lookup-applies-the-same-legacy-llm-rule-as-the-exact-path', () => {
+  const tm = freshTM({ fuzzyEnabled: true, fuzzyThreshold: 0.5 });
+  tm.set('灰音とロゼは幼馴染で仲がいい', 'ja', 'es', 'Legacy LLM version', 'openai', 'p1', 'llm'); // no variant
+  const result = tm.getWithFuzzy('灰音とロゼは幼馴染で仲が良い', 'ja', 'es', 'p1', 'llm', 'hash-balanced');
+  return { pass: result === null, actual: result };
+}, "getFuzzy()'s candidate filtering is separate code from get()'s (_rebuildFuzzyIndex builds its own candidate objects) — this pins that the legacy-LLM-blocking rule applies there too, not just to the exact-match path.");
 
 check('an-mt-engine-with-empty-variant-is-unaffected-by-variant-compatibility', () => {
   const tm = freshTM();

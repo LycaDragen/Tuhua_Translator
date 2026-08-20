@@ -28,6 +28,7 @@ const LocalLLMEngine = require('./engines/local-llm');
 const LibreTranslateEngine = require('./engines/libretranslate');
 const CustomMTEngine = require('./engines/custom-mt');
 const { resolveLocalEndpoint } = require('./llm-providers');
+const { matchPresetId } = require('./prompt-presets');
 
 // Language code to full name mapping (for LLM prompts and display)
 const LANGUAGE_NAMES = {
@@ -383,6 +384,27 @@ class TranslationPipeline extends EventEmitter {
           // sanitizer — defaults on.
           sanitize: s.llmSanitize !== false
         });
+        // v3.13.6x (Fase 9 testing follow-up, ronda 5): Lyca reported twice
+        // (real OpenAI, both rounds) seeing no perceptible difference
+        // switching prompt presets or hand-editing the template, despite
+        // this being verified correct end-to-end against a real pipeline
+        // in this session's own testing (see the memory log). This engine
+        // is only ever constructed once per settings generation (getEngine
+        // caches it, updateSettings() clears the cache — see there) — this
+        // line is the one place that can confirm, from a real exported
+        // log, exactly which preset/template actually reached the request
+        // that follows, without guessing.
+        // v3.13.6x (Fase 9 testing follow-up, ronda 6): added model/
+        // temperature/topP/maxTokens/providerId, read off the constructed
+        // instance itself (not `s.*`) — same one-source-of-truth reasoning
+        // as _cacheVariant(). Without `temperature` here there was no way
+        // to tell "the prompt had no effect" apart from "temperature 0
+        // (or near it) on a near-deterministic model converging on its
+        // own" from the log alone.
+        {
+          const built = this.engines[engineName];
+          console.log(`[Pipeline] openai engine built — preset=${matchPresetId(s.promptTemplate || '')}, fewShot=${built.fewShotEnabled}, promptTemplateHash=${crypto.createHash('sha256').update(s.promptTemplate || '').digest('hex').slice(0, 8)}, providerId=${built.providerId}, model=${built.model}, temperature=${built.temperature}, topP=${built.topP}, maxTokens=${built.maxTokens}`);
+        }
         break;
       }
       case 'local-llm': {
@@ -404,6 +426,14 @@ class TranslationPipeline extends EventEmitter {
           topP: s.llmTopP,
           sanitize: s.llmSanitize !== false
         });
+        // v3.13.6x (Fase 9 testing follow-up, ronda 6): same additions as
+        // the 'openai' case above, plus `endpoint` — a misconfigured local
+        // endpoint (wrong port, e.g. LM Studio's 1234 vs Ollama's 11434)
+        // has caused real confusion before and is otherwise invisible here.
+        {
+          const built = this.engines[engineName];
+          console.log(`[Pipeline] local-llm engine built — preset=${matchPresetId(s.promptTemplate || '')}, fewShot=${built.fewShotEnabled}, promptTemplateHash=${crypto.createHash('sha256').update(s.promptTemplate || '').digest('hex').slice(0, 8)}, endpoint=${built.baseUrl}, model=${built.model}, temperature=${built.temperature}, topP=${built.topP}, maxTokens=${built.maxTokens}`);
+        }
         break;
       }
       case 'libretranslate':
@@ -459,10 +489,7 @@ class TranslationPipeline extends EventEmitter {
     // Aborting here means that request — and the tokens it would have
     // billed for a translation nobody will ever see — actually stops,
     // instead of running to a completion that gets silently discarded.
-    if (this._activeAbortController) {
-      this._activeAbortController.abort();
-      this._activeAbortController = null;
-    }
+    this._abortActiveRequest();
 
     const src = options.source || this.settings.sourceLang || 'ja';
     const tgt = options.target || this.settings.targetLang || 'es';
@@ -495,15 +522,70 @@ class TranslationPipeline extends EventEmitter {
    * Immediate translation (no debounce) - for manual/user-initiated requests
    */
   async translateNow(text, options = {}) {
+    // v3.13.6x (Fase 9 testing follow-up, ronda 5): real bug found testing
+    // the prompt-preset comparison workflow (change preset → click ↻,
+    // repeated) — translate()'s debounce entry point has aborted the
+    // previous in-flight request before starting a new one since Fase 9
+    // (see there), but translateNow() — the method _retranslateCurrent()
+    // (the ↻ button / Ctrl+Shift+R) actually calls — never did. Two
+    // translateNow() calls fired close together (comparing presets faster
+    // than OpenAI's round trip) both ran to completion UNCANCELLED, each
+    // silently overwriting `_activeAbortController` with its own — neither
+    // aborted the other. Whichever response happened to arrive LAST won
+    // the overlay, a pure network race with no relationship to which
+    // preset was actually selected last. This is almost certainly why
+    // preset/prompt comparisons looked like "no difference": a stale
+    // response from an earlier click could paint over a newer one at any
+    // time, silently. `_abortActiveRequest()` — the same guard translate()
+    // uses — closes the gap; a superseded call rejects tagged
+    // `SUPERSEDED`, which `_retranslateCurrent()` already treats as a
+    // silent no-op (routine, expected), not an error.
+    this._abortActiveRequest();
     const src = options.source || this.settings.sourceLang || 'ja';
     const tgt = options.target || this.settings.targetLang || 'es';
     const engine = options.engine || this.settings.engine || 'google-free';
     const meta = { speaker: options.speaker };
-    return this._doTranslate(text, src, tgt, engine, meta);
+    // v3.13.6x (Fase 9 testing follow-up, ronda 6): forwarded, not read
+    // here — see _doTranslate()'s own comment on `bypassMemory` for why
+    // ("Settings changed while text is on-screen — auto-retranslating..."
+    // followed by a silent TM hit, engine never called, was reproduced in
+    // a real log). Default false: xuat-server.js also calls translateNow()
+    // as its normal (non-debounced) translation path and must keep its
+    // cache/TM hits.
+    return this._doTranslate(text, src, tgt, engine, meta, { bypassMemory: options.bypassMemory === true });
   }
 
-  async _doTranslate(text, srcLang, tgtLang, engineName, meta = {}) {
-    console.log(`[Pipeline] _doTranslate: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}`);
+  /**
+   * Aborts whatever _doTranslate() call is currently in flight, if any —
+   * shared by translate() (debounce path) and translateNow() (manual path)
+   * so BOTH guarantee only the most recently requested translation can
+   * ever paint a result. See translateNow()'s own comment for the bug this
+   * fixes on the manual-retranslate side.
+   */
+  _abortActiveRequest() {
+    if (this._activeAbortController) {
+      this._activeAbortController.abort();
+      this._activeAbortController = null;
+    }
+  }
+
+  async _doTranslate(text, srcLang, tgtLang, engineName, meta = {}, options = {}) {
+    // v3.13.6x (Fase 9 testing follow-up, ronda 6): `bypassMemory` skips
+    // ONLY the cache/TM READ below — writes still happen. An explicit
+    // retranslate ("redo this with the settings I just changed") must
+    // actually call the engine, not silently echo back whatever a stale
+    // cache/TM entry already had (real bug found this way: the log showed
+    // "Settings changed while text is on-screen — auto-retranslating..."
+    // immediately followed by "Translation Memory exact hit ... (was:
+    // deepl)" — the engine was never called at all). Writes stay on
+    // deliberately: overwriting the stale entry is what makes the fresh
+    // result "stick" for the next time this exact line appears, and it
+    // stamps a real `variant` onto legacy TM entries that never had one
+    // (see translation-memory.js's isVariantCompatible). Default false —
+    // xuat-server.js's normal (non-debounced) translation path also calls
+    // translateNow() and must keep its cache/TM hits.
+    const bypassMemory = options.bypassMemory === true;
+    console.log(`[Pipeline] _doTranslate: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}${bypassMemory ? ', bypassMemory=true' : ''}`);
 
     // v3.13.04: For ALL engines (not just LLM), use detected language when
     // auto-detect is selected. This is critical because:
@@ -587,8 +669,17 @@ class TranslationPipeline extends EventEmitter {
     const engineClass = this._engineClass(this.getEngine(engineName));
 
     // 2. Check engine-specific cache (exact engine match)
-    const cached = this.cache.get(cacheKey, effectiveSrcLang, tgtLang, engineName, variant);
+    const cached = bypassMemory ? null : this.cache.get(cacheKey, effectiveSrcLang, tgtLang, engineName, variant);
     if (cached) {
+      // v3.13.6x (Fase 9 testing follow-up, ronda 6): this branch used to
+      // be completely silent — zero console output — which is exactly why
+      // "the prompt changed but the translation didn't" took 3 real
+      // testing sessions to root-cause: nothing in the log distinguished
+      // a cache hit from a fresh engine call. `variant` is the field that
+      // says whether a prompt/model change SHOULD have invalidated this
+      // entry — its presence here makes that question answerable from an
+      // exported log instead of requiring a code read.
+      console.log(`[Pipeline] Cache hit: "${cacheKey.substring(0, 30)}..." → "${cached.substring(0, 30)}..." (engine=${engineName}, variant=${variant || '(none)'})`);
       this.stats.cacheHits++;
       this._addToHistory(text, cached, engineName, true);
 
@@ -624,12 +715,18 @@ class TranslationPipeline extends EventEmitter {
 
     // 2b. v3.11.25: Translation Memory — exact match first, then fuzzy.
     // This saves money and reduces latency for repeated or near-matching dialogue.
-    const tmResult = this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang, profileId, engineClass, variant);
+    const tmResult = bypassMemory ? null : this.translationMemory.getWithFuzzy(cacheKey, effectiveSrcLang, tgtLang, profileId, engineClass, variant);
     if (tmResult) {
       this.stats.tmHits++;
       const matchType = tmResult.fuzzy ? 'fuzzy' : 'exact';
       const scoreInfo = tmResult.fuzzy ? ` (${(tmResult.score * 100).toFixed(0)}%)` : '';
-      console.log(`[Pipeline] Translation Memory ${matchType} hit${scoreInfo}: "${cacheKey.substring(0, 30)}..." → "${tmResult.translation.substring(0, 30)}..." (was: ${engineName})`);
+      // v3.13.6x (Fase 9 testing follow-up, ronda 6): now logs BOTH sides of
+      // the variant comparison — `variant` is what this call asked for,
+      // `storedVariant` is what's actually on the entry that answered it.
+      // A hit with `storedVariant=(none)` is a legacy entry (written before
+      // `variant` existed) matching regardless of prompt/model — without
+      // this, that case is visually identical to a normal, correct hit.
+      console.log(`[Pipeline] Translation Memory ${matchType} hit${scoreInfo}: "${cacheKey.substring(0, 30)}..." → "${tmResult.translation.substring(0, 30)}..." (was: ${engineName}, variant=${variant || '(none)'}, storedVariant=${tmResult.variant || '(none)'})`);
       // Also store in engine-specific cache for faster future lookups
       this.cache.set(cacheKey, effectiveSrcLang, tgtLang, engineName, tmResult.translation, variant);
       this._addToHistory(text, tmResult.translation, engineName, true);
@@ -884,6 +981,29 @@ class TranslationPipeline extends EventEmitter {
       deeplKeepUnchangedTerms = resolved.keepUnchangedTerms;
     }
 
+    // v3.13.6x (Fase 9 testing follow-up, ronda 6): THE fix for the real
+    // bug behind "changing the prompt preset doesn't change the
+    // translation" — verified over 3 real testing sessions plus
+    // scripts/test-context-memory.js --mode=preset-divergence against a
+    // real LLM. Every _doTranslate() resolution path (cache hit, TM hit,
+    // live engine call, fallback) pushes (text, result) into
+    // contextMemory BEFORE returning — so without this exclusion, `text`
+    // (the exact line about to be sent below) could already be sitting in
+    // the window from the PREVIOUS call for this same line, rendered into
+    // the prompt as "<text> → <text's own prior translation>" under a
+    // header telling the model these are recent lines "to stay consistent
+    // with" and "not to re-translate". That isn't a bias toward the old
+    // answer — it's an answer key with a copy instruction attached, and a
+    // model reproducing it byte-for-byte regardless of which prompt preset
+    // asked is the expected result of that prompt, not a mystery. See
+    // context-memory.js's getExcluding() for why this is exact-string,
+    // not fuzzy. `text` (not `engineInput`, which may be glossary-masked
+    // — see this method's own construction of `engineInput` above) is
+    // what was actually pushed to the window by every write site in
+    // _doTranslate(), so it's what has to be excluded here too.
+    const contextWindow = this.contextMemory.getExcluding(text);
+    console.log(`[Pipeline] context window: ${contextWindow.length} pair(s) sent (${this.contextMemory.size} held, current line excluded=${contextWindow.length < this.contextMemory.size})`);
+
     for (let attempt = 0; attempt <= retries; attempt++) {
       // v3.13.55: rate limiting used to be enforced once in _doTranslate, before
       // the primary engine's *first* attempt only — so a retry or a fallback
@@ -896,7 +1016,7 @@ class TranslationPipeline extends EventEmitter {
           targetLang: tgtLang,
           sourceLangName: getLanguageName(srcLang),
           targetLangName: getLanguageName(tgtLang),
-          context: this.contextMemory.get(),
+          context: contextWindow,
           glossary: glossaryBlock,
           glossaryId: deeplGlossaryId,
           keepUnchangedTerms: deeplKeepUnchangedTerms,
