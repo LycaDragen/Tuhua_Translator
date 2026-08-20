@@ -554,6 +554,19 @@
                         </div>
                     </div>
 
+                    <!-- v3.13.76: proactive game-engine advisory — no data-i18n on
+                         the text/button, they're rendered dynamically by
+                         renderEngineAdvice() (renderer.js), not the generic
+                         [data-i18n] sweep, because the message needs a runtime
+                         {engine}/{method} substitution that a static translation
+                         swap would clobber. Shown independently of the hook
+                         selector below (it must appear even with zero hooks —
+                         the Ren'Py/Godot/FNA case). -->
+                    <div id="engine-advice" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800">
+                        <p id="engine-advice-text" class="text-[10px] text-amber-700 dark:text-amber-400 leading-relaxed"></p>
+                        <button id="engine-advice-action" type="button" onclick="applyEngineAdvice()" class="hidden mt-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 underline hover:no-underline"></button>
+                    </div>
+
                     <!-- Hook Selector (v3.8.22) -->
                     <div id="hook-selector-section" class="hidden space-y-2 p-3 rounded-lg bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-900/30">
                         <div class="flex items-center justify-between">
