@@ -22,6 +22,8 @@ const GlossaryService = require('../services/translation/glossary');
 const ProfileStore = require('../services/profiles/profile-store');
 const RegexFilterService = require('../services/regex-filter');
 const HookCleaningSettingsService = require('../services/hook-cleaning-settings');
+const llmProviders = require('../services/translation/llm-providers');
+const promptPresets = require('../services/translation/prompt-presets');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -87,9 +89,68 @@ app.whenReady().then(() => {
       deeplTranslationMemoryId: '',
       deeplTranslationMemoryThreshold: 75,
       deeplLanguageFeatures: null,
+      // v3.13.6x (LLM engine overhaul, Fase 6): global user preference (a
+      // cost/latency-vs-quality tradeoff), not per-game — same reasoning as
+      // llmTemperature. 'prefer_quality_optimized' matches what the app was
+      // ALREADY silently forcing almost all the time before this Fase (see
+      // deepl.js: custom_instructions, sent by default, forces DeepL's
+      // next-gen model) — this setting mostly makes an existing behavior
+      // visible and overridable rather than changing it.
+      deeplModelType: 'prefer_quality_optimized',
       maxContextHistory: 5,
       historyLimit: 5,
+      // v3.13.59 (LLM engine overhaul, Fase 4): kept as a default (not
+      // deleted) purely so the one-time migration below has something to
+      // read from on an existing install — nothing in the app reads
+      // `systemPrompt` for translation anymore, see promptTemplate below.
       systemPrompt: '',
+      // '' means "use prompt-presets.js's DEFAULT_TEMPLATE" — see
+      // llm-base.js/prompt-template.js. Global only for now; a per-profile
+      // override is designed (see the plan) but not wired until Fase 7
+      // injects profileStore into the pipeline.
+      promptTemplate: '',
+      // Independent of promptTemplate — see fewShotEnabled's doc comment
+      // in llm-base.js for why the old `if (!systemPrompt)` coupling was
+      // a real bug (a custom prompt silently killed few-shot).
+      llmFewShot: true,
+      // v3.13.57 (LLM engine overhaul, Fase 2): rollback interruptor for
+      // the LLM output sanitizer (llm-output.js) — set false to fall back
+      // to a bare .trim() with none of its heuristics.
+      llmSanitize: true,
+      // v3.13.6x (LLM engine overhaul, Fase 5): rollback interruptor for
+      // glossary-as-prompt-instruction (glossary-prompt.js). Measured
+      // against two real engines (scripts/test-glossary-compliance.js):
+      // OpenAI hit 100% prompt-only compliance, but a local 3B model
+      // (Qwen2.5-3B-Instruct via Ollama) only hit 81.8% — it followed
+      // "translate X as Y" instructions fine but ignored "leave X
+      // unchanged" (source===target entries) and translated the term
+      // anyway. Since glossaryMode is one global setting and Tuhua can't
+      // know in advance whether a given local-llm user's model is strong
+      // enough for prompt-only compliance, 'hybrid' — literal substitution
+      // AND the prompt instruction together — is the safer universal
+      // default: the literal substitution guarantees the term is present
+      // (same ~100% floor as pre-Fase-5 behavior) while the prompt
+      // instruction still helps a capable model integrate it with better
+      // grammar than a raw substituted string. 'prompt' (skip the literal
+      // substitution entirely) is available for a setup known to comply
+      // well, e.g. OpenAI per the measurement above; 'literal' reproduces
+      // the exact pre-Fase-5 behavior for every engine. No UI toggle yet —
+      // same as llmSanitize just above, this is an escape hatch reachable
+      // by editing settings directly if a real-world setup needs it.
+      glossaryMode: 'hybrid',
+      // v3.13.58 (LLM engine overhaul, Fase 3): global — credentials, one
+      // real-world API key per provider id (see llm-providers.js). NOT
+      // profile-scoped, same reasoning as deeplKey/apiKey before it.
+      llmProviderKeys: {},
+      // Sampling params shared by both LLM engines (openai/local-llm) —
+      // deliberately global rather than per-profile: this is "how
+      // deterministic should translations be", a user preference, not a
+      // per-game setting the way the provider/model themselves are.
+      llmTemperature: 0.3,
+      llmMaxTokens: 1500,
+      // null, not 0 — unset. See llm-base.js's constructor comment for why
+      // "not sent" and "sent as 0" must stay distinguishable for top_p.
+      llmTopP: null,
       clickThrough: false,
       profiles: [],
       activeProfile: 'Por Defecto',
@@ -144,13 +205,38 @@ app.whenReady().then(() => {
     glossary.setProfileLayer(startupActiveProfile.glossary);
   }
 
+  // v3.13.58 (LLM engine overhaul, Fase 3): one-time, idempotent seed of
+  // the legacy global `openaiKey` into the new per-provider
+  // `llmProviderKeys` map — see llm-providers.js's
+  // seedProviderKeysFromLegacyOpenAIKey doc comment for why `openaiKey`
+  // itself is deliberately left untouched rather than deleted here.
+  // Runs before the settings snapshot below, same reasoning as the profile
+  // migration above: `settings` must reflect the post-seed store.
+  const seededProviderKeys = llmProviders.seedProviderKeysFromLegacyOpenAIKey(store.get());
+  if (seededProviderKeys) {
+    store.set('llmProviderKeys', seededProviderKeys);
+    log.info('Seeded llmProviderKeys from legacy openaiKey.', { providers: Object.keys(seededProviderKeys) });
+  }
+
+  // v3.13.59 (LLM engine overhaul, Fase 4): same one-time seed pattern —
+  // promotes a non-empty legacy `systemPrompt` into `promptTemplate`
+  // verbatim. See prompt-presets.js's seedPromptTemplateFromLegacySystemPrompt.
+  const seededPromptTemplate = promptPresets.seedPromptTemplateFromLegacySystemPrompt(store.get());
+  if (seededPromptTemplate !== null) {
+    store.set('promptTemplate', seededPromptTemplate);
+    log.info('Seeded promptTemplate from legacy systemPrompt.');
+  }
+
   const settings = store.get();
   log.info('Settings loaded:', { engine: settings.engine, sourceLang: settings.sourceLang, targetLang: settings.targetLang, inputMethod: settings.inputMethod });
 
   // Initialize services
   regexFilter = new RegexFilterService();
   hookCleaningSettings = new HookCleaningSettingsService();
-  pipeline = new TranslationPipeline(settings, { glossary });
+  // v3.13.6x (Fase 6): profileStore injected so DeepL native glossary
+  // auto-sync can read/write the active profile's deeplGlossarySync
+  // bookkeeping — see pipeline.js's constructor comment.
+  pipeline = new TranslationPipeline(settings, { glossary, profileStore });
   textractor = new TextractorConnector(settings.textractorPort || 9251);
   textractorLauncher = new TextractorLauncher(hookCleaningSettings);
   clipboardWatcher = new ClipboardWatcher({ interval: 500 });

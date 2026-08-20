@@ -13,6 +13,10 @@ const VndbService = require('../services/vndb');
 const { profileToSettings, settingsToProfile } = require('../services/profiles/profile-schema');
 const glossaryEntries = require('../services/translation/glossary-entries');
 const textCleaning = require('../services/text-cleaning');
+const llmProviders = require('../services/translation/llm-providers');
+const { deleteGlossary: deleteDeeplGlossary } = require('../services/translation/deepl-glossary-sync');
+const speakerExtract = require('../services/speaker-extract');
+const promptPresets = require('../services/translation/prompt-presets');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
 // check), so it's requirable here too — used for the few strings the
@@ -60,6 +64,10 @@ class IpcHandlers {
     this._lastHandledTime = 0;
     // v3.13.12: Store last handled text for auto-retranslation when settings change
     this._lastHandledText = '';
+    // v3.13.6x (Fase 7a): companion to _lastHandledText — the speaker that
+    // was extracted for it, so a settings-change auto-retranslation (below)
+    // still has {speaker} available instead of silently losing it.
+    this._lastSpeakerName = null;
     // OCR dedup: persistent hash that doesn't expire — same text from OCR
     // should NEVER be re-translated until the game screen changes
     this._lastOcrTextHash = '';
@@ -102,6 +110,36 @@ class IpcHandlers {
       return this.store.get() || {};
     });
 
+    // v3.13.58 (LLM engine overhaul, Fase 3): read-only — llm-providers.js
+    // lives in the main process (src/services/) and isn't reachable from
+    // the sandboxed renderer via require(), so this is what feeds the
+    // provider dropdown / local endpoint preset dropdown / model
+    // datalists. Only the fields the UI actually needs are sent —
+    // `reasoningModelPattern` (a RegExp) doesn't survive structured clone
+    // and isn't needed there anyway, request-param overrides are decided
+    // in the main process.
+    ipcMain.handle('get-llm-providers', () => {
+      return {
+        providers: llmProviders.CLOUD_PROVIDERS.map((p) => ({
+          id: p.id, labelKey: p.labelKey, requiresKey: p.requiresKey,
+          defaultModel: p.defaultModel, models: p.models, beta: !!p.beta, docsUrl: p.docsUrl || ''
+        })),
+        localPresets: llmProviders.LOCAL_ENDPOINT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey }))
+      };
+    });
+
+    // v3.13.59 (LLM engine overhaul, Fase 4): read-only, same reasoning as
+    // get-llm-providers just above — prompt-presets.js lives in the main
+    // process; this is what feeds the renderer's preset <select> and lets
+    // it match a saved/typed template back to a preset id (or 'custom')
+    // without duplicating the actual prompt prose text into renderer.js.
+    ipcMain.handle('get-prompt-presets', () => {
+      return {
+        presets: promptPresets.PROMPT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey, template: p.template })),
+        defaultTemplate: promptPresets.DEFAULT_TEMPLATE
+      };
+    });
+
     ipcMain.handle('save-settings', async (event, data) => {
       if (typeof data !== 'object' || data === null) {
         return { success: false, error: 'Invalid settings data' };
@@ -109,6 +147,16 @@ class IpcHandlers {
 
       // Merge with existing settings instead of replacing
       const currentSettings = this.store.get();
+      // v3.13.6x (Fase 9 testing follow-up, ronda 5/6): diagnostic (ronda 5)
+      // plus now a real decision input (ronda 6) — see its two uses below,
+      // clearContext() and the auto-retranslate block. Confirms whether the
+      // RENDERER even included `promptTemplate` in this specific
+      // save-settings call, and whether its value actually differs from
+      // what was already stored.
+      const promptTemplateChanged = 'promptTemplate' in data && data.promptTemplate !== currentSettings.promptTemplate;
+      if (promptTemplateChanged) {
+        console.log(`[Tuhua] save-settings: promptTemplate changed (${(currentSettings.promptTemplate || '').length} chars -> ${(data.promptTemplate || '').length} chars)`);
+      }
       const mergedSettings = { ...currentSettings, ...data };
       this.store.set(mergedSettings);
 
@@ -302,28 +350,55 @@ class IpcHandlers {
       const engineChanged = data.engine && data.engine !== currentSettings.engine;
       const sourceLangChanged = data.sourceLang && data.sourceLang !== currentSettings.sourceLang;
       const targetLangChanged = data.targetLang && data.targetLang !== currentSettings.targetLang;
+      // v3.13.6x (LLM engine overhaul, Fase 7e): a genuine change in HOW
+      // text arrives (Textractor ↔ OCR ↔ clipboard) is data provenance
+      // changing mid-conversation — the {contextBoth} window an LLM sees
+      // would otherwise mix lines whose {inputMethod} the prompt itself
+      // now describes differently. Deliberately NOT extended to
+      // pause/resume — pausing translation isn't a scene change, and
+      // clearing context on every pause/resume cycle would defeat the
+      // point of carrying context across a player's natural reading pauses.
+      const inputMethodChanged = data.inputMethod && data.inputMethod !== currentSettings.inputMethod;
 
-      // v3.13.19: Reset Context Memory on any of these three changes — mixing
+      // v3.13.19: Reset Context Memory on any of these changes — mixing
       // context lines from a different engine/source language/target language
       // into the next translation call ranges from meaningless (DeepL's
       // context must be the same language as the new source) to actively
       // misleading (an LLM engine would see prior turns in the old target
       // language while being told to now answer in a different one).
-      if (engineChanged || sourceLangChanged || targetLangChanged) {
+      // v3.13.6x (Fase 9 testing follow-up, ronda 6): `promptTemplateChanged`
+      // added — same reasoning as inputMethodChanged, weaker but real: even
+      // after pipeline.js's context-poisoning fix (the CURRENT line can no
+      // longer leak into its own context), the OTHER lines still in the
+      // window were translated under the OLD preset, and every preset's
+      // rule 6 explicitly tells the model to "stay consistent with the
+      // terminology and character voices established in the recent lines
+      // above" — pointing it right back at the style being compared away
+      // from. A prompt-preset A/B comparison should start from a clean
+      // window.
+      if (engineChanged || sourceLangChanged || targetLangChanged || inputMethodChanged || promptTemplateChanged) {
         this.pipeline.clearContext();
       }
 
-      if ((engineChanged || sourceLangChanged || targetLangChanged) && this._lastHandledText) {
+      if ((engineChanged || sourceLangChanged || targetLangChanged || promptTemplateChanged) && this._lastHandledText) {
         const newEngine = data.engine || currentSettings.engine || 'google-free';
         const newSourceLang = data.sourceLang || currentSettings.sourceLang || 'auto';
         const newTargetLang = data.targetLang || currentSettings.targetLang || 'es';
-        console.log(`[Tuhua] Settings changed while text is on-screen — auto-retranslating last text with ${newEngine} (${newSourceLang} → ${newTargetLang})`);
-        // Use translateNow (no debounce) for immediate retranslation
+        console.log(`[Tuhua] Settings changed while text is on-screen — auto-retranslating last text with ${newEngine} (${newSourceLang} → ${newTargetLang})${promptTemplateChanged ? ' [promptTemplate changed]' : ''}`);
+        // Use translateNow (no debounce) for immediate retranslation.
+        // v3.13.6x (Fase 9 testing follow-up, ronda 6): bypassMemory:true —
+        // this IS an explicit "redo with the settings I just changed"
+        // request; without it, a cache/TM hit could silently answer with
+        // the OLD settings' translation and this call would never reach
+        // the engine at all (reproduced for real: this exact log line
+        // followed immediately by a TM exact hit, in a real session).
         try {
           await this.pipeline.translateNow(this._lastHandledText, {
             source: newSourceLang,
             target: newTargetLang,
-            engine: newEngine
+            engine: newEngine,
+            speaker: this._lastSpeakerName,
+            bypassMemory: true
           });
         } catch (retransErr) {
           console.warn(`[Tuhua] Auto-retranslation failed: ${retransErr.message}`);
@@ -512,10 +587,15 @@ class IpcHandlers {
     // very next translation, not just after the next profile switch.
     ipcMain.handle('get-glossary', () => {
       const active = this.profileStore.getActive();
+      // v3.13.55: getEffective() must run before getCompileErrors() reads
+      // off it — it's what recomputes and self-tests the merged list (see
+      // glossary.js). Order matters here.
+      const effective = this.glossary.getEffective();
       return {
         global: this.glossary.getAll(),
         profile: active ? active.glossary : [],
-        effective: this.glossary.getEffective(),
+        effective,
+        compileErrors: this.glossary.getCompileErrors(),
         activeProfileId: active ? active.id : null
       };
     });
@@ -983,8 +1063,29 @@ class IpcHandlers {
       }
     });
 
-    ipcMain.handle('delete-profile', (event, id) => {
+    ipcMain.handle('delete-profile', async (event, id) => {
       try {
+        // v3.13.6x (Fase 6): best-effort cleanup of the profile's remote
+        // DeepL glossary (if auto-sync ever created one) BEFORE the
+        // profile record itself is gone — otherwise the glossaryId is lost
+        // and the remote resource is orphaned in the user's DeepL account
+        // forever (DeepL also caps the number of glossaries per account).
+        // Never blocks the actual deletion: a DeepL API hiccup here must
+        // not prevent removing a profile.
+        const target = this.profileStore.getById(id);
+        if (target?.deeplGlossarySync?.glossaryId) {
+          try {
+            const deeplEngine = this.pipeline.getEngine('deepl');
+            await deleteDeeplGlossary({
+              baseUrl: deeplEngine.baseUrl,
+              apiKey: deeplEngine.apiKey,
+              glossaryId: target.deeplGlossarySync.glossaryId
+            });
+          } catch (cleanupErr) {
+            console.error(`[Tuhua] Failed to clean up DeepL glossary for deleted profile "${target.name}": ${cleanupErr.message}`);
+          }
+        }
+
         const removed = this.profileStore.remove(id);
         if (!removed) return { success: false, error: 'Profile not found' };
         return { success: true };
@@ -1051,7 +1152,7 @@ class IpcHandlers {
     });
 
     // ===== API Key Validation =====
-    ipcMain.handle('validate-api-key', async (event, { engine, apiKey, endpoint }) => {
+    ipcMain.handle('validate-api-key', async (event, { engine, apiKey, endpoint, provider }) => {
       try {
         switch (engine) {
           case 'deepl': {
@@ -1097,7 +1198,18 @@ class IpcHandlers {
           }
 
           case 'openai': {
-            const resp = await axios.get('https://api.openai.com/v1/models', {
+            // v3.13.58 (Fase 3): this used to be hardcoded to OpenAI's own
+            // API — now it hits whichever provider's baseUrl was selected
+            // (llm-providers.js), so "Validar" actually validates the key
+            // against the provider the dropdown has selected. `endpoint`
+            // (the 'custom' provider's user-typed URL) wins when set, same
+            // precedence as the real request path in openai.js.
+            const selectedProvider = llmProviders.getProvider(provider) || llmProviders.getProvider('openai');
+            const base = endpoint || selectedProvider.baseUrl;
+            if (!base) {
+              return { valid: false, code: 'endpoint_not_configured', params: {} };
+            }
+            const resp = await axios.get(`${base}/models`, {
               timeout: 8000,
               headers: { 'Authorization': `Bearer ${apiKey}` }
             });
@@ -1297,6 +1409,14 @@ class IpcHandlers {
       this._handleText(text);
     });
 
+    // v3.13.6x (Fase 9 testing follow-up): one shared channel for the
+    // overlay's new "↻" toolbar button AND the Ctrl+Shift+R global
+    // shortcut (fixed here too — see _retranslateCurrent's own comment
+    // for why it did nothing before this).
+    ipcMain.on('request-retranslate', () => {
+      this._retranslateCurrent();
+    });
+
     // v3.13.40-fix: sendSync (not invoke/handle) — main-preload.js calls
     // this synchronously while building the `api` object, so app.getVersion()
     // needs to be available before contextBridge.exposeInMainWorld runs.
@@ -1368,7 +1488,11 @@ class IpcHandlers {
         if (!imageBuffer) {
           return { success: false, error: 'Failed to capture screen' };
         }
-        const result = await this.ocrService.recognize(imageBuffer);
+        // force:true — manual capture is an explicit user action, so it must
+        // bypass the similarity dedup that the auto-capture loop relies on
+        // (otherwise clicking the button while the same line is on screen
+        // silently does nothing, see v3.13.75 OCR test round)
+        const result = await this.ocrService.recognize(imageBuffer, { force: true });
         return { success: true, text: result.text, confidence: result.confidence };
       } catch (err) {
         console.error('[OCR] Capture error:', err.message);
@@ -1734,12 +1858,23 @@ class IpcHandlers {
    * Includes deduplication to prevent double-translation when the same text
    * arrives from both stdout and TCP channels.
    */
-  async _handleText(text) {
+  async _handleText(text, { force = false } = {}) {
+    // v3.13.6x (LLM engine overhaul, Fase 7a): captured here, not lower —
+    // the two builtin filters right below (angle-bracket removal, Japanese
+    // quote extraction) both DESTROY the speaker's name on their way to
+    // producing clean dialogue text. Extracting it first, before either
+    // filter runs, is what lets the name survive at all while leaving the
+    // filters' own job (and the text they hand back) completely unchanged.
+    let speakerName = null;
     // v3.8.25: Safety net — strip any remaining null bytes, control chars,
     // and apply deduplication for text that arrives from TCP (bypassing _cleanGameText)
     if (text) {
       const originalText = text;
       text = text.replace(/[\u0000\u0001-\u0008\u000B\u000C\u000E-\u001F\uFEFF]/g, '');
+
+      const speakerResult = speakerExtract.extractSpeaker(text);
+      speakerName = speakerResult.speaker;
+      text = speakerResult.text;
 
       // v3.11.33: Apply regex text filters before dedup/translation
       // Always apply if regexFilter service is available (respects enableRegexFilter toggle)
@@ -1806,7 +1941,9 @@ class IpcHandlers {
     if (isOcr) {
       // Light dedup: only skip if EXACT same text was just processed.
       // The heavy similarity dedup is done in ocr.js before emitting.
-      if (this._lastOcrTextHash === textHash) {
+      // force=true (manual capture button) bypasses this — the user explicitly
+      // asked to rescan, so an identical result must still reach the overlay.
+      if (!force && this._lastOcrTextHash === textHash) {
         console.log(`[Tuhua] OCR exact duplicate skipped: "${text.substring(0, 30)}..."`);
         return;
       }
@@ -1822,6 +1959,7 @@ class IpcHandlers {
 
     // v3.13.12: Store last handled text for auto-retranslation when settings change
     this._lastHandledText = text;
+    this._lastSpeakerName = speakerName;
 
     console.log(`[Tuhua] _handleText: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}, active=${this._translationActive}, inputMethod=${settings.inputMethod}, text="${text.substring(0, 60)}..."`);
 
@@ -1862,10 +2000,20 @@ class IpcHandlers {
       const translation = await this.pipeline.translate(text, {
         source: srcLang,
         target: tgtLang,
-        engine: engineName
+        engine: engineName,
+        // v3.13.6x (Fase 7a): extracted above, before the filters that
+        // would otherwise destroy it — see this method's top comment.
+        speaker: speakerName
       });
 
-      console.log(`[Tuhua] Translation result: "${translation?.substring(0, 60)}..."`);
+      // v3.13.6x (Fase 9 testing follow-up, ronda 4): was substring(0, 60)
+      // — too short to ever recover the FULL text of a real-world bad
+      // output (e.g. a refusal that slipped past the sanitizer) from an
+      // exported log, which is exactly what made a real refusal-leak find
+      // during testing un-rootcause-able after the fact. 300 is still a
+      // truncation (very long lines exist), but covers the actual refusal
+      // boilerplates seen so far with room to spare.
+      console.log(`[Tuhua] Translation result: "${translation?.substring(0, 300)}${translation && translation.length > 300 ? '...' : ''}"`);
       // v3.13.06: Double-check that translation is still active before sending
       // to overlay. There can be a race condition where the user pauses
       // translation while a pipeline.translate() call is in-flight.
@@ -1882,7 +2030,92 @@ class IpcHandlers {
       // for a source→target glossary, and the exact bug Lyca flagged.
       this.windowManager.sendToOutputOverlay('update-output', { text: translation, originalText: text, targetLang: tgtLang });
     } catch (err) {
+      // v3.13.55: a SUPERSEDED error means the debounce in pipeline.translate()
+      // rejected this call because newer text arrived before it fired — routine,
+      // expected behavior on every fast-scrolling line, not a translation
+      // failure. It used to fall through to the generic branch below and paint
+      // `[Error] Translation superseded by new text` over the overlay, which
+      // could flash on screen for any line the debounce superseded.
+      if (err.code === 'SUPERSEDED') {
+        return;
+      }
       console.error(`[Tuhua] Translation error:`, err.message);
+      this.windowManager.sendToOutputOverlay('update-output', {
+        text: `[Error] ${err.message}`
+      });
+    }
+  }
+
+  /**
+   * v3.13.6x (Fase 9 testing follow-up): re-translate whatever line is
+   * CURRENTLY shown, using CURRENT settings — the overlay's new "↻" toolbar
+   * button, next to 📖+. Real bug found by Lyca: Ctrl+Shift+R has fired
+   * `shortcut-pressed{action:'retranslate'}` since it was added, but
+   * handleShortcut() in renderer.js only ever handled
+   * 'toggle-clickthrough' — 'retranslate' silently did nothing, ever. This
+   * replaces it with an actual, verified path.
+   *
+   * Only meaningful for Textractor/Clipboard/OCR — the three input methods
+   * that actually show the floating output overlay this button lives on.
+   * `_lastHandledText`/`_lastSpeakerName` are set by _handleText() for all
+   * three, so one implementation covers them with no per-input-method
+   * branching — unlike OCR's separate "📸 Capturar ahora" button (that one
+   * re-reads the SCREEN; this one re-reads the last text Tuhua already
+   * received, which is the only thing Textractor/Clipboard even have).
+   * v3.13.6x correction (Lyca, same day): does NOT apply to XUAT — XUAT
+   * replaces text directly inside the game via XUnity.AutoTranslator, it
+   * has no output overlay at all, and its text never reaches
+   * _handleText() in the first place (xuat-server.js calls
+   * pipeline.translateNow() directly) — so `_lastHandledText` is never set
+   * from XUAT either way.
+   *
+   * Uses translateNow() (no debounce) like the existing engine/language
+   * auto-retranslate above, but — unlike that one — explicitly pushes the
+   * result to the output overlay: translateNow()'s return value alone only
+   * reaches the main window's small preview panel via pipeline's own
+   * 'translation' event (see index.js), never the floating overlay.
+   */
+  async _retranslateCurrent() {
+    if (!this._lastHandledText) {
+      console.log('[Tuhua] Retranslate requested but there is no last text yet — ignoring');
+      return;
+    }
+    const settings = this.store.get();
+    const srcLang = settings.sourceLang || 'ja';
+    const tgtLang = settings.targetLang || 'es';
+    const engineName = settings.engine || 'google-free';
+    console.log(`[Tuhua] Manual retranslate requested: engine=${engineName} (${srcLang} → ${tgtLang})`);
+    try {
+      // v3.13.6x (Fase 9 testing follow-up, ronda 6): bypassMemory:true —
+      // the ↻ button IS an explicit "redo this now" request; without it, a
+      // cache/TM hit could answer from an OLD prompt/engine and this call
+      // would never reach the engine at all, which is exactly what made
+      // preset comparisons via this button look broken.
+      const translation = await this.pipeline.translateNow(this._lastHandledText, {
+        source: srcLang,
+        target: tgtLang,
+        engine: engineName,
+        speaker: this._lastSpeakerName,
+        bypassMemory: true
+      });
+      // v3.13.6x (Fase 9 testing follow-up, ronda 5): this path never
+      // logged its result at all — unlike _handleText's normal flow (see
+      // its own "[Tuhua] Translation result:" line), which made a real
+      // race condition here (fixed alongside this — see
+      // pipeline.js's translateNow()) much harder to diagnose from an
+      // exported log than it needed to be.
+      console.log(`[Tuhua] Manual retranslate result: "${translation?.substring(0, 300)}${translation && translation.length > 300 ? '...' : ''}"`);
+      this.windowManager.sendToOutputOverlay('update-output', {
+        text: translation,
+        originalText: this._lastHandledText,
+        targetLang: tgtLang
+      });
+    } catch (err) {
+      if (err.code === 'SUPERSEDED') {
+        console.log('[Tuhua] Manual retranslate superseded by a newer request — discarding');
+        return;
+      }
+      console.error('[Tuhua] Manual retranslate failed:', err.message);
       this.windowManager.sendToOutputOverlay('update-output', {
         text: `[Error] ${err.message}`
       });
@@ -2027,9 +2260,9 @@ class IpcHandlers {
 
       // Forward OCR text events to the translation pipeline
       this.ocrService.removeAllListeners('text'); // Remove previous listeners
-      this.ocrService.on('text', (text) => {
+      this.ocrService.on('text', (text, { force } = {}) => {
         console.log(`[OCR] Text recognized: "${text.substring(0, 50)}..."`);
-        this._handleText(text);
+        this._handleText(text, { force });
       });
 
       // Forward OCR status to renderer
@@ -2124,6 +2357,10 @@ class IpcHandlers {
   unregister() {
     const channels = [
       'get-settings', 'save-settings',
+      // v3.13.58 (LLM engine overhaul, Fase 3)
+      'get-llm-providers',
+      // v3.13.59 (Fase 4)
+      'get-prompt-presets',
       'get-glossary', 'save-glossary', 'delete-glossary-entry',
       'import-glossary', 'export-glossary', 'browse-save-json', 'browse-open-json',
       'get-history', 'clear-history', 'export-history', 'clear-context',
@@ -2156,6 +2393,7 @@ class IpcHandlers {
     ipcMain.removeAllListeners('manual-translate');
     ipcMain.removeAllListeners('get-app-version');
     ipcMain.removeAllListeners('overlay-word-context-menu');
+    ipcMain.removeAllListeners('request-retranslate');
     // Cleanup OCR
     if (this.ocrService) {
       this.ocrService.stopAutoCapture();

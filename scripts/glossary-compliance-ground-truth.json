@@ -1,0 +1,64 @@
+{
+  "_meta": {
+    "sourceLang": "ja",
+    "targetLang": "es",
+    "note": "Corpus for the Fase 5 Paso 0 measurement: does an LLM obey a glossary given as a prompt instruction as reliably as the literal string-replacement path? Small on purpose — this is a real-money A/B against a live API, not an exhaustive suite."
+  },
+  "glossary": [
+    { "id": "g1", "source": "灰音", "target": "Haine", "mode": "exact", "enabled": true },
+    { "id": "g2", "source": "アルテミス", "target": "Artemis", "mode": "exact", "enabled": true },
+    { "id": "g3", "source": "せんぱい", "target": "senpai", "mode": "exact", "enabled": true },
+    { "id": "g4", "source": "桜花学園", "target": "桜花学園", "mode": "exact", "enabled": true },
+    { "id": "g5", "source": "ロゼ", "target": "Rose", "mode": "exact", "enabled": true }
+  ],
+  "cases": [
+    {
+      "id": "C1",
+      "source": "灰音、おはよう。今日も一緒に学校へ行こう。",
+      "expectedTerms": ["Haine"],
+      "note": "single character-name rendering"
+    },
+    {
+      "id": "C2",
+      "source": "アルテミスは本当に強い戦士だ。誰も彼女には勝てない。",
+      "expectedTerms": ["Artemis"],
+      "note": "katakana name rendering"
+    },
+    {
+      "id": "C3",
+      "source": "せんぱい、待ってください!一緒に帰りましょう。",
+      "expectedTerms": ["senpai"],
+      "note": "honorific-style term, tests whether the model keeps a term the instruction says to keep verbatim rather than translating its meaning"
+    },
+    {
+      "id": "C4",
+      "source": "桜花学園に着いたら、まず職員室へ行ってください。",
+      "expectedTerms": ["桜花学園"],
+      "note": "source===target 'keep unchanged' case — the exact VNDB no-op the plan calls out. This is the case literal replacement gets right by construction (a no-op) but that never proves the model would leave it alone on its own."
+    },
+    {
+      "id": "C5",
+      "source": "灰音とロゼは幼馴染で、いつも一緒にいる。",
+      "expectedTerms": ["Haine", "Rose"],
+      "note": "two glossary terms in the same line"
+    },
+    {
+      "id": "C6",
+      "source": "アルテミスとせんぱいが桜花学園の前で話している。",
+      "expectedTerms": ["Artemis", "senpai", "桜花学園"],
+      "note": "three terms mixing renderings and keep-unchanged in one line — the hardest case in this corpus"
+    },
+    {
+      "id": "C7",
+      "source": "今日は誰も学校に来なかった。静かな一日だった。",
+      "expectedTerms": [],
+      "note": "no glossary term present — negative control. The prompt leg's {glossary} block should render empty (collapsed line) here; compliance for a line with zero expected terms is trivially 'pass' and exists to confirm the negative control doesn't error, not to move the percentage."
+    },
+    {
+      "id": "C8",
+      "source": "ロゼが灰音に手紙を渡した。中には短いメッセージが書かれていた。",
+      "expectedTerms": ["Rose", "Haine"],
+      "note": "both names again in a different sentence structure, to avoid the corpus being a single sentence pattern repeated with names swapped"
+    }
+  ]
+}

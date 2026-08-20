@@ -52,12 +52,29 @@
  *                    "no-context" leg always runs with window=0.
  *   --json=PATH      Report output path (default scripts/context-report.json)
  *   --quiet          Suppress per-line detail, print summary only
+ *   --mode=preset-divergence
+ *                    A different experiment (see the "Preset-divergence
+ *                    mode" section below) — measures whether retranslating
+ *                    the same line under different prompt presets actually
+ *                    produces different output, and whether the line being
+ *                    translated leaks into its own context window. Always
+ *                    targets local-llm; requires LOCAL_LLM_ENDPOINT and
+ *                    LOCAL_LLM_MODEL, ignores --engine/--window/--json's
+ *                    context-corpus meaning:
+ *   XDG_CONFIG_HOME=$(mktemp -d) LOCAL_LLM_ENDPOINT=http://localhost:11434/v1 \
+ *     LOCAL_LLM_MODEL=qwen2.5:3b-instruct \
+ *     node scripts/test-context-memory.js --mode=preset-divergence
+ *   --mode=unit
+ *                    Plain-Node unit checks for context-memory.js's push()/
+ *                    getExcluding() — no engine, no network, no ground
+ *                    truth file needed: `node scripts/test-context-memory.js --mode=unit`
  */
 
 const fs = require('fs');
 const path = require('path');
 
 const TranslationPipeline = require('../src/services/translation/pipeline');
+const { PROMPT_PRESETS } = require('../src/services/translation/prompt-presets');
 
 const ROOT = path.resolve(__dirname, '..');
 const GROUND_TRUTH = path.join(__dirname, 'context-ground-truth.json');
@@ -110,7 +127,14 @@ function buildPipeline(engineName, windowSize, meta) {
     targetLang: meta.targetLang,
     deeplKey: process.env.DEEPL_API_KEY,
     deeplUsePro: process.env.DEEPL_USE_PRO === 'true',
+    // v3.13.58 (Fase 3) moved the openai engine's key source from the flat
+    // `openaiKey` setting to the provider-keyed `llmProviderKeys` map —
+    // this bench predates that and was still setting the now-unread key,
+    // silently failing every openai call with "API key is required" ever
+    // since. `openaiKey` kept here too since it's still harmless/ignored.
     openaiKey: process.env.OPENAI_API_KEY,
+    llmProviderKeys: { openai: process.env.OPENAI_API_KEY },
+    llmProvider: 'openai',
     // No default here on purpose — pipeline.js's own default
     // (http://localhost:1234/v1, LM Studio's port) would silently point at
     // the wrong server for Ollama (11434) and produce a confusing
@@ -289,10 +313,277 @@ function printLegSummary(leg) {
     `${C.dim}(engine calls=${leg.stats.totalTranslations}, cache hits=${leg.stats.cacheHits}, TM hits=${leg.stats.tmHits})${C.reset}`);
 }
 
+// ─── Offline unit checks for context-memory.js ───────────────────────────────
+//
+// v3.13.6x (Fase 9 testing follow-up, ronda 6): context-memory.js had zero
+// dedicated unit coverage before this — every existing check in this file
+// exercises it only indirectly, through a full pipeline + real engine call.
+// These are plain Node, no engine, no network — pin push()'s new
+// replace-and-promote behavior and getExcluding() (the two changes that fix
+// the context-poisoning bug) in isolation from everything else that could
+// possibly go wrong in a real translation call.
+
+function runUnitChecks(quiet) {
+  const ContextMemory = require('../src/services/translation/context-memory');
+  const results = [];
+  const unitCheck = (id, fn, note) => {
+    let outcome;
+    try { outcome = fn(); } catch (e) { outcome = { pass: false, error: e.message }; }
+    results.push({ id, note, ...outcome });
+  };
+
+  unitCheck('push-of-an-existing-source-replaces-and-promotes-instead-of-duplicating', () => {
+    const cm = new ContextMemory(5);
+    cm.push('A', 'a1');
+    cm.push('B', 'b1');
+    cm.push('A', 'a2'); // same source again — must replace, not append a 2nd copy
+    const entries = cm.get();
+    const aEntries = entries.filter((e) => e.source === 'A');
+    const pass = entries.length === 2 && aEntries.length === 1 && aEntries[0].translation === 'a2' && entries[entries.length - 1].source === 'A';
+    return { pass, actual: entries };
+  }, 'The direct fix for duplicate-poisoning: a repeated push must overwrite AND move to the most-recent slot ("promote"), not grow the window with copies.');
+
+  unitCheck('five-retranslates-of-one-line-leave-a-window-of-size-one', () => {
+    const cm = new ContextMemory(5);
+    for (let i = 0; i < 5; i++) cm.push('X', `t${i}`);
+    const entries = cm.get();
+    return { pass: entries.length === 1 && entries[0].translation === 't4', actual: entries };
+  }, "This is literally what happened in Lyca's real sessions: retranslating the same on-screen line via ↻ repeatedly used to leave 5 duplicate pairs, evicting every OTHER line of real scene context.");
+
+  unitCheck('getExcluding-omits-only-exact-source-matches', () => {
+    const cm = new ContextMemory(5);
+    cm.push('こんにちは', 't1');
+    cm.push('こんにちわ', 't2'); // one character different — must survive, not be fuzzy-excluded
+    const excluded = cm.getExcluding('こんにちは');
+    return { pass: excluded.length === 1 && excluded[0].source === 'こんにちわ', actual: excluded };
+  }, "Deliberately NOT fuzzy — see getExcluding()'s own header comment for why a near-identical prior line is legitimate context, not a duplicate to drop.");
+
+  unitCheck('getExcluding-on-an-empty-window-returns-an-empty-array', () => {
+    const cm = new ContextMemory(5);
+    const excluded = cm.getExcluding('anything');
+    return { pass: Array.isArray(excluded) && excluded.length === 0, actual: excluded };
+  });
+
+  unitCheck('get-still-returns-the-raw-unfiltered-window', () => {
+    const cm = new ContextMemory(5);
+    cm.push('A', 'a');
+    cm.push('B', 'b');
+    const all = cm.get();
+    return { pass: all.length === 2, actual: all };
+  }, "get() is untouched by this fix on purpose — _tryEngine() is the only caller that needs the current-line exclusion, and get() is what this bench's own with-context/no-context legs snapshot to build incomingWindow.");
+
+  unitCheck('getExcluding-does-not-mutate-the-underlying-window', () => {
+    const cm = new ContextMemory(5);
+    cm.push('A', 'a1');
+    cm.getExcluding('A');
+    return { pass: cm.get().length === 1 && cm.get()[0].translation === 'a1', actual: cm.get() };
+  });
+
+  unitCheck('maxSize-0-still-drops-everything-including-a-replace-and-promote-push', () => {
+    const cm = new ContextMemory(0);
+    cm.push('A', 'a1');
+    cm.push('A', 'a2');
+    return { pass: cm.get().length === 0, actual: cm.get() };
+  });
+
+  console.log(`${C.bold}context-memory.js unit checks${C.reset} — ${results.length} case(s)\n`);
+  let passed = 0;
+  for (const r of results) {
+    const mark = r.pass ? `${C.green}PASS${C.reset}` : `${C.red}FAIL${C.reset}`;
+    console.log(`${mark}  ${r.id}`);
+    if (r.pass) passed++;
+    if (!quiet && !r.pass) {
+      console.log(`      ${C.dim}${JSON.stringify(r, null, 2).split('\n').join('\n      ')}${C.reset}`);
+    }
+  }
+  console.log(`\n${C.bold}Overall${C.reset}  ${passed === results.length ? C.green : C.red}${passed}/${results.length}${C.reset}`);
+  return passed === results.length ? 0 : 1;
+}
+
+// ─── Preset-divergence mode ──────────────────────────────────────────────────
+//
+// v3.13.6x (Fase 9 testing follow-up, ronda 6): a SEPARATE experiment from the
+// "does context help" bench above — this one exists to settle a specific,
+// disputed question: why did retranslating the same line under 4 different
+// prompt presets (plus a hand-written custom template) produce BYTE-IDENTICAL
+// output against real OpenAI, across three real testing sessions? Two
+// competing explanations were on the table: (1) the four presets share ~95%
+// of their text and just don't diverge enough at low temperature, or (2)
+// something is forcing convergence regardless of what the prompt says. This
+// mode measures both, on the same line, against a real LLM (Ollama — the only
+// one reachable from this sandbox), so the answer isn't an assumption.
+//
+// The decisive assertion doesn't depend on what the model replies at all: it
+// inspects the ACTUAL request sent to the LLM and checks whether the line
+// being translated appears inside its own "recent lines for continuity"
+// block — i.e. whether the model was handed the answer to the question it's
+// being asked. See context-memory.js's getExcluding() (once it exists) for
+// the fix this either proves necessary or clears.
+//
+// Capture point: `engine._httpClient.post` is wrapped to RECORD the request
+// body's `messages[0].content` (the rendered system prompt) as a pure
+// side-effect, then delegates to the real client with the SAME arguments and
+// returns whatever it returns, completely unmodified — no `.then()`, no
+// awaiting, no touching `response.data`. This only ever inspects the
+// REQUEST side of the call, never the response, so it stays correct even if
+// streaming (`stream: true`, a Node stream in `response.data`) is ever added
+// to llm-base.js later — confirmed today there's no streaming anywhere in
+// src/services/translation/engines/ (grep for "stream"/"responseType" turns
+// up nothing), but this wrapper doesn't rely on that staying true.
+
+const DIVERGENCE_LINE = 'それはとても奇妙な言い回しだったが、彼女はまったく気にしていないようだった。';
+const DIVERGENCE_CUSTOM_TEMPLATE = 'Translate the following Japanese line into Spanish using very informal internet slang, as if texting a close friend. Output ONLY the translation, nothing else.\n\n{sentence}';
+
+function buildDivergencePipeline(windowSize) {
+  const settings = {
+    engine: 'local-llm',
+    sourceLang: 'ja',
+    targetLang: 'es',
+    customEndpoint: process.env.LOCAL_LLM_ENDPOINT,
+    customModel: process.env.LOCAL_LLM_MODEL,
+    promptTemplate: PROMPT_PRESETS[0].template,
+    llmTemperature: 0,
+    llmFewShot: true,
+    maxContextHistory: windowSize,
+    // Real data lives at ~/.config/tuhua-translator/ — this bench never
+    // touches that (see the file header), but belt-and-braces: skip the
+    // persistent TranslationMemory store entirely for this mode, since
+    // legs deliberately reuse the same line and a warm TM would answer
+    // from a previous leg/run instead of calling the engine.
+    enableTranslationMemory: false
+  };
+  const pipeline = new TranslationPipeline(settings);
+  if (!pipeline.getEngine('local-llm')) {
+    throw new Error(`local-llm engine failed to construct — check LOCAL_LLM_ENDPOINT/LOCAL_LLM_MODEL`);
+  }
+  return pipeline;
+}
+
+// Wraps the CURRENT local-llm engine instance's http client to record every
+// system-prompt sent. Must be re-called after every updateSettings(), since
+// that clears pipeline.engines (pipeline.js's updateSettings()) and the next
+// getEngine('local-llm') call constructs a brand new instance with its own
+// fresh axios default — wrapping the old instance would silently stop
+// capturing anything.
+function wrapEngineCapture(pipeline) {
+  const engine = pipeline.getEngine('local-llm');
+  const realPost = engine._httpClient.post.bind(engine._httpClient);
+  const captured = [];
+  engine._httpClient.post = (url, body, config) => {
+    captured.push(body.messages[0].content);
+    return realPost(url, body, config);
+  };
+  return captured;
+}
+
+async function runDivergenceLeg(legName, windowSize, sequence, quiet) {
+  const pipeline = buildDivergencePipeline(windowSize);
+  pipeline.cache.clear();
+  pipeline.clearContext();
+
+  const outputs = [];
+  const prompts = [];
+  const lineLeakedIntoOwnContext = [];
+
+  for (const step of sequence) {
+    pipeline.updateSettings({ promptTemplate: step.template });
+    const captured = wrapEngineCapture(pipeline);
+
+    const translation = await pipeline.translateNow(DIVERGENCE_LINE, {
+      source: 'ja', target: 'es', engine: 'local-llm'
+    });
+
+    const systemPrompt = captured[captured.length - 1] || '';
+    prompts.push(systemPrompt);
+    outputs.push(translation);
+
+    // The decisive, model-independent check: does the request this call
+    // actually sent contain the very line it's being asked to translate,
+    // anywhere AFTER the "recent lines for continuity" header? A match
+    // here means the model was handed its own prior answer as "context".
+    const headerIdx = systemPrompt.indexOf('Recent lines for continuity');
+    const afterHeader = headerIdx >= 0 ? systemPrompt.slice(headerIdx) : '';
+    lineLeakedIntoOwnContext.push(afterHeader.includes(DIVERGENCE_LINE));
+
+    if (!quiet) {
+      console.log(`${C.dim}[${legName}]${C.reset} preset=${step.id}  leaked=${lineLeakedIntoOwnContext[lineLeakedIntoOwnContext.length - 1] ? C.red + 'YES' + C.reset : C.green + 'no' + C.reset}  → "${translation}"`);
+    }
+  }
+
+  const distinctOutputs = new Set(outputs).size;
+  return { legName, windowSize, outputs, prompts, lineLeakedIntoOwnContext, distinctOutputs };
+}
+
+async function runPresetDivergence(args) {
+  if (!process.env.LOCAL_LLM_ENDPOINT || !process.env.LOCAL_LLM_MODEL) {
+    console.error(`${C.red}--mode=preset-divergence requires LOCAL_LLM_ENDPOINT and LOCAL_LLM_MODEL (it always targets local-llm — Ollama is the only real LLM reachable from this sandbox).${C.reset}`);
+    console.error(`${C.dim}Run: LOCAL_LLM_ENDPOINT=http://localhost:11434/v1 LOCAL_LLM_MODEL=qwen2.5:3b-instruct node scripts/test-context-memory.js --mode=preset-divergence${C.reset}`);
+    return 1;
+  }
+
+  const presetSequence = PROMPT_PRESETS.map(p => ({ id: p.id, template: p.template }));
+  const customSequence = [
+    { id: 'balanced', template: PROMPT_PRESETS[0].template },
+    { id: 'custom', template: DIVERGENCE_CUSTOM_TEMPLATE }
+  ];
+  const controlSequence = [0, 1, 2, 3].map(() => ({ id: 'balanced', template: PROMPT_PRESETS[0].template }));
+
+  console.log(`${C.bold}Preset-divergence bench${C.reset} — engine=local-llm, model=${process.env.LOCAL_LLM_MODEL}, line="${DIVERGENCE_LINE}"\n`);
+
+  const legs = {};
+  legs.controlNoise = await runDivergenceLeg('control-ruido', 0, controlSequence, args.quiet);
+  legs.ctxOff = await runDivergenceLeg('ctx-off', 0, presetSequence, args.quiet);
+  legs.ctxOn = await runDivergenceLeg('ctx-on', 5, presetSequence, args.quiet);
+  legs.ctxOnCustom = await runDivergenceLeg('ctx-on-custom', 5, customSequence, args.quiet);
+
+  console.log(`\n${C.bold}${'─'.repeat(72)}${C.reset}`);
+  console.log(`${C.bold}B1 control-ruido${C.reset} (4x mismo preset, sin contexto): ${legs.controlNoise.distinctOutputs} salida(s) distinta(s) de 4 ${legs.controlNoise.distinctOutputs === 1 ? C.green + '(sin ruido de muestreo, como se espera)' : C.yellow + '(hay ruido — temperature no está en 0 de verdad, o el modelo no es determinista)'}${C.reset}`);
+  console.log(`${C.bold}B2 ctx-off${C.reset} (4 presets, sin contexto): ${legs.ctxOff.distinctOutputs} salida(s) distinta(s) de 4 ${legs.ctxOff.distinctOutputs >= 2 ? C.green + '(los presets SÍ se distinguen)' : C.red + '(los presets NO se distinguen — el problema sería de contenido, no de plumbing)'}${C.reset}`);
+  console.log(`${C.bold}B3 ctx-on${C.reset}  (4 presets, contexto=5): ${legs.ctxOn.distinctOutputs} salida(s) distinta(s) de 4`);
+  console.log(`${C.bold}B5 ctx-on-custom${C.reset} (balanced vs plantilla custom, contexto=5): ${legs.ctxOnCustom.distinctOutputs} salida(s) distinta(s) de 2`);
+
+  const anyLeak = [...legs.ctxOn.lineLeakedIntoOwnContext, ...legs.ctxOnCustom.lineLeakedIntoOwnContext].some(Boolean);
+  console.log(`\n${C.bold}P1 — la línea se filtra a su propio contexto (ctx-on):${C.reset} ${anyLeak ? C.red + 'SÍ, al menos una vez — éste es el bug' + C.reset : C.green + 'no' + C.reset}`);
+
+  const isBugPattern = legs.ctxOff.distinctOutputs >= 2 && legs.ctxOn.distinctOutputs === 1 && anyLeak;
+  const isFixedPattern = !anyLeak && legs.ctxOff.distinctOutputs >= 2 && legs.ctxOn.distinctOutputs === legs.ctxOff.distinctOutputs;
+  const verdict = isBugPattern
+    ? `${C.red}${C.bold}Reproducido: los presets SÍ divergen sin contexto, pero convergen a 1 sola salida con contexto encendido, y la línea se filtra a su propio bloque de contexto. Confirma la hipótesis de envenenamiento de contexto.${C.reset}`
+    : (legs.ctxOff.distinctOutputs < 2
+      ? `${C.yellow}${C.bold}Los presets no divergen incluso SIN contexto — la explicación de "los presets se parecen demasiado" está viva, revisar prompt-presets.js antes que el plumbing.${C.reset}`
+      : (isFixedPattern
+        ? `${C.green}${C.bold}Compuerta go/no-go: PASA. Sin fuga (P1=no) y ctx-on (${legs.ctxOn.distinctOutputs}) == ctx-off (${legs.ctxOff.distinctOutputs}) — el contexto ya no fuerza convergencia.${C.reset}`
+        : `${C.green}${C.bold}No se reprodujo el patrón exacto del bug con esta corrida — ver el detalle de cada leg arriba antes de sacar conclusiones.${C.reset}`));
+  console.log(`\n${verdict}`);
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    model: process.env.LOCAL_LLM_MODEL,
+    line: DIVERGENCE_LINE,
+    legs
+  };
+  fs.writeFileSync(args.json, JSON.stringify(report, null, 2));
+  console.log(`\n${C.dim}Report written to ${args.json}${C.reset}`);
+
+  return 0;
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function run() {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.mode === 'preset-divergence') {
+    if (args.json === path.join(__dirname, 'context-report.json')) {
+      args.json = path.join(__dirname, 'preset-divergence-report.json');
+    }
+    return runPresetDivergence(args);
+  }
+
+  if (args.mode === 'unit') {
+    return runUnitChecks(args.quiet);
+  }
+
   const groundTruth = JSON.parse(fs.readFileSync(GROUND_TRUTH, 'utf8'));
   const windowSize = args.window !== undefined ? parseInt(args.window, 10) : groundTruth._meta.windowSize;
 

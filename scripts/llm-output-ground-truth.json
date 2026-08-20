@@ -1,0 +1,276 @@
+{
+  "_meta": {
+    "description": "sanitizeLLMOutput() ground truth (src/services/translation/llm-output.js, LLM engine overhaul Fase 2). Two sections: `cases` are inputs that MUST be transformed a specific way (a real problem the sanitizer exists to catch), `mustNotChange` are legitimate LLM outputs that MUST survive byte-identical — these are the non-negotiable half per the plan's rollback/risk section, since a false positive here looks like a Tuhua bug, not an LLM one.",
+    "fields": "sourceLangCode/targetLangCode use Tuhua's internal codes (ja/zh/ko/ru/en/es/...). finishReason mirrors the OpenAI-compatible API's finish_reason ('stop'|'length'|null). expectedActions is compared as a set (order-independent); omit it to skip that check."
+  },
+  "cases": [
+    {
+      "id": "clean-translation-passes-through",
+      "input": "Hola, ¿cómo estás?",
+      "sourceText": "こんにちは、元気？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola, ¿cómo estás?",
+      "expectedVerdict": "ok",
+      "expectedActions": []
+    },
+    {
+      "id": "finish-reason-length-marks-truncated",
+      "input": "Cuando llegamos a la ciudad, nos encontramos con",
+      "sourceText": "私たちが街に着いたとき、私たちは出会った",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "length",
+      "expectedVerdict": "truncated",
+      "expectedActions": ["finish-reason-length"]
+    },
+    {
+      "id": "markdown-fence-wrapping-whole-output-is-stripped",
+      "input": "```\nHola, ¿cómo estás?\n```",
+      "sourceText": "こんにちは、元気？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola, ¿cómo estás?",
+      "expectedVerdict": "ok",
+      "expectedActions": ["stripped-code-fence"]
+    },
+    {
+      "id": "well-formed-reasoning-block-is-stripped-leaving-the-answer",
+      "input": "<think>The speaker is using casual speech, so I should keep it casual in Spanish.</think>\n\nHola, ¿qué tal?",
+      "sourceText": "おっす、調子どう？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola, ¿qué tal?",
+      "expectedVerdict": "ok",
+      "expectedActions": ["stripped-reasoning-block"]
+    },
+    {
+      "id": "unclosed-reasoning-block-marks-truncated",
+      "input": "<think>The speaker is using casual speech, so I should",
+      "sourceText": "おっす、調子どう？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": null,
+      "expectedVerdict": "truncated",
+      "expectedActions": ["unclosed-reasoning-block"]
+    },
+    {
+      "id": "labeled-preamble-english-is-stripped",
+      "input": "Here is the translation: Hola, ¿cómo estás?",
+      "sourceText": "こんにちは、元気？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola, ¿cómo estás?",
+      "expectedVerdict": "ok",
+      "expectedActions": ["stripped-preamble"]
+    },
+    {
+      "id": "labeled-preamble-japanese-is-stripped",
+      "input": "翻訳: こんにちは、元気？",
+      "sourceText": "Hello, how are you?",
+      "sourceLangCode": "en",
+      "targetLangCode": "ja",
+      "finishReason": "stop",
+      "expectedText": "こんにちは、元気？",
+      "expectedVerdict": "ok",
+      "expectedActions": ["stripped-preamble"]
+    },
+    {
+      "id": "wrapping-quotes-stripped-when-source-was-not-quoted",
+      "input": "\"Hola, ¿cómo estás?\"",
+      "sourceText": "こんにちは、元気？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola, ¿cómo estás?",
+      "expectedVerdict": "ok",
+      "expectedActions": ["stripped-wrapping-quotes"]
+    },
+    {
+      "id": "refusal-boilerplate-english-is-detected",
+      "input": "I'm sorry, but I can't assist with that request as it involves generating explicit content that violates my usage policies. Let me know if there's something else I can help with.",
+      "sourceText": "服を脱いで、こっちに来て。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"]
+    },
+    {
+      "id": "refusal-in-english-when-target-is-japanese-caught-by-script-mismatch",
+      "input": "I'm unable to translate this content for you today.",
+      "sourceText": "元気？",
+      "sourceLangCode": "en",
+      "targetLangCode": "ja",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"]
+    },
+    {
+      "id": "refusal-in-spanish-responding-to-garbled-source-caught-unconditionally",
+      "input": "Lo siento, no puedo ayudar con eso.",
+      "sourceText": "CClCliClicClickClick Click tClick toClick to Click to eClick to enClick to entCl",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"],
+      "note": "The real bug found by Lyca (Nekopara Vol.1 session): a terse Spanish refusal answering long garbled Textractor hook noise — neither corroboration signal could fire (output is SHORTER than source, and Spanish shares the Latin script with the target), so this needed the unconditional full-clause pattern, not just broader language coverage."
+    },
+    {
+      "id": "refusal-french-opener-caught",
+      "input": "Je suis désolé, je ne peux pas traduire ce contenu.",
+      "sourceText": "服を脱いで、こっちに来て。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "fr",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"]
+    },
+    {
+      "id": "refusal-in-spanish-answering-long-unrelated-source-caught-by-topic-signal",
+      "input": "Lo siento, no puedo proporcionar contenido adicional o modificar textos que no he generado yo.",
+      "sourceText": "Pendiente de testear en Textractor (Fases 0-9 del overhaul de motores LLM) — ya validado: traducción real end-to-end con OpenAI, cambio a DeepL, UI de Settings, los 3 bugs de las rondas 1-3. Alta prioridad (fácil de probar jugando normal):",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedVerdict": "refusal",
+      "expectedActions": ["detected-refusal"],
+      "note": "The real bug found by Lyca (Nekopara Vol.1 session, ronda 4): a Clipboard hook briefly grabbed an unrelated pasted paragraph as 'game text'; GPT refused in Spanish and it sailed to the overlay uncaught. Neither prior signal could fire — the refusal is SHORTER than the (unusually long) source, so 2a's disproportion check fails; Spanish shares the Latin script with the target, so 2b never applies. This needs the topic-vocabulary signal (2c), independent of either side's length."
+    },
+    {
+      "id": "passthrough-japanese-source-echoed-instead-of-translated-to-spanish",
+      "input": "こんにちは、元気？",
+      "sourceText": "こんにちは、元気？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedVerdict": "passthrough",
+      "expectedActions": ["detected-passthrough"]
+    },
+    {
+      "id": "trailing-translator-note-stripped",
+      "input": "Hola.\n\nNote: \"Hola\" is a casual greeting in Spanish.",
+      "sourceText": "やあ。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola.",
+      "expectedVerdict": "ok",
+      "expectedActions": ["stripped-trailing-note"]
+    },
+    {
+      "id": "excess-blank-lines-collapsed",
+      "input": "Hola.\n\n\n\n¿Cómo estás?",
+      "sourceText": "やあ。元気？",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Hola.\n\n¿Cómo estás?",
+      "expectedVerdict": "ok"
+    }
+  ],
+  "mustNotChange": [
+    {
+      "id": "legitimate-quoted-dialogue-survives-when-source-was-also-quoted",
+      "input": "\"¡No puedo creerlo!\"",
+      "sourceText": "「信じられない！」",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "\"¡No puedo creerlo!\"",
+      "expectedVerdict": "ok",
+      "note": "This is the exact false-positive the plan calls out: a 「」 line legitimately becomes a quoted line, not a stray wrapper to strip."
+    },
+    {
+      "id": "short-interjection-not-flagged-as-passthrough",
+      "input": "Oh.",
+      "sourceText": "あ。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Oh.",
+      "expectedVerdict": "ok",
+      "note": "Under the 4-character floor for the passthrough check on purpose."
+    },
+    {
+      "id": "romaji-name-left-untouched",
+      "input": "Yuki se dio la vuelta.",
+      "sourceText": "ユキは振り返った。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Yuki se dio la vuelta.",
+      "expectedVerdict": "ok"
+    },
+    {
+      "id": "dialogue-containing-the-word-note-is-not-treated-as-a-trailing-note",
+      "input": "Lo escribí en mi cuaderno de notas.",
+      "sourceText": "ノートに書いた。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Lo escribí en mi cuaderno de notas.",
+      "expectedVerdict": "ok",
+      "note": "The word 'notas' appears mid-sentence, not as a blank-line-separated trailing paragraph starting with 'Note:' — must not trigger stripped-trailing-note."
+    },
+    {
+      "id": "real-dialogue-that-happens-to-say-im-sorry-i-cant-is-not-a-refusal",
+      "input": "I'm sorry, I can't go.",
+      "sourceText": "ごめん、行けない。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "en",
+      "finishReason": "stop",
+      "expectedText": "I'm sorry, I can't go.",
+      "expectedVerdict": "ok",
+      "note": "The plan's explicit false-positive case: a character genuinely saying this in-universe, proportionate in length to a short source line, in the expected target script — must survive as a normal translation, not a refusal."
+    },
+    {
+      "id": "en-to-es-textual-similarity-is-not-passthrough",
+      "input": "Amelia.",
+      "sourceText": "Amelia.",
+      "sourceLangCode": "en",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Amelia.",
+      "expectedVerdict": "ok",
+      "note": "A proper name can legitimately be identical pre/post translation. Source and target share the 'latin' expected script, so the passthrough check must not even run here — it can only be trusted when scripts genuinely differ."
+    },
+    {
+      "id": "mid-sentence-mention-of-a-refusal-clause-is-not-flagged",
+      "input": "Ella dijo que no puedo ayudar con eso y se fue enojada.",
+      "sourceText": "彼女は私が手伝えないと言って怒って去った。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Ella dijo que no puedo ayudar con eso y se fue enojada.",
+      "expectedVerdict": "ok",
+      "note": "The unconditional refusal patterns are anchored to the whole string (short lead-in only, sentence must end there) precisely so real dialogue that mentions the same clause mid-paragraph, then keeps going, survives untouched."
+    },
+    {
+      "id": "everyday-use-of-the-word-contenido-is-not-flagged-by-topic-signal",
+      "input": "Lo siento, no puedo ir a la fiesta, tengo mucho contenido que estudiar para el examen.",
+      "sourceText": "ごめん、パーティーに行けない、試験のために勉強することがたくさんあるんだ。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Lo siento, no puedo ir a la fiesta, tengo mucho contenido que estudiar para el examen.",
+      "expectedVerdict": "ok",
+      "note": "'contenido' is an everyday Spanish word (course material, not 'explicit content') — the topic signal (2c) is deliberately phrase-level ('proporcionar/generar contenido', not bare 'contenido') so ordinary dialogue using the word alone must survive untouched."
+    },
+    {
+      "id": "genuinely-different-translation-is-unaffected",
+      "input": "El profesor entró en el aula en silencio.",
+      "sourceText": "先生は静かに教室に入った。",
+      "sourceLangCode": "ja",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "El profesor entró en el aula en silencio.",
+      "expectedVerdict": "ok"
+    }
+  ]
+}

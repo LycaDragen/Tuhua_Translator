@@ -1,7 +1,7 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.54",
-  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.54",
+  "version": "3.13.75",
+  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.62",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -22,8 +22,20 @@
     "test:profile-schema": "node scripts/test-profile-schema.js",
     "test:glossary-merge": "node scripts/test-glossary-merge.js",
     "test:profile-migration": "node scripts/test-profile-migration.js",
-    "test:glossary-entries": "node scripts/test-glossary-entries.js"
+    "test:glossary-entries": "node scripts/test-glossary-entries.js",
+    "test:llm-base": "node scripts/test-llm-base.js",
+    "test:llm-output": "node scripts/test-llm-output.js",
+    "test:llm-providers": "node scripts/test-llm-providers.js",
+    "test:prompt-template": "node scripts/test-prompt-template.js",
+    "test:glossary-prompt": "node scripts/test-glossary-prompt.js",
+    "test:glossary-compliance": "node scripts/test-glossary-compliance.js",
+    "test:deepl-glossary-sync": "node scripts/test-deepl-glossary-sync.js",
+    "test:speaker-extract": "node scripts/test-speaker-extract.js",
+    "test:translation-cache": "node scripts/test-translation-cache.js",
+    "test:translation-memory": "node scripts/test-translation-memory.js",
+    "test:pipeline-abort": "node scripts/test-pipeline-abort.js"
   },
+
   "author": {
     "name": "Lyca",
     "email": "sebaguerra6@gmail.com"

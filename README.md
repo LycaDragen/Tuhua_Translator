@@ -111,6 +111,13 @@ Con DeepL puedes controlar el nivel de formalidad de la traducción, ideal para 
 - Siempre formal
 - Siempre informal
 
+### Documentación técnica
+
+| Documento | Contenido |
+|---|---|
+| [`docs/translation-context-support.md`](docs/translation-context-support.md) | Qué motor soporta contexto y glosario nativo, y qué implementa Tuhua de cada uno |
+| [`docs/llm-prompting.md`](docs/llm-prompting.md) | Plantillas de prompt, variables disponibles, glosario como instrucción, tabla de proveedores LLM y cómo agregar uno nuevo |
+
 ---
 
 ## 📖 Glosario

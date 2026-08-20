@@ -189,20 +189,6 @@
         .resize-handle.left { top: 48px; left: -4px; bottom: 20px; width: 8px; cursor: w-resize; }
         .resize-handle.right { top: 48px; right: -4px; bottom: 20px; width: 8px; cursor: e-resize; }
 
-        /* Corner indicators on scan region */
-        .corner-indicator {
-            position: absolute;
-            width: 8px;
-            height: 8px;
-            border: 2px solid rgba(16, 185, 129, 0.6);
-            z-index: 6;
-        }
-
-        .corner-indicator.tl { top: 27px; left: -1px; border-right: none; border-bottom: none; }
-        .corner-indicator.tr { top: 27px; right: -1px; border-left: none; border-bottom: none; }
-        .corner-indicator.bl { bottom: -1px; left: -1px; border-right: none; border-top: none; }
-        .corner-indicator.br { bottom: -1px; right: -1px; border-left: none; border-top: none; }
-
         @keyframes pulse {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.3; }
@@ -242,12 +228,6 @@
     <!-- Scan region — dashed border indicates the section being scanned for OCR text.
          Starts "paused" (yellow) to match isScanPaused=true below. -->
     <div id="scan-region" class="paused">
-        <!-- Corner Indicators -->
-        <div class="corner-indicator tl"></div>
-        <div class="corner-indicator tr"></div>
-        <div class="corner-indicator bl"></div>
-        <div class="corner-indicator br"></div>
-
         <!-- Resize Handles -->
         <div class="resize-handle top-left" data-dir="nw"></div>
         <div class="resize-handle top-right" data-dir="ne"></div>

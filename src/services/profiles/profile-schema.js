@@ -34,6 +34,21 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   'engine',
   'customEndpoint',
   'customModel',
+  // v3.13.58 (LLM engine overhaul, Fase 3): the cloud-LLM analogues of
+  // customEndpoint/customModel above — which provider/model a GAME uses is
+  // exactly as game-specific as which local server it points to (one VN
+  // might warrant a stronger cloud model, another a cheap local one).
+  // llmProvider/llmModel/llmCustomBaseUrl mirror engine/customModel/
+  // customEndpoint's scoping for the same reason. The API KEYS themselves
+  // (llmProviderKeys) are NOT here — see PROMOTED_TO_GLOBAL_KEYS below.
+  'llmProvider',
+  'llmModel',
+  'llmCustomBaseUrl',
+  // The convenience preset (Ollama/LM Studio/...) that resolves to
+  // customEndpoint when set to something other than 'custom' — scoped
+  // alongside customEndpoint since it's a UI shortcut for the same field,
+  // not an independent setting.
+  'localLlmEndpointPreset',
   'libretranslateEndpoint',
   'customMTEndpoint',
   'customMTMethod',
@@ -43,7 +58,21 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   // secret is customMTApiKey, which is global and NOT in this list. Do not
   // "fix" this by moving a credential in here.
   'customMTAuthHeader',
-  'manualTextractorMode'
+  'manualTextractorMode',
+  // v3.13.6x (LLM engine overhaul, Fase 6): DeepL's native `glossary_id` is
+  // profile-scoped for the same reason `engine`/`customModel` are — the
+  // remote glossary a request should reference is tied to which GAME is
+  // active, not a global user preference. A global setting here would
+  // leak profile 1's character names into profile 2's translations the
+  // moment you switched games without touching this field. `deeplGlossaryId`
+  // is the manual "paste an ID you made yourself" path; `deeplAutoGlossary`
+  // opts a profile into Tuhua managing its own remote glossary automatically
+  // (see deepl-glossary-sync.js) — off by default, since it means sending
+  // glossary content to DeepL as a persistent, named account resource,
+  // materially different from the ephemeral text of a normal translation
+  // request.
+  'deeplGlossaryId',
+  'deeplAutoGlossary'
 ];
 
 // Deliberately excluded from the profile schema — user/machine-level, not
@@ -56,7 +85,14 @@ const PROMOTED_TO_GLOBAL_KEYS = [
   'apiKey',
   'targetLang',
   'textractorCliPath',
-  'textractorPort'
+  'textractorPort',
+  // v3.13.58 (Fase 3): the provider-keyed credential map that replaced
+  // the single global `openaiKey` — see llm-providers.js's
+  // seedProviderKeysFromLegacyOpenAIKey for the one-time migration off the
+  // old key. Credentials are global for the same reason deeplKey/apiKey
+  // already were: switching games shouldn't switch which real-world API
+  // key is in use.
+  'llmProviderKeys'
 ];
 
 function generateId() {
@@ -85,6 +121,20 @@ function createProfile(overrides = {}) {
     engine: overrides.engine !== undefined ? overrides.engine : 'google-free',
     customEndpoint: overrides.customEndpoint || '',
     customModel: overrides.customModel || '',
+    // v3.13.58 (Fase 3): '' means "use the provider's default" — see
+    // llmProvider's own default below and openai.js's fallback chain.
+    llmProvider: overrides.llmProvider || 'openai',
+    llmModel: overrides.llmModel || '',
+    llmCustomBaseUrl: overrides.llmCustomBaseUrl || '',
+    // v3.13.58: defaults to 'custom' (== "just use customEndpoint
+    // verbatim"), NOT one of the real presets. A profile normalized from
+    // before this field existed has no localLlmEndpointPreset at all and
+    // falls through to this default — if it defaulted to e.g. 'lmstudio',
+    // resolveLocalEndpoint() would silently override a customEndpoint the
+    // user had manually pointed at Ollama (or anything else) back to LM
+    // Studio's port. 'custom' is the only default that can't regress an
+    // existing endpoint.
+    localLlmEndpointPreset: overrides.localLlmEndpointPreset || 'custom',
     libretranslateEndpoint: overrides.libretranslateEndpoint || '',
     customMTEndpoint: overrides.customMTEndpoint || '',
     customMTMethod: overrides.customMTMethod || '',
@@ -92,6 +142,18 @@ function createProfile(overrides = {}) {
     customMTResponsePath: overrides.customMTResponsePath || '',
     customMTAuthHeader: overrides.customMTAuthHeader || '',
     manualTextractorMode: overrides.manualTextractorMode === true,
+    // v3.13.6x (Fase 6): '' means "no manually-pasted glossary — use the
+    // auto-synced one if deeplAutoGlossary is on, otherwise none".
+    deeplGlossaryId: overrides.deeplGlossaryId || '',
+    deeplAutoGlossary: overrides.deeplAutoGlossary === true,
+
+    // v3.13.6x (Fase 6): internal bookkeeping for the auto-sync path
+    // (deepl-glossary-sync.js) — {glossaryId, hash, sourceLang, targetLang}
+    // or null. NOT in PROFILE_SCOPED_SETTING_KEYS: this isn't a setting the
+    // user configures, it's state Tuhua writes after a successful remote
+    // sync, same category as `hook`/`cover` below (own dedicated write
+    // path, not projected into global settings via profileToSettings).
+    deeplGlossarySync: overrides.deeplGlossarySync || null,
 
     // A per-profile glossary LAYER (merged with the global layer at
     // translate time — see glossary-merge.js), not a snapshot of the
@@ -156,6 +218,9 @@ function validateProfile(profile) {
   }
   if (profile.cover !== null && typeof profile.cover !== 'object') {
     errors.push('cover must be null or an object');
+  }
+  if (profile.deeplGlossarySync !== null && typeof profile.deeplGlossarySync !== 'object') {
+    errors.push('deeplGlossarySync must be null or an object');
   }
   for (const key of PROFILE_SCOPED_SETTING_KEYS) {
     if (profile[key] === undefined) {

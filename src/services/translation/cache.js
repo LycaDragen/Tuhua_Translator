@@ -2,7 +2,7 @@
  * Translation Cache Service
  * Persistent LRU cache for translations.
  * Stores translations in electron-store to survive restarts.
- * Key format: hash(sourceText + srcLang + targetLang + engine)
+ * Key format: hash(sourceText + srcLang + targetLang + engine + variant)
  */
 const Store = require('electron-store');
 const crypto = require('crypto');
@@ -21,13 +21,29 @@ class TranslationCache {
     });
   }
 
-  _makeKey(text, srcLang, targetLang, engine) {
-    const raw = `${text}|||${srcLang}|||${targetLang}|||${engine}`;
+  // v3.13.6x (LLM engine overhaul, Fase 7c): `variant` is a 5th key
+  // component — pipeline.js computes it as a hash of
+  // provider+model+promptTemplate+temperature+fewShot for glossaryPrompt-
+  // capable engines (openai/local-llm), '' for everything else. Before
+  // this, editing the prompt or switching models changed NOTHING about
+  // what got cached, so a user tweaking their prompt to test an
+  // improvement would see the exact same cached line for up to 24h and
+  // reasonably conclude the feature didn't work.
+  //
+  // Deliberately excluded from `variant`: the context window. Folding
+  // context in would be "more correct" (the model saw different prior
+  // lines, so technically it's a different request) but would tank the
+  // LLM hit rate to near-zero — repeated dialogue lines are exactly what
+  // the cache exists to catch, and context legitimately differs run to
+  // run for the same line. Documented here so this isn't re-litigated:
+  // this is an accepted approximation, not an oversight.
+  _makeKey(text, srcLang, targetLang, engine, variant = '') {
+    const raw = `${text}|||${srcLang}|||${targetLang}|||${engine}|||${variant}`;
     return crypto.createHash('sha256').update(raw).digest('hex');
   }
 
-  get(text, srcLang, targetLang, engine) {
-    const key = this._makeKey(text, srcLang, targetLang, engine);
+  get(text, srcLang, targetLang, engine, variant = '') {
+    const key = this._makeKey(text, srcLang, targetLang, engine, variant);
     const entries = this.store.get('entries', {});
     const order = this.store.get('order', []);
 
@@ -55,8 +71,8 @@ class TranslationCache {
     return entry.translation;
   }
 
-  set(text, srcLang, targetLang, engine, translation) {
-    const key = this._makeKey(text, srcLang, targetLang, engine);
+  set(text, srcLang, targetLang, engine, translation, variant = '') {
+    const key = this._makeKey(text, srcLang, targetLang, engine, variant);
     const entries = this.store.get('entries', {});
     const order = this.store.get('order', []);
 

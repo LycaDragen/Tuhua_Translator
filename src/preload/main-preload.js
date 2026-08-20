@@ -10,6 +10,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 const ALLOWED_INVOKE_CHANNELS = new Set([
   'get-settings',
   'save-settings',
+  // v3.13.58 (LLM engine overhaul, Fase 3)
+  'get-llm-providers',
+  // v3.13.59 (Fase 4)
+  'get-prompt-presets',
   'get-glossary',
   'save-glossary',
   'delete-glossary-entry',
@@ -73,7 +77,12 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
-  'manual-translate'
+  'manual-translate',
+  // v3.13.6x (Fase 9 testing follow-up): fixes Ctrl+Shift+R, which fired
+  // shortcut-pressed{action:'retranslate'} since it was registered but
+  // handleShortcut() in renderer.js never had a case for it — the
+  // shortcut has done nothing, ever, until now.
+  'request-retranslate'
 ]);
 
 const ALLOWED_RECEIVE_CHANNELS = new Set([
@@ -144,6 +153,15 @@ const api = {
     }
     return secureInvoke('save-settings', data);
   },
+  // v3.13.58 (LLM engine overhaul, Fase 3): the cloud provider dropdown /
+  // local endpoint preset dropdown / model datalists all read from this —
+  // see ipc-handlers.js's get-llm-providers for why it can't just be a
+  // require() of llm-providers.js from here (sandboxed renderer).
+  getLlmProviders: () => secureInvoke('get-llm-providers'),
+  // v3.13.59 (Fase 4): feeds the prompt preset <select> — same reasoning
+  // as getLlmProviders just above (prompt-presets.js's actual template
+  // prose lives only in the main process).
+  getPromptPresets: () => secureInvoke('get-prompt-presets'),
 
   // Glossary (v3.13.40: two layers — scope is 'global' or 'profile')
   getGlossary: () => secureInvoke('get-glossary'),
@@ -253,6 +271,7 @@ const api = {
     if (typeof text !== 'string') throw new Error('Text must be a string');
     secureSend('manual-translate', text);
   },
+  requestRetranslate: () => secureSend('request-retranslate'),
 
   // Connection test
   testConnection: (host, port) => {
@@ -263,9 +282,13 @@ const api = {
   },
 
   // API Key validation
-  validateApiKey: (engine, apiKey, endpoint) => {
+  // v3.13.58 (Fase 3): `provider` is new — which llm-providers.js entry to
+  // validate against for engine==='openai'. Optional/backward-compatible:
+  // every other engine ignores it, and omitting it falls back to the
+  // 'openai' provider (see ipc-handlers.js's validate-api-key handler).
+  validateApiKey: (engine, apiKey, endpoint, provider) => {
     if (typeof engine !== 'string') throw new Error('Invalid engine');
-    return secureInvoke('validate-api-key', { engine, apiKey: apiKey || '', endpoint: endpoint || '' });
+    return secureInvoke('validate-api-key', { engine, apiKey: apiKey || '', endpoint: endpoint || '', provider: provider || '' });
   },
 
   // Font family detection

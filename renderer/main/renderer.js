@@ -7,11 +7,26 @@
         let glossaryEntries = [];
         let profileGlossaryEntries = [];
         let currentGlossaryScope = 'global';
+        // v3.13.55: ids of entries whose pattern failed to compile (invalid
+        // regex, typically) — see glossary.js getCompileErrors(). Populated
+        // by loadGlossary(), read by renderGlossary() for the warning badge.
+        let glossaryCompileErrorIds = new Set();
         let historyEntries = [];
         let profileList = [];
         let translationActive = true;
-        // In-memory store for per-engine API keys (synced to settings on save)
-        let engineApiKeys = { deepl: '', openai: '' };
+        // In-memory store for per-engine API keys (synced to settings on save).
+        // v3.13.58 (Fase 3): `.openai` became `.llm`, a MAP keyed by provider id
+        // (llm-providers.js) — switching the cloud provider dropdown must not
+        // lose whichever key was typed for a different provider, same reasoning
+        // `.deepl` already had for the deepl/openai engine swap.
+        let engineApiKeys = { deepl: '', llm: {} };
+        // v3.13.58: llm-providers.js lives in the main process — this is the
+        // renderer's cached copy, fetched once via loadLlmProviders(). Used to
+        // populate the provider/local-preset selects and the model datalist.
+        let llmProvidersCatalog = { providers: [], localPresets: [] };
+        // v3.13.59 (Fase 4): prompt-presets.js's actual template prose lives
+        // only in the main process — fetched once via loadPromptPresets().
+        let promptPresetsCatalog = { presets: [], defaultTemplate: '' };
         // v3.10.8: Staged changes — settings changes are held in the UI
         // until the user clicks "Aplicar y Guardar". Only operational
         // controls (play/pause, theme, language UI, Textractor) auto-save.
@@ -191,18 +206,53 @@
 
             const settings = await api.getSettings();
 
+            // v3.13.58 (Fase 3): must resolve BEFORE the first toggleInputFields()
+            // call below — it populates #llm-provider-select/#local-endpoint-preset,
+            // and toggleInputFields() (when engine==='openai') reads the provider
+            // select's value to decide what to show/populate.
+            await loadLlmProviders();
+            // v3.13.59 (Fase 4): populates #prompt-preset-select — read below
+            // once settings.promptTemplate is known.
+            await loadPromptPresets();
+
             // Apply saved settings
             if (settings.uiLanguage) {
                 document.getElementById('lang-select').value = settings.uiLanguage;
                 changeLanguage(settings.uiLanguage);
             }
             applyTheme(settings.theme || 'dark');
+
+            // v3.13.58: provider/model/params restored BEFORE toggleInputFields()
+            // runs, same reasoning as loadLlmProviders() above.
+            const savedProviderId = settings.llmProvider || 'openai';
+            document.getElementById('llm-provider-select').value = savedProviderId;
+            document.getElementById('llm-model').value = settings.llmModel || '';
+            document.getElementById('llm-custom-baseurl').value = settings.llmCustomBaseUrl || '';
+            document.getElementById('llm-temperature').value = settings.llmTemperature ?? 0.3;
+            document.getElementById('llm-max-tokens').value = settings.llmMaxTokens ?? 1500;
+            const topPEnabled = settings.llmTopP !== null && settings.llmTopP !== undefined;
+            document.getElementById('llm-top-p-enabled').checked = topPEnabled;
+            document.getElementById('llm-top-p').disabled = !topPEnabled;
+            document.getElementById('llm-top-p').value = topPEnabled ? settings.llmTopP : 0.9;
+            const savedPresetId = settings.localLlmEndpointPreset || 'custom';
+            document.getElementById('local-endpoint-preset').value = savedPresetId;
+            // Mirrors onLocalEndpointPresetChange()'s lock logic without its
+            // markUnsaved() side effect — this is restoring state, not a change.
+            const localEndpointInput = document.getElementById('local-endpoint');
+            localEndpointInput.disabled = savedPresetId !== 'custom';
+            localEndpointInput.classList.toggle('opacity-60', savedPresetId !== 'custom');
+
             if (settings.engine) { document.getElementById('engine-select').value = settings.engine; toggleInputFields(); }
             // Restore API key based on current engine
             const savedEngine = settings.engine || 'google-free';
             // Populate in-memory engine API keys from settings
             if (settings.deeplKey) engineApiKeys.deepl = settings.deeplKey;
-            if (settings.openaiKey) engineApiKeys.openai = settings.openaiKey;
+            // v3.13.58: `.llm` is a map now — see the field's declaration for why
+            // (switching providers must not lose a different provider's key).
+            // `openaiKey` itself is deliberately not read here anymore — see
+            // llm-providers.js's seedProviderKeysFromLegacyOpenAIKey, which
+            // promotes it into llmProviderKeys once, in the main process.
+            engineApiKeys.llm = { ...(settings.llmProviderKeys || {}) };
             if (savedEngine === 'deepl') {
                 document.getElementById('api-key').value = engineApiKeys.deepl || '';
                 // v3.11.23: Restore DeepL formality setting
@@ -228,13 +278,22 @@
                 // v3.11.28: Fetch language features for dynamic UI
                 fetchDeepLLanguageFeatures(engineApiKeys.deepl, settings.targetLang);
             } else if (savedEngine === 'openai') {
-                document.getElementById('api-key').value = engineApiKeys.openai || '';
+                document.getElementById('api-key').value = engineApiKeys.llm[savedProviderId] || '';
+                document.getElementById('llm-provider-select').dataset.prevProvider = savedProviderId;
             } else if (settings.apiKey) {
                 document.getElementById('api-key').value = settings.apiKey;
             }
             // Track the current engine for per-engine key persistence
             document.getElementById('engine-select').dataset.prevEngine = savedEngine;
-            if (settings.customEndpoint) document.getElementById('local-endpoint').value = settings.customEndpoint;
+            // v3.13.58: a real preset (not 'custom') OWNS the displayed value —
+            // showing the stale settings.customEndpoint instead would visually
+            // contradict what resolveLocalEndpoint() (pipeline.js) actually uses.
+            if (savedPresetId === 'custom') {
+                if (settings.customEndpoint) localEndpointInput.value = settings.customEndpoint;
+            } else {
+                const savedPreset = llmProvidersCatalog.localPresets.find((p) => p.id === savedPresetId);
+                if (savedPreset) localEndpointInput.value = savedPreset.baseUrl;
+            }
             if (settings.customModel) document.getElementById('local-model').value = settings.customModel;
             if (settings.libretranslateEndpoint) document.getElementById('libretranslate-endpoint').value = settings.libretranslateEndpoint;
             if (settings.customMTEndpoint) document.getElementById('custom-mt-endpoint').value = settings.customMTEndpoint;
@@ -285,7 +344,18 @@
             // right after Tuhua restarts, without the user re-typing it.
             if (settings.gamePid) document.getElementById('game-pid').value = settings.gamePid;
             if (settings.debounceMs) { document.getElementById('debounce-range').value = settings.debounceMs; document.getElementById('debounce-val').innerText = settings.debounceMs + 'ms'; }
-            if (settings.systemPrompt) document.getElementById('system-prompt').value = settings.systemPrompt;
+            // v3.13.59 (Fase 4): `settings.systemPrompt` is no longer read here
+            // at all — the one-time migration (src/main/index.js) already
+            // promoted a non-empty legacy value into `promptTemplate` verbatim
+            // before this ever runs. '' resolves to the balanced preset both
+            // at render time (llm-base.js) and for the dropdown's initial value
+            // (matchPromptPresetId treats '' as "matches balanced").
+            const promptTemplateText = settings.promptTemplate || promptPresetsCatalog.defaultTemplate;
+            document.getElementById('prompt-template').value = promptTemplateText;
+            const matchedPresetId = matchPromptPresetId(settings.promptTemplate || '');
+            document.getElementById('prompt-preset-select').value = matchedPresetId;
+            updatePromptPresetDesc(matchedPresetId);
+            document.getElementById('llm-fewshot-enabled').checked = settings.llmFewShot !== false;
             if (settings.maxContextHistory !== undefined) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
             if (settings.historyLimit) { document.getElementById('history-limit-range').value = settings.historyLimit; document.getElementById('history-limit-val').innerText = settings.historyLimit; }
 
@@ -595,13 +665,6 @@
         }
 
         // Reset System Prompt to default
-        function resetSystemPrompt() {
-            document.getElementById('system-prompt').value = '';
-            api.saveSettings({ systemPrompt: '' });
-            const t = translations[currentLang] || translations['en'];
-            showToast(t.prompt_reset || 'Prompt restablecido al valor por defecto');
-        }
-
         // Apply settings from modal (saves everything)
         async function applySettingsModal() {
             const config = {
@@ -613,7 +676,9 @@
                 overlayOpacity: parseInt(document.getElementById('opacity-range').value),
                 clickThrough: document.getElementById('click-through-toggle').checked,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
-                systemPrompt: document.getElementById('system-prompt').value,
+                // v3.13.59 (Fase 4): renamed from systemPrompt
+                promptTemplate: document.getElementById('prompt-template').value,
+                llmFewShot: document.getElementById('llm-fewshot-enabled').checked,
                 maxContextHistory: parseInt(document.getElementById('context-range').value),
                 historyLimit: parseInt(document.getElementById('history-limit-range').value)
             };
@@ -677,7 +742,9 @@
                 debounceMs: 300,
                 maxContextHistory: 5,
                 historyLimit: 5,
-                systemPrompt: '',
+                // v3.13.59 (Fase 4): renamed from systemPrompt
+                promptTemplate: '',
+                llmFewShot: true,
                 clickThrough: false,
                 enableRegexFilter: true
             };
@@ -799,6 +866,215 @@
             recomputeBadge();
         }
 
+        // ===== LLM PROVIDERS (v3.13.58, Fase 3) =====
+        // Fetches the provider/local-preset catalog once and populates both
+        // <select> elements. Options carry data-i18n so changeLanguage()'s
+        // generic [data-i18n] sweep (renderer.js's changeLanguage()) picks them
+        // up automatically on a language switch — no separate re-render path
+        // needed, same mechanism [data-i18n-lang]/[data-i18n-engine] options use.
+        async function loadLlmProviders() {
+            try {
+                llmProvidersCatalog = await api.getLlmProviders();
+            } catch (e) {
+                console.error('Failed to load LLM providers:', e);
+                return;
+            }
+            const t = translations[currentLang] || translations['en'];
+
+            const providerSelect = document.getElementById('llm-provider-select');
+            providerSelect.innerHTML = llmProvidersCatalog.providers.map((p) =>
+                `<option value="${p.id}" data-i18n="${p.labelKey}">${t[p.labelKey] || p.id}</option>`
+            ).join('');
+
+            const presetSelect = document.getElementById('local-endpoint-preset');
+            presetSelect.innerHTML = llmProvidersCatalog.localPresets.map((p) =>
+                `<option value="${p.id}" data-i18n="${p.labelKey}">${t[p.labelKey] || p.id}</option>`
+            ).join('');
+        }
+
+        // Shared by onLlmProviderChange() (user interaction) and init() (restoring
+        // saved settings) — everything EXCEPT the key-swap/markUnsaved side effects,
+        // which only make sense on a real user-driven change.
+        function updateLlmProviderUI(providerId) {
+            const provider = llmProvidersCatalog.providers.find((p) => p.id === providerId);
+
+            const baseUrlRow = document.getElementById('llm-custom-baseurl-row');
+            if (baseUrlRow) baseUrlRow.classList.toggle('hidden', providerId !== 'custom');
+
+            const betaNote = document.getElementById('llm-provider-beta-note');
+            if (betaNote) betaNote.classList.toggle('hidden', !(provider && provider.beta));
+
+            const modelInput = document.getElementById('llm-model');
+            // v3.13.6x (Fase 9 testing follow-up): replaces a native
+            // <datalist> — kept on the input's own dataset (not a global)
+            // so a provider swap always has the RIGHT list even if the
+            // user never re-focuses the field before switching providers.
+            if (modelInput) {
+                modelInput.dataset.models = JSON.stringify(provider?.models || []);
+                modelInput.placeholder = provider?.defaultModel || '';
+            }
+        }
+
+        // v3.13.6x (Fase 9 testing follow-up): the Modelo field's
+        // suggestions list — see index.html's llm-model-row comment for
+        // why this replaced a native <datalist> (Chromium's native
+        // datalist popup and its input chrome both ignore authored CSS;
+        // two rounds of CSS-only attempts confirmed this on real hardware).
+        function renderModelSuggestions(models) {
+            const box = document.getElementById('llm-model-suggestions');
+            if (!box) return;
+            if (!models.length) {
+                box.classList.add('hidden');
+                box.innerHTML = '';
+                return;
+            }
+            box.innerHTML = models.map((m) =>
+                `<div class="model-option" data-model="${escapeHtml(m)}">${escapeHtml(m)}</div>`
+            ).join('');
+            box.classList.remove('hidden');
+        }
+
+        function showModelSuggestions() {
+            const modelInput = document.getElementById('llm-model');
+            if (!modelInput) return;
+            const models = JSON.parse(modelInput.dataset.models || '[]');
+            renderModelSuggestions(models);
+        }
+
+        function filterModelSuggestions() {
+            const modelInput = document.getElementById('llm-model');
+            if (!modelInput) return;
+            const models = JSON.parse(modelInput.dataset.models || '[]');
+            const query = modelInput.value.trim().toLowerCase();
+            const filtered = query ? models.filter((m) => m.toLowerCase().includes(query)) : models;
+            renderModelSuggestions(filtered);
+        }
+
+        // Click a suggestion (event delegation — the list is rebuilt on
+        // every render, so binding once here beats re-binding per item).
+        document.addEventListener('click', (e) => {
+            const option = e.target.closest('#llm-model-suggestions .model-option');
+            if (option) {
+                const modelInput = document.getElementById('llm-model');
+                modelInput.value = option.dataset.model;
+                document.getElementById('llm-model-suggestions').classList.add('hidden');
+                markUnsaved();
+                return;
+            }
+            // Click anywhere outside the field+list closes it.
+            if (!e.target.closest('#llm-model-row')) {
+                const box = document.getElementById('llm-model-suggestions');
+                if (box) box.classList.add('hidden');
+            }
+        });
+
+        function onLlmProviderChange() {
+            const newProviderId = document.getElementById('llm-provider-select').value;
+            const prevProviderId = document.getElementById('llm-provider-select').dataset.prevProvider;
+            const currentApiKey = document.getElementById('api-key').value;
+            if (prevProviderId && currentApiKey) {
+                engineApiKeys.llm[prevProviderId] = currentApiKey;
+            }
+            document.getElementById('llm-provider-select').dataset.prevProvider = newProviderId;
+            document.getElementById('api-key').value = engineApiKeys.llm[newProviderId] || '';
+
+            updateLlmProviderUI(newProviderId);
+            markUnsaved();
+        }
+
+        // v3.13.58: fills AND LOCKS the endpoint field for a real preset (Ollama/
+        // LM Studio/llama.cpp/KoboldCpp) — 'custom' (the default) leaves it exactly
+        // as free text, unchanged from how this field worked before this existed.
+        function onLocalEndpointPresetChange() {
+            const presetId = document.getElementById('local-endpoint-preset').value;
+            const endpointInput = document.getElementById('local-endpoint');
+            if (presetId === 'custom') {
+                endpointInput.disabled = false;
+                endpointInput.classList.remove('opacity-60');
+            } else {
+                const preset = llmProvidersCatalog.localPresets.find((p) => p.id === presetId);
+                if (preset) endpointInput.value = preset.baseUrl;
+                endpointInput.disabled = true;
+                endpointInput.classList.add('opacity-60');
+            }
+            markUnsaved();
+        }
+
+        // ===== PROMPT TEMPLATE (v3.13.59, Fase 4) =====
+        const PROMPT_PRESET_DESC_KEYS = {
+            balanced: 'prompt_preset_balanced_desc',
+            literal: 'prompt_preset_literal_desc',
+            localized: 'prompt_preset_localized_desc',
+            uncensored: 'prompt_preset_uncensored_desc',
+            custom: ''
+        };
+
+        async function loadPromptPresets() {
+            try {
+                promptPresetsCatalog = await api.getPromptPresets();
+            } catch (e) {
+                console.error('Failed to load prompt presets:', e);
+                return;
+            }
+            const t = translations[currentLang] || translations['en'];
+            const select = document.getElementById('prompt-preset-select');
+            const presetOptions = promptPresetsCatalog.presets.map((p) =>
+                `<option value="${p.id}" data-i18n="${p.labelKey}">${t[p.labelKey] || p.id}</option>`
+            ).join('');
+            select.innerHTML = presetOptions + `<option value="custom" data-i18n="prompt_preset_custom">${t.prompt_preset_custom || 'Custom'}</option>`;
+        }
+
+        // Matches the CURRENT textarea text against the catalog the same way
+        // prompt-presets.js's matchPresetId() does server-side (byte-identical
+        // text = that preset), but also treats '' as "matches balanced" — ''
+        // is what an unset/reset promptTemplate setting actually stores (it
+        // resolves to DEFAULT_TEMPLATE at render time, llm-base.js), so the
+        // dropdown should show "Balanced" selected, not "Custom", for a fresh
+        // install that has never touched this field.
+        function matchPromptPresetId(text) {
+            const effectiveText = text || promptPresetsCatalog.defaultTemplate;
+            const preset = promptPresetsCatalog.presets.find((p) => p.template === effectiveText);
+            return preset ? preset.id : 'custom';
+        }
+
+        function updatePromptPresetDesc(presetId) {
+            const t = translations[currentLang] || translations['en'];
+            const descKey = PROMPT_PRESET_DESC_KEYS[presetId] || '';
+            document.getElementById('prompt-preset-desc').innerText = descKey ? (t[descKey] || '') : '';
+        }
+
+        function onPromptPresetChange() {
+            const presetId = document.getElementById('prompt-preset-select').value;
+            if (presetId !== 'custom') {
+                const preset = promptPresetsCatalog.presets.find((p) => p.id === presetId);
+                if (preset) document.getElementById('prompt-template').value = preset.template;
+            }
+            // 'custom' selected directly (rather than reached by editing):
+            // leave the textarea as whatever it already had — nothing to fill in.
+            updatePromptPresetDesc(presetId);
+            markUnsaved();
+        }
+
+        // Keeps the preset <select> in sync while the user hand-edits the
+        // advanced textarea, WITHOUT calling onPromptPresetChange() (that would
+        // overwrite what they just typed back to a preset's canned text).
+        function onPromptTemplateEdited() {
+            const text = document.getElementById('prompt-template').value;
+            const matchedId = matchPromptPresetId(text);
+            document.getElementById('prompt-preset-select').value = matchedId;
+            updatePromptPresetDesc(matchedId);
+            markUnsaved();
+        }
+
+        function resetPromptTemplate() {
+            document.getElementById('prompt-template').value = promptPresetsCatalog.defaultTemplate;
+            document.getElementById('prompt-preset-select').value = 'balanced';
+            updatePromptPresetDesc('balanced');
+            api.saveSettings({ promptTemplate: '' });
+            const t = translations[currentLang] || translations['en'];
+            showToast(t.prompt_reset || 'Prompt restablecido al valor por defecto');
+        }
+
         // ===== ENGINE FIELDS =====
         function toggleInputFields() {
             const engine = document.getElementById('engine-select').value;
@@ -817,8 +1093,14 @@
                 engineApiKeys.deepl = currentApiKey;
                 api.saveSettings({ deeplKey: currentApiKey });
             } else if (prevEngine === 'openai' && currentApiKey) {
-                engineApiKeys.openai = currentApiKey;
-                api.saveSettings({ openaiKey: currentApiKey });
+                // v3.13.58: keyed by provider now, not a single flat key — see
+                // engineApiKeys.llm's declaration. Persists into the SAME
+                // llmProviderKeys map save-side merges into (save-settings does
+                // `{...current, ...data}`, so this one-key object is additive,
+                // never clobbers a different provider's already-saved key).
+                const providerId = document.getElementById('llm-provider-select').value;
+                engineApiKeys.llm[providerId] = currentApiKey;
+                api.saveSettings({ llmProviderKeys: { ...engineApiKeys.llm } });
             }
             document.getElementById('engine-select').dataset.prevEngine = engine;
 
@@ -857,6 +1139,22 @@
             if (engine === 'local-llm') { localSec.classList.remove('hidden'); }
             if (engine === 'libretranslate') libreSec.classList.remove('hidden');
             if (engine === 'custom-mt') customSec.classList.remove('hidden');
+
+            // v3.13.58 (Fase 3): provider dropdown + model field, only for the
+            // cloud LLM engine (not DeepL, which shares api-key-section but has
+            // no concept of a "provider").
+            const llmProviderRow = document.getElementById('llm-provider-row');
+            const llmModelRow = document.getElementById('llm-model-row');
+            if (llmProviderRow) llmProviderRow.classList.toggle('hidden', engine !== 'openai');
+            if (llmModelRow) llmModelRow.classList.toggle('hidden', engine !== 'openai');
+            if (engine === 'openai') {
+                updateLlmProviderUI(document.getElementById('llm-provider-select').value);
+            }
+
+            // Shared by both LLM engines — see the section's own comment in
+            // index.html for why these are global settings, not per-profile.
+            const llmParamsSec = document.getElementById('llm-params-section');
+            if (llmParamsSec) llmParamsSec.classList.toggle('hidden', !['openai', 'local-llm'].includes(engine));
 
             // v3.11.23: Show DeepL formality dropdown only when DeepL is selected
             const deeplFormalitySec = document.getElementById('deepl-formality-section');
@@ -899,7 +1197,9 @@
             if (engine === 'deepl') {
                 document.getElementById('api-key').value = engineApiKeys.deepl || '';
             } else if (engine === 'openai') {
-                document.getElementById('api-key').value = engineApiKeys.openai || '';
+                const providerId = document.getElementById('llm-provider-select').value;
+                document.getElementById('api-key').value = engineApiKeys.llm[providerId] || '';
+                document.getElementById('llm-provider-select').dataset.prevProvider = providerId;
             } else {
                 document.getElementById('api-key').value = '';
             }
@@ -996,11 +1296,28 @@
             if (data.targetLang) {
                 updateTargetLangDisplay(data.targetLang);
             }
+            // v3.13.6x (Fase 9 testing follow-up, ronda 4): pipeline.js has
+            // sent isFallback:true since the fallback chain existed — this
+            // was the first UI code to ever read that field. Lyca noticed
+            // an invalid API key produced no visible signal at all (not
+            // even the persistent-toast pattern already used for the
+            // Textractor arch-fallback and PaddleOCR->Tesseract fallbacks).
+            if (data.isFallback) {
+                const t = translations[currentLang] || translations['en'];
+                const template = t.translation_fallback_toast || 'Primary translation engine failed, using fallback ({engine})';
+                showToast(template.replace('{engine}', data.engine || ''));
+            }
             loadHistory();
         }
 
         function updateLiveError(data) {
-            // Error handled silently — translation errors shown in overlay
+            // v3.13.6x (Fase 9 testing follow-up, ronda 4): pipeline.js's
+            // 'error' event (ALL engines including every fallback failed)
+            // had zero listeners on the renderer side — silently dropped,
+            // same gap as the isFallback case above.
+            const t = translations[currentLang] || translations['en'];
+            const template = t.translation_failed_toast || 'Translation failed: {error}';
+            showToast(template.replace('{error}', data.error || ''));
         }
 
         // ===== DEBUG LOGS (v3.10.0) =====
@@ -1021,16 +1338,29 @@
         // v3.13.41: stays on screen until the user closes it (X, top-right)
         // instead of auto-fading after 2s — real feedback was that longer
         // messages (import results, error details) didn't stay up long
-        // enough to read. Still a single-slot toast: a new call replaces
-        // whatever's showing, same as before, it just doesn't time out on
-        // its own anymore.
+        // enough to read.
+        // v3.13.6x (Fase 9 testing follow-up, ronda 5): was a single-slot
+        // toast (a new call replaced whatever was showing) — Lyca noticed
+        // that a fallback/error notification could fire while an earlier
+        // toast was still up unclosed, and the new one silently replaced
+        // it instead of both being visible. Now a stack: each call adds a
+        // toast to a fixed-position container (flex column-reverse, newest
+        // prepended so it lands in the bottom slot — the same slot the
+        // single toast used to occupy), older ones pushed upward. Closing
+        // one lets flexbox reflow the rest down to fill the gap on its
+        // own — no manual positioning math needed.
         function showToast(message) {
-            const existing = document.querySelector('.tuhua-toast');
-            if (existing) existing.remove();
+            let container = document.getElementById('tuhua-toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'tuhua-toast-container';
+                container.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column-reverse;align-items:center;gap:8px;max-width:min(420px,90vw);width:min(420px,90vw);';
+                document.body.appendChild(container);
+            }
 
             const toast = document.createElement('div');
             toast.className = 'tuhua-toast';
-            toast.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;align-items:flex-start;gap:10px;max-width:min(420px,90vw);padding:10px 10px 10px 16px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);';
+            toast.style.cssText = 'display:flex;align-items:flex-start;gap:10px;width:100%;box-sizing:border-box;padding:10px 10px 10px 16px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);transition:opacity 0.15s ease;';
 
             const text = document.createElement('span');
             text.style.cssText = 'flex:1;word-break:break-word;';
@@ -1042,11 +1372,19 @@
             closeBtn.style.cssText = 'flex-shrink:0;background:none;border:none;color:inherit;opacity:0.6;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;';
             closeBtn.onmouseenter = () => { closeBtn.style.opacity = '1'; };
             closeBtn.onmouseleave = () => { closeBtn.style.opacity = '0.6'; };
-            closeBtn.onclick = () => toast.remove();
+            closeBtn.onclick = () => {
+                toast.style.opacity = '0';
+                setTimeout(() => {
+                    toast.remove();
+                    if (!container.hasChildNodes()) container.remove();
+                }, 150);
+            };
 
             toast.appendChild(text);
             toast.appendChild(closeBtn);
-            document.body.appendChild(toast);
+            // Newest toast takes the bottom slot (the container's
+            // main-start in column-reverse) — prepend, not append.
+            container.prepend(toast);
         }
 
         // ===== CLICK THROUGH =====
@@ -1061,6 +1399,15 @@
                 toggle.checked = data.state;
                 // Also save the new state so it persists
                 api.saveSettings({ clickThrough: data.state });
+            } else if (data.action === 'retranslate') {
+                // v3.13.6x (Fase 9 testing follow-up): real bug — this
+                // shortcut has fired since it was registered, but this
+                // branch never existed, so Ctrl+Shift+R has done nothing,
+                // ever. requestRetranslate() re-translates whatever the
+                // overlay is currently showing with current settings (see
+                // ipc-handlers.js's _retranslateCurrent) — same action the
+                // overlay's new "↻" toolbar button triggers.
+                api.requestRetranslate();
             }
         }
 
@@ -1271,7 +1618,13 @@
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
             statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
 
-            const result = await api.validateApiKey(engine, apiKey);
+            // v3.13.58 (Fase 3): for engine==='openai', also send which provider
+            // is selected (and its custom base URL, if that's the one picked) so
+            // "Validar" actually checks the provider the dropdown shows, not
+            // always OpenAI's own API — see ipc-handlers.js's validate-api-key.
+            const providerId = engine === 'openai' ? document.getElementById('llm-provider-select').value : '';
+            const customBaseUrl = providerId === 'custom' ? document.getElementById('llm-custom-baseurl').value.trim() : '';
+            const result = await api.validateApiKey(engine, apiKey, customBaseUrl, providerId);
             setValidationStatus(statusEl, inputEl, containerEl, result);
         }
 
@@ -1336,7 +1689,8 @@
             if (prevEngine === 'deepl' && currentApiKey) {
                 engineApiKeys.deepl = currentApiKey;
             } else if (prevEngine === 'openai' && currentApiKey) {
-                engineApiKeys.openai = currentApiKey;
+                const providerId = document.getElementById('llm-provider-select').value;
+                engineApiKeys.llm[providerId] = currentApiKey;
             }
 
             toggleInputFields(); // Still toggle visibility of engine-specific fields
@@ -1505,6 +1859,10 @@
                 const result = await api.getGlossary();
                 glossaryEntries = result.global || [];
                 profileGlossaryEntries = result.profile || [];
+                // v3.13.55: entries whose pattern (regex, typically) failed to
+                // compile — see glossary.js getCompileErrors(). Keyed by id so
+                // renderGlossary() can look each row up in O(1).
+                glossaryCompileErrorIds = new Set((result.compileErrors || []).map(e => e.id));
                 renderGlossary();
             } catch (e) { console.error('Failed to load glossary:', e); }
         }
@@ -1545,8 +1903,17 @@
                 return;
             }
 
-            list.innerHTML = entries.map(entry => `
-                <div class="flex items-center gap-2 p-2 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 text-xs">
+            const t = translations[currentLang] || translations['en'];
+            list.innerHTML = entries.map(entry => {
+                // v3.13.55: an id with no compile error is the common case;
+                // this only ever fires for a 'regex' entry with bad syntax.
+                const isInvalid = glossaryCompileErrorIds.has(entry.id);
+                const warningIcon = isInvalid ? `
+                    <svg class="w-3.5 h-3.5 text-amber-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" title="${escapeHtml(t.glossary_invalid_pattern)}"><path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l6.518 11.59c.75 1.334-.213 2.987-1.743 2.987H3.482c-1.53 0-2.493-1.653-1.743-2.987l6.518-11.59zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
+                ` : '';
+                return `
+                <div class="flex items-center gap-2 p-2 rounded-lg bg-gray-50 dark:bg-dark-900/50 border ${isInvalid ? 'border-amber-400 dark:border-amber-500' : 'border-gray-200 dark:border-dark-600'} text-xs">
+                    ${warningIcon}
                     <div class="flex-1 min-w-0">
                         <span class="font-mono text-gray-700 dark:text-gray-200 truncate block">${escapeHtml(entry.source)}</span>
                         <span class="text-emerald-600 dark:text-emerald-400 truncate block">→ ${escapeHtml(entry.target)}</span>
@@ -1556,7 +1923,8 @@
                         <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/></svg>
                     </button>
                 </div>
-            `).join('');
+            `;
+            }).join('');
         }
 
         async function addGlossaryEntry() {
@@ -2322,6 +2690,14 @@
                 overlayOpacity: parseInt(document.getElementById('opacity-range').value),
                 localEndpoint: document.getElementById('local-endpoint').value,
                 localModel: document.getElementById('local-model').value,
+                // v3.13.58 (LLM engine overhaul, Fase 3)
+                llmProvider: document.getElementById('llm-provider-select').value,
+                llmModel: document.getElementById('llm-model').value,
+                llmCustomBaseUrl: document.getElementById('llm-custom-baseurl').value,
+                localLlmEndpointPreset: document.getElementById('local-endpoint-preset').value,
+                llmTemperature: parseFloat(document.getElementById('llm-temperature').value),
+                llmMaxTokens: parseInt(document.getElementById('llm-max-tokens').value),
+                llmTopP: document.getElementById('llm-top-p-enabled').checked ? parseFloat(document.getElementById('llm-top-p').value) : null,
                 // v3.13.38: textractorPort deliberately OMITTED — the input
                 // and the Advanced Settings section it lived in were removed.
                 // save-settings merges ({...currentSettings, ...data}) and
@@ -2335,7 +2711,9 @@
                 gamePid: parseInt(document.getElementById('game-pid').value) || 0,
                 inputMethod: currentInputMethod,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
-                systemPrompt: document.getElementById('system-prompt').value,
+                // v3.13.59 (Fase 4): renamed from systemPrompt
+                promptTemplate: document.getElementById('prompt-template').value,
+                llmFewShot: document.getElementById('llm-fewshot-enabled').checked,
                 maxContextHistory: parseInt(document.getElementById('context-range').value),
                 historyLimit: parseInt(document.getElementById('history-limit-range').value),
                 libretranslateEndpoint: document.getElementById('libretranslate-endpoint').value,
@@ -2355,8 +2733,25 @@
             const config = gatherConfig();
             // Map fields for backend compatibility
             if (config.engine === 'deepl') config.deeplKey = config.apiKey;
-            if (config.engine === 'openai') { config.openaiKey = config.apiKey; config.openaiModel = 'gpt-3.5-turbo'; }
+            if (config.engine === 'openai') {
+                // v3.13.58: keyed by provider now, not a flat openaiKey/openaiModel
+                // (the latter was dead — always hardcoded to 'gpt-3.5-turbo' here,
+                // never read from a real field). engineApiKeys.llm was kept in sync
+                // by every provider swap (onLlmProviderChange/toggleInputFields), so
+                // it already holds this provider's key from the field above merged
+                // with whatever other providers' keys were loaded/typed this session.
+                engineApiKeys.llm[config.llmProvider] = config.apiKey;
+                config.llmProviderKeys = { ...engineApiKeys.llm };
+            }
             if (['local-llm'].includes(config.engine)) { config.customEndpoint = config.localEndpoint; config.customModel = config.localModel; }
+            // apiKey/localEndpoint/localModel only exist as gatherConfig()'s DOM
+            // read shape — the fields actually persisted are deeplKey/
+            // llmProviderKeys/customEndpoint/customModel above. Sending the raw
+            // ones too would round-trip harmlessly (unused elsewhere) but keeping
+            // them off the wire makes what's actually read unambiguous.
+            delete config.apiKey;
+            delete config.localEndpoint;
+            delete config.localModel;
 
             // 1. Save all settings
             await api.saveSettings(config);

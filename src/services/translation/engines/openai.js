@@ -1,106 +1,64 @@
 /**
- * OpenAI API Engine
- * Supports GPT-4, GPT-3.5-turbo, and any OpenAI-compatible API.
- * Features: system prompt customization, context history, streaming support.
+ * Cloud LLM engine — the `engine:'openai'` slot in pipeline.js, but no
+ * longer hardcoded to OpenAI itself.
+ *
+ * v3.13.56 (Fase 1): the actual translate() logic now lives in
+ * llm-base.js, shared with local-llm.js — this file just supplies
+ * constructor values.
+ *
+ * v3.13.58 (Fase 3): those constructor values are now looked up from
+ * `providerId` in llm-providers.js rather than hardcoded to OpenAI's own
+ * baseUrl/model. `engine` stays `'openai'` in settings/profile/cache-key
+ * terms — see the plan's explicit reasoning for why the provider is a
+ * sub-setting (`llmProvider`) instead of a new `engine` id: that would have
+ * fragmented the cache key, FALLBACK_CHAIN, and every saved profile's
+ * `engine` field for zero benefit. The class name and file path stay as
+ * `OpenAIEngine`/`openai.js` for the same reason — renaming either is a
+ * bigger, unrelated diff for no functional gain.
  */
-const axios = require('axios');
+const OpenAICompatEngine = require('./llm-base');
+const { getProvider } = require('../llm-providers');
 
-class OpenAIEngine {
+class OpenAIEngine extends OpenAICompatEngine {
   constructor(apiKey, options = {}) {
-    this.name = 'openai';
-    this.displayName = 'OpenAI (GPT)';
-    this.requiresKey = true;
-    this.apiKey = apiKey;
-    this.model = options.model || 'gpt-3.5-turbo';
-    this.baseUrl = options.baseUrl || 'https://api.openai.com/v1';
-    this.systemPrompt = options.systemPrompt || '';
-    // v3.13.19: Context is owned by the pipeline's ContextMemory, passed in
-    // via options.context — see context-memory.js.
-    this.supportedLanguages = [
-      'ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh', 'ar', 'hi', 'th', 'vi'
-    ];
-  }
-
-  async translate(text, options = {}) {
-    const { sourceLang = 'ja', targetLang = 'es', sourceLangName = sourceLang, targetLangName = targetLang } = options;
-
-    if (!this.apiKey) {
-      throw new Error('OpenAI API key is required');
-    }
-
-    const defaultPrompt = `You are a professional translator for visual novels and games. Your task is to translate text from ${sourceLangName} to ${targetLangName}.
-
-CRITICAL RULES — follow all of them exactly:
-1. Output ONLY the translated text. No notes, no explanations, no added content.
-2. NEVER translate or modify: proper names, character names, game/book/movie titles, brand names, or technical terms. Keep them exactly as written.
-3. Preserve the speaker's tone, register, and emotional nuance.
-4. Translate naturally — not word-for-word, but meaning-for-meaning.
-5. Maintain consistency with any previously established terminology.
-
-Input: {TEXT}
-Output:`;
-
-    const messages = [
-      {
-        role: 'system',
-        content: this.systemPrompt || defaultPrompt
-      }
-    ];
-
-    // Add few-shot example for better small model performance
-    if (!this.systemPrompt) {
-      if (sourceLangName === 'Japanese' && targetLangName === 'Spanish') {
-        messages.push({ role: 'user', content: 'こんにちは、元気？' });
-        messages.push({ role: 'assistant', content: 'Hola, ¿cómo estás?' });
-      } else if (sourceLangName === 'Japanese' && targetLangName === 'English') {
-        messages.push({ role: 'user', content: 'こんにちは、元気？' });
-        messages.push({ role: 'assistant', content: 'Hello, how are you?' });
-      }
-    }
-
-    // Add context history for better translation quality
-    for (const ctx of options.context || []) {
-      messages.push({ role: 'user', content: ctx.source });
-      messages.push({ role: 'assistant', content: ctx.translation });
-    }
-
-    messages.push({ role: 'user', content: text });
-
-    const response = await axios.post(
-      `${this.baseUrl}/chat/completions`,
-      {
-        model: this.model,
-        messages: messages,
-        temperature: 0.3,
-        max_tokens: 1000
-      },
-      {
-        timeout: 30000,
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const translation = response.data?.choices?.[0]?.message?.content?.trim();
-    if (!translation) {
-      throw new Error('Empty OpenAI response');
-    }
-
-    return {
-      text: translation,
-      detectedLang: null,
-      engine: this.name
-    };
-  }
-
-  setApiKey(key) {
-    this.apiKey = key;
-  }
-
-  setModel(model) {
-    this.model = model;
+    const providerId = options.providerId || 'openai';
+    const provider = getProvider(providerId) || getProvider('openai');
+    super({
+      name: 'openai',
+      displayName: provider.displayName,
+      requiresKey: provider.requiresKey,
+      apiKey,
+      model: options.model || provider.defaultModel || 'gpt-3.5-turbo',
+      // `options.baseUrl` wins when set — that's how the 'custom' provider
+      // (an empty baseUrl in the table on purpose) and a per-profile
+      // override both work: the user-typed URL comes in as options.baseUrl.
+      // Deliberately NO further fallback to OpenAI's real URL: `provider`
+      // is always resolved above (falls back to the real 'openai' entry
+      // when providerId is unknown), so if THIS is empty it's because the
+      // user picked 'custom' and hasn't typed a URL yet — failing the
+      // request outright is correct there, silently calling OpenAI's API
+      // with their key would not be.
+      baseUrl: options.baseUrl || provider.baseUrl,
+      // v3.13.59 (Fase 4): renamed from systemPrompt — see llm-base.js.
+      promptTemplate: options.promptTemplate || '',
+      fewShotEnabled: options.fewShotEnabled,
+      timeout: 30000,
+      supportedLanguages: [
+        'ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh', 'ar', 'hi', 'th', 'vi'
+      ],
+      providerId,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      topP: options.topP,
+      // Only ever set by scripts/test-llm-base.js — production code never
+      // passes this, so llm-base.js's own axios default is what runs live.
+      httpClient: options.httpClient,
+      // v3.13.57 (Fase 2): defaults true in llm-base.js when omitted —
+      // forwarded explicitly here (rather than defaulting to true again in
+      // this file) so pipeline.js's `sanitize: s.llmSanitize !== false` is
+      // the one place that decides it.
+      sanitize: options.sanitize
+    });
   }
 }
 

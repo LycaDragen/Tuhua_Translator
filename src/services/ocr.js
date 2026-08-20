@@ -277,7 +277,7 @@ class OcrService extends EventEmitter {
   async recognize(imageBuffer, options = {}) {
     // v3.13.01: Route to PaddleOCR or Tesseract based on engine setting
     if (this._ocrEngine === 'paddle' && this._paddleEngine.getStatus().ready) {
-      return this._recognizePaddle(imageBuffer);
+      return this._recognizePaddle(imageBuffer, options);
     }
     return this._recognizeTesseract(imageBuffer, options);
   }
@@ -289,7 +289,7 @@ class OcrService extends EventEmitter {
    * Unicode normalization, artifact stripping, garbled line removal, whitespace cleanup.
    * @private
    */
-  async _recognizePaddle(imageBuffer) {
+  async _recognizePaddle(imageBuffer, options = {}) {
     if (this._isBusy) {
       log.warn('[OCR] Busy, skipping PaddleOCR request');
       return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
@@ -332,8 +332,10 @@ class OcrService extends EventEmitter {
         log.info(`[OCR/Paddle] Low confidence (${(result.confidence * 100).toFixed(1)}%) but passing through: "${text.substring(0, 60)}"`);
       }
 
-      // Similarity dedup (same as Tesseract path)
-      if (this._lastEmittedText && this._isSimilarText(text, this._lastEmittedText)) {
+      // Similarity dedup (same as Tesseract path) — skipped when forced
+      // (manual capture button: user explicitly asked to rescan, so a
+      // result identical to the last one should still be re-emitted)
+      if (!options.force && this._lastEmittedText && this._isSimilarText(text, this._lastEmittedText)) {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR/Paddle] Similar text skipped (${(similarity * 100).toFixed(0)}% similar): "${text.substring(0, 50)}"`);
         this.emit('status', 'ready');
@@ -342,7 +344,7 @@ class OcrService extends EventEmitter {
 
       this._lastEmittedText = text;
       log.info(`[OCR/Paddle] Recognized text (${(result.confidence * 100).toFixed(1)}%): "${text.substring(0, 80)}"`);
-      this.emit('text', text);
+      this.emit('text', text, { force: !!options.force });
       this.emit('status', 'ready');
       return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
     } catch (err) {
@@ -451,7 +453,7 @@ class OcrService extends EventEmitter {
       // OCR produces slightly different readings each scan (e.g., "woke up
       // and g" vs "woke up and got"), but they represent the same game text.
       // Only emit when the text is genuinely NEW (different game dialogue).
-      if (this._lastEmittedText && this._isSimilarText(text, this._lastEmittedText)) {
+      if (!options.force && this._lastEmittedText && this._isSimilarText(text, this._lastEmittedText)) {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR] Similar text skipped (${(similarity * 100).toFixed(0)}% similar to last): "${text.substring(0, 50)}"`);
         this.emit('status', 'ready');
@@ -460,7 +462,7 @@ class OcrService extends EventEmitter {
 
       this._lastEmittedText = text;
       log.info(`[OCR] Recognized text (${confidence.toFixed(1)}% confidence): "${text.substring(0, 80)}"`);
-      this.emit('text', text);
+      this.emit('text', text, { force: !!options.force });
 
       this.emit('status', 'ready');
       return { text, confidence };
