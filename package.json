@@ -1,6 +1,6 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.76",
+  "version": "3.13.79",
   "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.62",
   "main": "src/main/index.js",
   "scripts": {
@@ -34,7 +34,8 @@
     "test:translation-cache": "node scripts/test-translation-cache.js",
     "test:translation-memory": "node scripts/test-translation-memory.js",
     "test:pipeline-abort": "node scripts/test-pipeline-abort.js",
-    "test:game-engine-detect": "node scripts/test-game-engine-detect.js"
+    "test:game-engine-detect": "node scripts/test-game-engine-detect.js",
+    "test:ocr-text-cleaning": "node scripts/test-ocr-text-cleaning.js"
   },
 
   "author": {

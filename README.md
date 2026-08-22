@@ -74,12 +74,12 @@ Monitorea el portapapeles del sistema y traduce automáticamente cualquier texto
 ### 📸 OCR
 Captura una región de la pantalla y detecta el texto directamente de la imagen. Perfecto para juegos que no son compatibles con Textractor.
 
-- **Motor por defecto: PaddleOCR (PP-OCRv5)** — modelo unificado chino+japonés (kanji, kana, texto simplificado y tradicional) más un modelo dedicado para coreano, corriendo 100% local vía ONNX Runtime, sin necesidad de Python ni conexión a internet tras la primera descarga de modelos
-- **Detección automática de idioma** (`auto`): identifica japonés/chino/coreano por el texto reconocido y cambia de modelo sin intervención
-- **Filtrado geométrico de furigana**: descarta automáticamente las lecturas kana pequeñas que aparecen sobre el kanji, para que no contaminen el texto a traducir
-- Soporte para texto vertical (縦書き) con detección y rotación automática
+- **Motor por defecto: Tesseract.js** — corre sin descargas adicionales, sin depender de un binario nativo opcional (`onnxruntime-node`)
+- **PaddleOCR (PP-OCRv5) disponible como motor alternativo** — modelo unificado chino+japonés (kanji, kana, texto simplificado y tradicional) más un modelo dedicado para coreano, corriendo 100% local vía ONNX Runtime, sin necesidad de Python ni conexión a internet tras la primera descarga de modelos. Recomendado para japonés/chino/coreano, o cuando la escena tiene mucho ruido visual detrás del texto
+- **Detección automática de idioma** (`auto`): identifica japonés/chino/coreano por el texto reconocido y cambia de modelo sin intervención (ambos motores)
+- **Filtrado geométrico de furigana** (motor PaddleOCR): descarta automáticamente las lecturas kana pequeñas que aparecen sobre el kanji, para que no contaminen el texto a traducir
+- Soporte para texto vertical (縦書き) con detección y rotación automática (motor PaddleOCR)
 - Captura manual o automática (intervalo configurable)
-- **Tesseract.js disponible como motor alternativo** (legacy) — útil como fallback o para idiomas no cubiertos por PaddleOCR
 
 ### 🎮 XUAT (XUnity.AutoTranslator)
 Integra con [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTranslator) para juegos Unity. Tuhua actúa como servidor de traducción y XUAT reemplaza el texto directamente dentro del juego.
@@ -155,8 +155,8 @@ La memoria de traducción almacena pares de traducciones previas y los reutiliza
 ## 🛠️ Tecnologías
 
 - **[Electron](https://www.electronjs.org/)** — Framework de aplicación de escritorio
-- **[PaddleOCR (PP-OCRv5)](https://github.com/PaddlePaddle/PaddleOCR)** vía **[ONNX Runtime](https://github.com/microsoft/onnxruntime)** — Motor OCR por defecto, corre local sin Python
-- **[Tesseract.js](https://github.com/naptha/tesseract.js)** — OCR alternativo/legacy (WebAssembly)
+- **[Tesseract.js](https://github.com/naptha/tesseract.js)** — Motor OCR por defecto (WebAssembly)
+- **[PaddleOCR (PP-OCRv5)](https://github.com/PaddlePaddle/PaddleOCR)** vía **[ONNX Runtime](https://github.com/microsoft/onnxruntime)** — OCR alternativo, corre local sin Python
 - **[electron-store](https://github.com/sindresorhus/electron-store)** — Persistencia de configuración
 - **[Tailwind CSS](https://tailwindcss.com/)** — Framework CSS utilitario (via CDN)
 
@@ -267,7 +267,7 @@ Si te gusta este proyecto, considera dejar una ⭐ en GitHub.
 
 - [Textractor](https://github.com/Artikash/Textractor) — Extractor de texto para juegos
 - [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTranslator) — Plugin de traducción para Unity
-- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — Motor OCR por defecto (PP-OCRv5)
-- [Tesseract.js](https://github.com/naptha/tesseract.js) — OCR en JavaScript (alternativo/legacy)
+- [Tesseract.js](https://github.com/naptha/tesseract.js) — Motor OCR por defecto (WebAssembly)
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — OCR alternativo (PP-OCRv5)
 - [DeepL](https://www.deepl.com/) — Motor de traducción de alta calidad
 - [Electron](https://www.electronjs.org/) — Framework de aplicaciones de escritorio

@@ -36,11 +36,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'ocr-capture',
   'ocr-start',
   'ocr-stop',
-  'ocr-set-language',
-  'ocr-set-interval',
-  'ocr-set-preprocessing',
   'ocr-status',
-  'ocr-set-auto-capture',
   'ocr-close-capture-area',
   'ocr-toggle-scan',
   'get-displays',
@@ -71,9 +67,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
   'reset-hook-cleaning-steps',
   // v3.13.01: PaddleOCR engine selection
-  'set-ocr-engine', 'get-ocr-engine-status',
-  // v3.13.08: OCR confidence threshold
-  'ocr-set-min-confidence'
+  'set-ocr-engine', 'get-ocr-engine-status'
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
@@ -106,6 +100,7 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'ocr-status',
   'ocr-text',
   'ocr-engine-fallback',
+  'ocr-engine-advice',
   'xuat-status',
   'xuat-install-progress',
   'xuat-game-connected',
@@ -233,23 +228,7 @@ const api = {
   ocrCapture: () => secureInvoke('ocr-capture'),
   ocrStart: () => secureInvoke('ocr-start'),
   ocrStop: () => secureInvoke('ocr-stop'),
-  ocrSetLanguage: (lang) => {
-    if (typeof lang !== 'string') throw new Error('Invalid language');
-    return secureInvoke('ocr-set-language', lang);
-  },
-  ocrSetInterval: (ms) => {
-    if (typeof ms !== 'number' || ms < 300) throw new Error('Interval must be >= 300ms');
-    return secureInvoke('ocr-set-interval', ms);
-  },
-  ocrSetPreprocessing: (options) => {
-    if (typeof options !== 'object' || options === null) throw new Error('Invalid preprocessing options');
-    return secureInvoke('ocr-set-preprocessing', options);
-  },
   ocrStatus: () => secureInvoke('ocr-status'),
-  ocrSetAutoCapture: (enabled) => {
-    if (typeof enabled !== 'boolean') throw new Error('Must be boolean');
-    return secureInvoke('ocr-set-auto-capture', enabled);
-  },
   ocrCloseCaptureArea: () => secureInvoke('ocr-close-capture-area'),
   // v3.13.01: OCR engine selection
   setOcrEngine: (engine) => {
@@ -259,11 +238,6 @@ const api = {
     return secureInvoke('set-ocr-engine', engine);
   },
   getOcrEngineStatus: () => secureInvoke('get-ocr-engine-status'),
-  // v3.13.08: OCR confidence threshold
-  ocrSetMinConfidence: (threshold) => {
-    if (typeof threshold !== 'number') throw new Error('Threshold must be a number');
-    return secureInvoke('ocr-set-min-confidence', threshold);
-  },
   getDisplays: () => secureInvoke('get-displays'),
 
   // Translation
@@ -336,6 +310,9 @@ const api = {
   onOcrText: (callback) => secureOn('ocr-text', callback),
   // v3.13.01-fix: PaddleOCR fallback notification
   onOcrEngineFallback: (callback) => secureOn('ocr-engine-fallback', callback),
+  // v3.13.79 (Fase 3, round-3 plan): proactive suggestion to try Paddle
+  // when Tesseract quality has been persistently poor this session
+  onOcrEngineAdvice: (callback) => secureOn('ocr-engine-advice', callback),
 
   // v3.10.0: Debug logs
   getDebugLogs: () => secureInvoke('get-debug-logs'),

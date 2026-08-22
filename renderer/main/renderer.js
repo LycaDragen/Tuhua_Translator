@@ -151,6 +151,17 @@
                 showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
             });
 
+            // v3.13.79 (Fase 3, round-3 plan): the opposite direction of
+            // onOcrEngineFallback above — Tesseract quality has been
+            // persistently poor this session, PaddleOCR is available.
+            // Sticky (like _lastEngineAdvice for the game-engine advisory)
+            // so it survives a language switch repaint; cleared when the
+            // user clicks through in applyOcrEngineAdvice().
+            api.onOcrEngineAdvice((data) => {
+                _lastOcrEngineAdvice = data;
+                renderOcrEngineAdvice();
+            });
+
             // XUAT events
             // v3.11.2: Pass error data to updateXuatStatus for proper error display
             api.onXuatStatus((data) => {
@@ -532,6 +543,9 @@
             // v3.13.76: same reason as recomputeBadge() right above — the
             // game-engine advisory's text is computed, not [data-i18n].
             renderEngineAdvice();
+            // v3.13.79: same reason — the OCR-engine advisory's text is
+            // also computed, not [data-i18n].
+            renderOcrEngineAdvice();
 
             // v3.13.40: same reason as recomputeBadge() above — the
             // profile cards' default-name label and "Default" badge are
@@ -3357,6 +3371,12 @@
         // (the Ren'Py/Godot/FNA case: those engines can produce no hooks at
         // all, but the advisory still has to show). See renderEngineAdvice().
         let _lastEngineAdvice = null;
+        // v3.13.79 (Fase 3, round-3 plan): sticky cache for the OCR-side
+        // advisory (suggest PaddleOCR when Tesseract quality has been
+        // persistently poor this session) — same "must survive a language
+        // switch repaint" reasoning as _lastEngineAdvice above, separate
+        // variable because it's a different event/section entirely.
+        let _lastOcrEngineAdvice = null;
 
         function onHookSelected(hookKey) {
             // Send the hook selection to the backend
@@ -3533,6 +3553,57 @@
             setInputMethod(method); // already persists via api.saveSettings({inputMethod})
             const box = document.getElementById('engine-advice');
             if (box) box.classList.add('hidden');
+        }
+
+        // v3.13.79 (Fase 3, round-3 plan): paint (or re-paint, e.g. on a
+        // language change) the OCR-engine advisory from _lastOcrEngineAdvice.
+        // Split out the same way renderEngineAdvice() is, for the same
+        // reason — the text has a runtime {method} substitution, not
+        // [data-i18n], so a language switch would leave it stuck in
+        // whatever language it was first painted in.
+        function renderOcrEngineAdvice() {
+            const box = document.getElementById('ocr-engine-advice');
+            const textEl = document.getElementById('ocr-engine-advice-text');
+            const btn = document.getElementById('ocr-engine-advice-action');
+            if (!box || !textEl || !btn) return;
+
+            const advice = _lastOcrEngineAdvice;
+            // Already on Paddle (e.g. the user clicked through, or changed
+            // it themselves elsewhere) — nothing left to suggest.
+            const currentEngine = document.getElementById('ocr-engine-select');
+            if (!advice || (currentEngine && currentEngine.value === 'paddle')) {
+                box.classList.add('hidden');
+                return;
+            }
+
+            const t = translations[currentLang] || translations['en'];
+            const template = t.ocr_advice_try_paddle;
+            if (!template) {
+                box.classList.add('hidden');
+                return;
+            }
+            textEl.textContent = template;
+            box.classList.remove('hidden');
+
+            const btnTemplate = t.engine_advice_switch_btn || '→ Switch to {method}';
+            btn.textContent = btnTemplate.replace('{method}', 'PaddleOCR');
+        }
+
+        // v3.13.79 (Fase 3, round-3 plan): explicit click only, never an
+        // automatic switch — same rule v3.13.76's applyEngineAdvice()
+        // follows (Lyca's requirement: suggest, don't decide for the user).
+        function applyOcrEngineAdvice() {
+            // setOcrEngine() is normally driven by the <select>'s onchange,
+            // where the DOM value has already moved before the handler
+            // runs — calling it directly here needs that same update done
+            // by hand, or the dropdown would silently keep showing
+            // "Tesseract" while the engine underneath is actually Paddle.
+            const selectEl = document.getElementById('ocr-engine-select');
+            if (selectEl) selectEl.value = 'paddle';
+            setOcrEngine('paddle'); // already persists via the existing setOcrEngine() path
+            const box = document.getElementById('ocr-engine-advice');
+            if (box) box.classList.add('hidden');
+            _lastOcrEngineAdvice = null;
         }
 
         // ===== HELPERS =====

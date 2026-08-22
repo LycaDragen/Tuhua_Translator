@@ -67,6 +67,109 @@ const LANG_MAP = {
   'auto': 'eng'  // Default to English for OCR — more universal, cleaner results
 };
 
+// v3.13.79: short English words that are real words on their own, not OCR
+// garbage — shared by _isGarbledWord() (per-word classification) and
+// _cleanOcrText()'s Step 11 (trailing-word truncation), which used to
+// blindly strip ANY 1-2 letter word at the end of a capture ("It is OK" →
+// "It is", "12:45 PM" → "12:45"). Single source of truth so the two checks
+// can't drift apart.
+const COMMON_SHORT_WORDS = new Set([
+  'i', 'a', 'an', 'am', 'be', 'do', 'go', 'he', 'in', 'is',
+  'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up',
+  'us', 'we', 'as', 'at', 'by', 'if', 'ok', 'oh',
+  'pm', 'hi', 'ah', 'eh', 'um'
+]);
+
+// v3.13.79: the lone-single-letter-noise filter (the class right below this
+// deletes stray single Latin characters left over from decorative UI/border
+// artifacts) has the exact same blind spot the 'I' bug had: a real single
+// uppercase letter that's meaningful on its own gets swept up too — most
+// commonly a button-prompt idiom ("Press X to skip", "Hold A", "Y to jump").
+// Rather than exempting a fixed set of letters (any of A/B/X/Y/L/R/Z could
+// be the real prompt letter, and exempting them all would gut the filter
+// for genuinely stray capitals elsewhere), this checks CONTEXT: a letter is
+// protected only when a prompt verb sits right before it or a prompt
+// continuation sits right after it. Everything else keeps being filtered as
+// before.
+const BUTTON_PROMPT_BEFORE = /\b(?:press|hold|tap|hit)\s*$/i;
+const BUTTON_PROMPT_AFTER = /^\s*(?:to|key|button)\b/i;
+
+function isProtectedButtonLetter(fullText, matchIndex, matchLength) {
+  const before = fullText.slice(0, matchIndex);
+  const after = fullText.slice(matchIndex + matchLength);
+  return BUTTON_PROMPT_BEFORE.test(before) || BUTTON_PROMPT_AFTER.test(after);
+}
+
+/**
+ * v3.13.77 (Stage 4, OCR-refinement round): BT.601 luma grayscale, in place,
+ * over a BGRA bitmap (electron's nativeImage.toBitmap() format — B,G,R,A
+ * byte order). Alpha is left untouched. Both PaddleOCR's DB detection head
+ * and Tesseract's LSTM do their own internal normalization, so this is
+ * expected to be close to a no-op quality-wise — it mainly matters for
+ * making the `grayscale: true` preprocessing option (previously a
+ * declared-but-inert flag with zero code behind it) actually do what it
+ * claims. Module-level, not a class method: it has no dependency on OcrService
+ * state, and scripts/test-ocr-images.js can reuse it directly if needed.
+ */
+function grayscaleBGRA(bitmap) {
+  for (let i = 0; i < bitmap.length; i += 4) {
+    const b = bitmap[i];
+    const g = bitmap[i + 1];
+    const r = bitmap[i + 2];
+    const luma = Math.round(0.114 * b + 0.587 * g + 0.299 * r);
+    bitmap[i] = luma;
+    bitmap[i + 1] = luma;
+    bitmap[i + 2] = luma;
+  }
+}
+
+/**
+ * v3.13.77 (Stage 4, OCR-refinement round): Otsu's method — finds the
+ * threshold that maximizes between-class variance of an ALREADY-GRAYSCALE
+ * BGRA bitmap (call grayscaleBGRA() first), then binarizes in place (0 or
+ * 255 per pixel). Off by default (`otsuThreshold: false`) — real VN
+ * dialogue text with an outline or drop shadow loses those soft edges to a
+ * hard binarization; kept as an explicit opt-in for games whose text is
+ * flat-colored with no outline, where it may help on a noisy background.
+ */
+function otsuThresholdBGRA(bitmap) {
+  const histogram = new Array(256).fill(0);
+  const pixelCount = bitmap.length / 4;
+  for (let i = 0; i < bitmap.length; i += 4) {
+    histogram[bitmap[i]]++; // already grayscale — B/G/R are identical
+  }
+
+  let sumAll = 0;
+  for (let t = 0; t < 256; t++) sumAll += t * histogram[t];
+
+  let sumB = 0;
+  let weightB = 0;
+  let maxVariance = 0;
+  let threshold = 128;
+  for (let t = 0; t < 256; t++) {
+    weightB += histogram[t];
+    if (weightB === 0) continue;
+    const weightF = pixelCount - weightB;
+    if (weightF === 0) break;
+
+    sumB += t * histogram[t];
+    const meanB = sumB / weightB;
+    const meanF = (sumAll - sumB) / weightF;
+    const variance = weightB * weightF * (meanB - meanF) * (meanB - meanF);
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = t;
+    }
+  }
+
+  for (let i = 0; i < bitmap.length; i += 4) {
+    const v = bitmap[i] >= threshold ? 255 : 0;
+    bitmap[i] = v;
+    bitmap[i + 1] = v;
+    bitmap[i + 2] = v;
+  }
+}
+
 class OcrService extends EventEmitter {
   constructor() {
     super();
@@ -79,19 +182,26 @@ class OcrService extends EventEmitter {
     this._isAutoCapturing = false;
     this._lastImageData = null;
     this._changeThreshold = 5;
-    this._preprocessing = {
-      grayscale: true,
-      threshold: false,
-      thresholdValue: 128,
-      contrast: false,
-      contrastValue: 1.5
+    // v3.13.77 (Stage 4, OCR-refinement round): replaces the old
+    // `_preprocessing` shape ({grayscale, threshold, thresholdValue,
+    // contrast, contrastValue}), which was almost entirely cosmetic —
+    // grayscale/contrast had zero code branches (pure no-ops), and
+    // `threshold` set `tessedit_threshold_value`, which isn't a real
+    // Tesseract variable name. These are the options that actually do
+    // something now, tuned by sweeping scripts/test-ocr-images.js
+    // --tess-upscale=/--tess-psm= against the bench (see the plan for the
+    // grid results): upscaleFactor resamples the crop before Tesseract sees
+    // it, psm sets tessedit_pageseg_mode, otsuThreshold applies a real
+    // Otsu binarization (off by default — real VN text with outline/
+    // antialiasing tends to lose strokes to it; only worth enabling if a
+    // specific game's bench numbers ask for it).
+    this._tesseractOptions = {
+      upscaleFactor: 1.0,
+      psm: '6', // Tesseract's own compiled default (SINGLE_BLOCK)
+      otsuThreshold: false
     };
+    this._preprocessing = { grayscale: true };
     this._autoCaptureMs = 3500; // v3.9.9: reduced from 7000ms for faster scanning
-    // v3.13.08: Lowered from 55 to 0 — same philosophy as PaddleOCR path:
-    // the translation engine handles imperfect OCR better than no input.
-    // A 55% threshold was rejecting RPG battle text and low-quality scans.
-    // Users can override via the 'ocrMinConfidence' store key.
-    this._minConfidence = 0;
     this._initialized = false;
     this._lastEmittedText = '';
     this._captureFn = null;
@@ -103,6 +213,21 @@ class OcrService extends EventEmitter {
     this._paddleEngine = new PaddleOCREngine();
     // v3.13.04: Track source language for PaddleOCR model selection
     this._paddleSourceLang = 'auto';
+    // v3.13.79 (Fase 3, round-3 plan): rolling window of the last 10
+    // Tesseract quality samples (garbled-vs-good, plus confidence), used to
+    // suggest switching to PaddleOCR when a game's typography is
+    // persistently readable to Paddle but not Tesseract — same real-world
+    // gap the round-2 bench measured for Echo/Lust Shards (95-100% on
+    // Paddle vs 79-92% on Tesseract). See _trackTesseractQualityAndMaybeAdvise().
+    this._tesseractQualityWindow = [];
+    this._engineAdviceEmitted = false;
+    // v3.13.79: consecutive-frame counter for Tesseract auto-detect (see
+    // _maybeSwitchTesseractLangForAutoDetect()) — a single bad frame (e.g. a
+    // clock/counter Tesseract-English can't read) used to be enough to
+    // switch the whole session to Japanese/Korean. Now non-hangul evidence
+    // has to repeat for a few frames before it's trusted; a real hangul
+    // sighting is still immediate (see the function for why).
+    this._autoDetectFailStreak = 0;
   }
 
   /**
@@ -119,6 +244,12 @@ class OcrService extends EventEmitter {
     }
     this._ocrEngine = engine;
     log.info(`[OCR] Engine set to: ${this._ocrEngine}`);
+    // v3.13.79: an engine switch (in either direction) makes the rolling
+    // quality window stale — a window built while reading Tesseract output
+    // shouldn't judge Paddle, or vice versa, and a user who already
+    // switched to Paddle doesn't need to be told to switch to Paddle.
+    this._tesseractQualityWindow = [];
+    this._engineAdviceEmitted = false;
   }
 
   /**
@@ -133,6 +264,41 @@ class OcrService extends EventEmitter {
    */
   isPaddleAvailable() {
     return PaddleOCREngine.isAvailable();
+  }
+
+  /**
+   * v3.13.79 (Fase 3, round-3 plan): feed one Tesseract recognition outcome
+   * into the rolling quality window and, at most once per session, suggest
+   * switching to PaddleOCR when the window is persistently bad AND Paddle
+   * is actually available to switch to. Deliberately only fed from the
+   * garbled-text-skip path and the successful-emit path in
+   * _recognizeTesseract() — NOT the empty-result path, since an empty
+   * capture usually just means no dialogue is on screen right now (normal
+   * between VN lines), not that Tesseract failed to read text that was
+   * there. Mixing that in would make the window mostly noise.
+   * @private
+   */
+  _trackTesseractQualityAndMaybeAdvise(confidence, isGood) {
+    if (this._ocrEngine !== 'tesseract') return;
+
+    this._tesseractQualityWindow.push({ confidence, isGood });
+    if (this._tesseractQualityWindow.length > 10) this._tesseractQualityWindow.shift();
+
+    if (this._engineAdviceEmitted) return;
+    if (this._tesseractQualityWindow.length < 10) return;
+    if (!PaddleOCREngine.isAvailable()) return;
+
+    const badCount = this._tesseractQualityWindow.filter((s) => !s.isGood).length;
+    const meanConfidence = this._tesseractQualityWindow.reduce((sum, s) => sum + s.confidence, 0) / this._tesseractQualityWindow.length;
+    // Heuristic thresholds, same status as the Fase 2 validation floors —
+    // a starting point, not something measured against real captures yet.
+    const persistentlyBad = badCount >= 5 || meanConfidence < 40;
+
+    if (persistentlyBad) {
+      this._engineAdviceEmitted = true;
+      log.info(`[OCR] Tesseract quality persistently low over the last ${this._tesseractQualityWindow.length} captures (badCount=${badCount}/10, meanConfidence=${meanConfidence.toFixed(1)}) — suggesting PaddleOCR`);
+      this.emit('engine-advice', { reason: 'low-quality', badCount, meanConfidence: Math.round(meanConfidence) });
+    }
   }
 
   /**
@@ -234,6 +400,93 @@ class OcrService extends EventEmitter {
   }
 
   /**
+   * v3.13.77 (Stage 4, OCR-refinement round): single place to create a
+   * tesseract.js worker, used by _initializeTesseract() and by the two
+   * auto-detect re-creation sites in _maybeSwitchTesseractLangForAutoDetect().
+   * Previously each of those three call sites duplicated the same options
+   * object with no `cachePath` — tesseract.js defaults to caching
+   * traineddata under the process CWD, which on a packaged Windows install
+   * is frequently non-writable, so the ~15-30MB model silently re-downloaded
+   * every session (write failures there are caught and swallowed inside
+   * tesseract.js itself). `app.getPath('userData')` is always writable and
+   * is exactly where PaddleOCR already caches its own models
+   * (paddle-models.js), so this makes the two engines consistent.
+   * @private
+   */
+  async _createTesseractWorker(lang) {
+    const { app } = require('electron');
+    return Tesseract.createWorker(lang, 1, {
+      cachePath: app.getPath('userData'),
+      logger: (m) => {
+        if (m.status === 'recognizing text') {
+          this.emit('progress', m.progress);
+        }
+        log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
+      }
+    });
+  }
+
+  /**
+   * v3.13.79: single place that swaps the live Tesseract worker for a
+   * different language — terminate → create → re-apply psm/dpi params.
+   * Extracted out of _maybeSwitchTesseractLangForAutoDetect() so the same
+   * sequence can also be used to REVERT to English (see
+   * _attemptAutoDetectSwitch()'s final-fallback path and the validation
+   * step in _recognizeTesseract()), not just to switch away from it.
+   * Throws if worker creation fails — callers decide how to handle that.
+   * @private
+   */
+  async _switchTesseractLang(lang) {
+    if (this._worker) {
+      try { await this._worker.terminate(); } catch (e) { /* ignore */ }
+      this._worker = null;
+    }
+    this._language = lang;
+    this._worker = await this._createTesseractWorker(lang);
+    await this._applyTesseractParameters();
+  }
+
+  /**
+   * v3.13.79: try switching to `targetLang`, falling back to `fallbackLang`
+   * if that fails, exactly like the old inline try/catch in
+   * _maybeSwitchTesseractLangForAutoDetect() — extracted so the bug that
+   * lived here (see below) has one fix site instead of two near-duplicates.
+   *
+   * BUG FIXED: if BOTH attempts threw, the old code left `_worker = null`
+   * with `_isReady` still `true`. The next recognize() call would throw
+   * 'OCR worker not initialized. Call initialize() first.' with no way to
+   * recover short of an external initialize() call. Now it tries to
+   * restore an English worker as a last resort so the service stays usable;
+   * only if THAT also fails does it give up and mark `_isReady = false`,
+   * which is at least an honest, checkable state instead of a silent trap.
+   * @private
+   */
+  async _attemptAutoDetectSwitch(targetLang, targetLangName, fallbackLang, fallbackLangName) {
+    try {
+      await this._switchTesseractLang(targetLang);
+      log.info(`[OCR] Switched Tesseract to ${targetLangName} model for auto-detect`);
+      return true;
+    } catch (err) {
+      log.warn(`[OCR] Failed to switch Tesseract to ${targetLangName}: ${err.message}`);
+      try {
+        await this._switchTesseractLang(fallbackLang);
+        log.info(`[OCR] Switched Tesseract to ${fallbackLangName} model as fallback`);
+        return true;
+      } catch (fbErr) {
+        log.warn(`[OCR] Fallback to ${fallbackLangName} also failed: ${fbErr.message}`);
+        try {
+          await this._switchTesseractLang('eng');
+          log.info('[OCR] Restored English Tesseract worker after failed auto-detect switch');
+        } catch (revertErr) {
+          log.error(`[OCR] Could not restore English worker after failed auto-detect switch: ${revertErr.message}`);
+          this._isReady = false;
+        }
+        return false;
+      }
+    }
+  }
+
+  /**
    * Initialize Tesseract worker
    * @private
    */
@@ -253,14 +506,8 @@ class OcrService extends EventEmitter {
       this.emit('status', 'initializing');
       log.info(`[OCR] Initializing tesseract worker with language: ${this._language}`);
 
-      this._worker = await Tesseract.createWorker(this._language, 1, {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            this.emit('progress', m.progress);
-          }
-          log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
-        }
-      });
+      this._worker = await this._createTesseractWorker(this._language);
+      await this._applyTesseractParameters();
 
       this._isReady = true;
       this._initialized = true;
@@ -292,7 +539,7 @@ class OcrService extends EventEmitter {
   async _recognizePaddle(imageBuffer, options = {}) {
     if (this._isBusy) {
       log.warn('[OCR] Busy, skipping PaddleOCR request');
-      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null, detGeometry: null, detectedBoxes: null };
     }
 
     this._isBusy = true;
@@ -324,7 +571,7 @@ class OcrService extends EventEmitter {
       if (!minCharsMet) {
         log.info(`[OCR/Paddle] Skipping empty result (0 meaningful chars): "${text.substring(0, 60)}"`);
         this.emit('status', 'ready');
-        return { text: '', confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
+        return { text: '', confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel, detGeometry: result.detGeometry, detectedBoxes: result.detectedBoxes };
       }
 
       // Log low confidence but still pass through — translation engine may handle it
@@ -339,19 +586,19 @@ class OcrService extends EventEmitter {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR/Paddle] Similar text skipped (${(similarity * 100).toFixed(0)}% similar): "${text.substring(0, 50)}"`);
         this.emit('status', 'ready');
-        return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
+        return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel, detGeometry: result.detGeometry, detectedBoxes: result.detectedBoxes };
       }
 
       this._lastEmittedText = text;
       log.info(`[OCR/Paddle] Recognized text (${(result.confidence * 100).toFixed(1)}%): "${text.substring(0, 80)}"`);
       this.emit('text', text, { force: !!options.force });
       this.emit('status', 'ready');
-      return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
+      return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel, detGeometry: result.detGeometry, detectedBoxes: result.detectedBoxes };
     } catch (err) {
       log.error('[OCR/Paddle] Recognition error:', err.message);
       this.emit('error', err);
       this.emit('status', 'error');
-      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null, detGeometry: null, detectedBoxes: null };
     } finally {
       this._isBusy = false;
     }
@@ -375,14 +622,31 @@ class OcrService extends EventEmitter {
     this.emit('status', 'recognizing');
 
     try {
+      // v3.13.77 (Stage 4, OCR-refinement round): _preprocessImage() now does
+      // real pixel work (upscale, BT.601 grayscale, optional Otsu) instead of
+      // being a no-op gated on flags that had no code behind them. Only skip
+      // it entirely when every knob is at its true no-op setting, so the
+      // common case (grayscale on, no upscale) still avoids decode/reencode
+      // when nothing would change.
       let processedImage = imageBuffer;
-      if (this._preprocessing.grayscale || this._preprocessing.threshold || this._preprocessing.contrast) {
+      if (this._tesseractOptions.upscaleFactor !== 1.0 || this._preprocessing.grayscale || this._tesseractOptions.otsuThreshold) {
         processedImage = await this._preprocessImage(imageBuffer);
       }
 
-      const result = await this._worker.recognize(processedImage);
+      // v3.13.77: request only {text, blocks} instead of tesseract.js's
+      // default {blocks, text, hocr, tsv} — hocr/tsv are never read anywhere
+      // in this codebase, and generating them costs real time on every
+      // ~3.5s auto-capture tick. `blocks` is what exposes word-level
+      // confidence (result.data.words doesn't actually exist despite the
+      // published .d.ts claiming it does — verified against the shipped
+      // 5.1.1 source in node_modules/tesseract.js/src/worker-script/utils/
+      // dump.js, which only ever populates `blocks`; words/lines/paragraphs
+      // must be walked via blocks[].paragraphs[].lines[].words[]).
+      const recognizeOutput = { text: true, blocks: true };
+      const result = await this._worker.recognize(processedImage, {}, recognizeOutput);
       let rawText = result.data.text.trim();
       let confidence = result.data.confidence;
+      let wordLines = this._extractTesseractLines(result.data.blocks);
 
       // v3.13.10: Auto-detect language switching for Tesseract.
       // When sourceLang is 'auto', Tesseract defaults to English (eng) which
@@ -393,17 +657,94 @@ class OcrService extends EventEmitter {
       if (this._sourceLang === 'auto' && this._language === 'eng') {
         const switched = await this._maybeSwitchTesseractLangForAutoDetect(rawText, confidence, imageBuffer);
         if (switched) {
+          // v3.13.79 (2.1): the pre-switch English result is the baseline
+          // to validate against — capture it before rawText/confidence get
+          // reassigned below.
+          const baselineText = rawText;
+          const baselineConfidence = confidence;
           // Re-recognize with the new language model
           try {
-            const reResult = await this._worker.recognize(processedImage);
-            rawText = reResult.data.text.trim();
-            confidence = reResult.data.confidence;
-            log.info(`[OCR] Re-recognized with ${this._language}: "${rawText.substring(0, 60)}" (${confidence.toFixed(1)}%)`);
+            const reResult = await this._worker.recognize(processedImage, {}, recognizeOutput);
+            const newText = reResult.data.text.trim();
+            const newConfidence = reResult.data.confidence;
+
+            // v3.13.79 (2.1): validate the switch actually helped before
+            // committing to it. This is what catches the case the round-3
+            // plan was built around: a clock/counter ("35:97") switches to
+            // Japanese and the model hallucinates a couple of characters
+            // ("2 に") at low confidence — technically non-empty, but worse
+            // than staying in English, not better.
+            //
+            // Primary criterion is COMPARATIVE (new result has to beat the
+            // English baseline on both length and confidence) — robust,
+            // no magic numbers. The absolute floors below are a secondary
+            // path for the case where English produced nothing at all to
+            // compare against (baseline length 0); their exact values are
+            // heuristic placeholders, EXPLICITLY PENDING CALIBRATION against
+            // real main.log data from Windows (see the round-3 plan) — the
+            // instrumentation log line below exists specifically to gather
+            // that data before the floors get tuned.
+            const newLen = newText.replace(/\s/g, '').length;
+            const baselineLen = baselineText.replace(/\s/g, '').length;
+            const newIsMostlyGarbled = this._isMostlyGarbled(newText);
+            const isComparativelyBetter = newLen > baselineLen && newConfidence > baselineConfidence;
+            const MIN_CHARS_FLOOR = 4;
+            const MIN_CONFIDENCE_FLOOR = 40;
+            const passesAbsoluteFloor = newLen >= MIN_CHARS_FLOOR && newConfidence >= MIN_CONFIDENCE_FLOOR && !newIsMostlyGarbled;
+            const switchWorked = isComparativelyBetter || passesAbsoluteFloor;
+            const digitRatio = baselineText.length > 0
+              ? (baselineText.match(/[0-9]/g) || []).length / baselineText.length
+              : 0;
+
+            log.info(`[OCR] Auto-detect validation: lang=${this._language} baselineLen=${baselineLen} baselineConf=${baselineConfidence.toFixed(1)} baselineDigitRatio=${digitRatio.toFixed(2)} newLen=${newLen} newConf=${newConfidence.toFixed(1)} streak=${this._autoDetectFailStreak} comparative=${isComparativelyBetter} absoluteFloor=${passesAbsoluteFloor} decision=${switchWorked ? 'KEEP' : 'REVERT'}`);
+
+            if (switchWorked) {
+              rawText = newText;
+              confidence = newConfidence;
+              wordLines = this._extractTesseractLines(reResult.data.blocks);
+              log.info(`[OCR] Re-recognized with ${this._language}: "${rawText.substring(0, 60)}" (${confidence.toFixed(1)}%)`);
+            } else {
+              log.info(`[OCR] Auto-detect switch to ${this._language} did not beat the English baseline — reverting`);
+              try {
+                await this._switchTesseractLang('eng');
+              } catch (revertErr) {
+                log.error(`[OCR] Failed to revert Tesseract to English: ${revertErr.message}`);
+                this._isReady = false;
+              }
+              // rawText/confidence/wordLines stay at the pre-switch English values.
+            }
           } catch (reErr) {
             log.warn(`[OCR] Re-recognition with ${this._language} failed: ${reErr.message}`);
+            try {
+              await this._switchTesseractLang('eng');
+            } catch (revertErr) {
+              log.error(`[OCR] Failed to revert Tesseract to English: ${revertErr.message}`);
+              this._isReady = false;
+            }
           }
         }
       }
+
+      // v3.13.77 (Stage 4, OCR-refinement round): drop low-confidence
+      // outlier WORDS (garbage from UI clutter caught by an oversized
+      // capture region) before cleaning/emitting, using a threshold relative
+      // to this run's own mean word confidence — see
+      // _filterTesseractWordsByConfidence()'s docstring for why relative,
+      // not absolute.
+      const wordFilterResult = this._filterTesseractWordsByConfidence(wordLines);
+      if (wordFilterResult) {
+        log.info(`[OCR] Word confidence filter: "${rawText.substring(0, 40)}" -> "${wordFilterResult.text.substring(0, 40)}"`);
+        rawText = wordFilterResult.text;
+        confidence = wordFilterResult.confidence;
+      }
+
+      // v3.13.77 (Stage 4, OCR-refinement round): diagnostic stats for the
+      // bench's --tess-upscale=/--tess-psm= sweep (median word-line height,
+      // kept-vs-dropped confidence separation) — computed on the RAW word
+      // list regardless of whether the filter above actually changed
+      // anything, so the sweep can see the filter's discrimination even on
+      // inputs where the "never empty everything" guard left it a no-op.
+      const wordStats = this._computeTesseractWordStats(wordLines);
 
       const text = this._cleanOcrText(rawText);
 
@@ -422,7 +763,7 @@ class OcrService extends EventEmitter {
       if (!minCharsMet) {
         log.info(`[OCR] Skipping empty/meaningless result (${confidence.toFixed(1)}%, ${text.length} chars, ${cjkCount} CJK, ${latinLetterCount} Latin): "${text.substring(0, 60)}"`);
         this.emit('status', 'ready');
-        return { text: '', confidence };
+        return { text: '', confidence, wordStats };
       }
 
       // Log low confidence but still pass through (same as PaddleOCR path)
@@ -444,8 +785,9 @@ class OcrService extends EventEmitter {
       const hasCJKChars = (text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g) || []).length > 0;
       if (!hasCJKChars && this._isMostlyGarbled(text)) {
         log.info(`[OCR] Skipping garbled text (high garbled-word ratio): "${text.substring(0, 60)}"`);
+        this._trackTesseractQualityAndMaybeAdvise(confidence, false);
         this.emit('status', 'ready');
-        return { text: '', confidence };
+        return { text: '', confidence, wordStats };
       }
 
       // v3.9.8: SIMILARITY-BASED DEDUP — don't re-emit text that is >80%
@@ -456,16 +798,18 @@ class OcrService extends EventEmitter {
       if (!options.force && this._lastEmittedText && this._isSimilarText(text, this._lastEmittedText)) {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR] Similar text skipped (${(similarity * 100).toFixed(0)}% similar to last): "${text.substring(0, 50)}"`);
+        this._trackTesseractQualityAndMaybeAdvise(confidence, true);
         this.emit('status', 'ready');
-        return { text, confidence };
+        return { text, confidence, wordStats };
       }
 
       this._lastEmittedText = text;
       log.info(`[OCR] Recognized text (${confidence.toFixed(1)}% confidence): "${text.substring(0, 80)}"`);
+      this._trackTesseractQualityAndMaybeAdvise(confidence, true);
       this.emit('text', text, { force: !!options.force });
 
       this.emit('status', 'ready');
-      return { text, confidence };
+      return { text, confidence, wordStats };
     } catch (err) {
       log.error('[OCR] Recognition error:', err.message);
       this.emit('error', err);
@@ -487,25 +831,47 @@ class OcrService extends EventEmitter {
     await this.initialize(lang);
   }
 
-  setPreprocessing(options) {
-    this._preprocessing = { ...this._preprocessing, ...options };
-    log.info('[OCR] Preprocessing updated:', JSON.stringify(this._preprocessing));
-  }
-
   setChangeThreshold(threshold) {
     this._changeThreshold = Math.max(0, Math.min(100, threshold));
   }
 
   /**
-   * v3.13.08: Set the minimum Tesseract confidence threshold.
-   * Default is 0 (no minimum — let translation engine handle imperfect OCR).
-   * Can be raised via the 'ocrMinConfidence' store key for users who prefer
-   * stricter filtering.
-   * @param {number} threshold - Minimum confidence (0-100)
+   * v3.13.77 (Stage 4, OCR-refinement round): tune the Tesseract path's real
+   * preprocessing knobs. Test-bench-facing (scripts/test-ocr-images.js sweeps
+   * upscaleFactor x psm to pick data-backed defaults) — there is no
+   * settings-panel UI for this, matching the fact that these values are the
+   * same for every user rather than a per-user preference.
+   * @param {object} options - { upscaleFactor, psm, otsuThreshold }
    */
-  setMinConfidence(threshold) {
-    this._minConfidence = Math.max(0, Math.min(100, Number(threshold) || 0));
-    log.info(`[OCR] Min confidence set to: ${this._minConfidence}`);
+  setTesseractOptions(options) {
+    this._tesseractOptions = { ...this._tesseractOptions, ...options };
+    log.info('[OCR] Tesseract options updated:', JSON.stringify(this._tesseractOptions));
+    // Best-effort: a worker may not exist yet (applied lazily at init via
+    // _applyTesseractParameters() in _initializeTesseract()).
+    this._applyTesseractParameters().catch((err) => {
+      log.warn('[OCR] Failed to apply Tesseract options:', err.message);
+    });
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): push the current
+   * upscaleFactor/psm onto the live worker as real Tesseract variables
+   * (tessedit_pageseg_mode, user_defined_dpi). Split out from
+   * _preprocessImage() because these are worker-level parameters set once
+   * (at init, or when setTesseractOptions() changes them) — re-sending them
+   * on every single capture would cost a WASM round-trip every ~3.5s for
+   * values that essentially never change mid-session.
+   * @private
+   */
+  async _applyTesseractParameters() {
+    if (!this._worker) return;
+    await this._worker.setParameters({
+      tessedit_pageseg_mode: this._tesseractOptions.psm,
+      // v3.13.77: tell Tesseract the EFFECTIVE dpi after _preprocessImage()'s
+      // upscale, not the screen's raw ~96 DPI. A capture upscaled 2x really
+      // is closer to 192 DPI as far as the LSTM's input is concerned.
+      user_defined_dpi: String(Math.round(96 * this._tesseractOptions.upscaleFactor))
+    });
   }
 
   startAutoCapture(captureFn, intervalMs) {
@@ -554,6 +920,31 @@ class OcrService extends EventEmitter {
     this._isAutoCapturing = false;
     this._lastImageData = null;
     this._lastEmittedText = '';
+    // v3.13.79 (Fase 3): the engine-advice window/flag are scoped to one
+    // auto-capture session — a fresh session (new game, new capture region)
+    // deserves its own read on Tesseract's quality rather than inheriting a
+    // stale one, and the "once per session" promise wouldn't mean much
+    // otherwise.
+    this._tesseractQualityWindow = [];
+    this._engineAdviceEmitted = false;
+    // v3.13.79 (2.5): if auto-detect drifted the Tesseract model away from
+    // English during this session, don't let the NEXT startAutoCapture()
+    // silently inherit it. startAutoCapture() itself never calls
+    // initialize()/setLanguage() (only load-profile and save-settings do),
+    // so without this, stopping and restarting auto-capture mid-session
+    // (e.g. switching to a different capture region on the same game) would
+    // keep reading English dialogue with a Japanese/Korean model from
+    // whatever the last drift left behind. Fire-and-forget: this method is
+    // synchronous everywhere it's called from, and the reset only needs to
+    // land before the next recognize() call actually happens, not before
+    // this one returns.
+    if (this._sourceLang === 'auto' && this._ocrEngine === 'tesseract' && this._language !== 'eng') {
+      this._autoDetectFailStreak = 0;
+      log.info('[OCR] Auto-capture stopped mid-drift — resetting Tesseract back to English in the background');
+      this._switchTesseractLang('eng').catch((err) => {
+        log.error(`[OCR] Failed to reset Tesseract language on stopAutoCapture: ${err.message}`);
+      });
+    }
     log.info('[OCR] Auto-capture stopped');
     if (this._isReady) {
       this.emit('status', 'ready');
@@ -572,8 +963,8 @@ class OcrService extends EventEmitter {
       sourceLang: this._sourceLang,
       autoCapturing: this.isAutoCapturing,
       preprocessing: { ...this._preprocessing },
+      tesseractOptions: { ...this._tesseractOptions },
       ocrEngine: this._ocrEngine,
-      minConfidence: this._minConfidence,  // v3.13.08: Expose current threshold
       paddleAvailable: PaddleOCREngine.isAvailable(),
       paddleStatus: this._paddleEngine.getStatus()
     };
@@ -601,22 +992,172 @@ class OcrService extends EventEmitter {
     return changePercent >= this._changeThreshold;
   }
 
-  async _preprocessImage(imageBuffer) {
-    try {
-      if (this._worker) {
-        const params = {};
-        if (this._preprocessing.threshold) {
-          params.tessedit_thresholding_method = '1';
-          params.tessedit_threshold_value = String(this._preprocessing.thresholdValue || 128);
-        }
-        if (Object.keys(params).length > 0) {
-          await this._worker.setParameters(params);
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): flatten tesseract.js's
+   * blocks[].paragraphs[].lines[].words[] tree into a flat array of lines
+   * (each still holding its own .words), for _filterTesseractWordsByConfidence().
+   * There is no shortcut — result.data.words/.lines/.paragraphs described in
+   * the package's .d.ts do not actually exist in the shipped 5.1.1 runtime
+   * (verified against worker-script/utils/dump.js); only .blocks is real.
+   * @private
+   */
+  _extractTesseractLines(blocks) {
+    const lines = [];
+    if (!blocks) return lines;
+    for (const block of blocks) {
+      for (const para of block.paragraphs || []) {
+        for (const line of para.lines || []) {
+          if (line.words && line.words.length) lines.push(line);
         }
       }
-    } catch (err) {
-      log.warn('[OCR] Preprocessing parameter error:', err.message);
     }
-    return imageBuffer;
+    return lines;
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): drop low-confidence outlier
+   * words, mirroring the relative-threshold outlier filter already used on
+   * the Paddle path (ocr-paddle.js: `threshold = avgConf * 0.25`) instead of
+   * a fixed cutoff. Tesseract's confidence is not calibrated across
+   * preprocessing configs — an aggressive upscale genuinely raises the
+   * LSTM's confidence on every word, garbage included, so a fixed absolute
+   * threshold would need re-tuning every time upscaleFactor/psm change. A
+   * threshold relative to this run's own mean confidence moves with it.
+   *
+   * Two guards, both mirrored from the Paddle version: never filter on a
+   * single word (nothing to compare against), and never let filtering empty
+   * the result — if the relative threshold would drop every word, it isn't
+   * discriminating anything useful on this input, so the caller should keep
+   * the original unfiltered text/confidence instead.
+   *
+   * A third guard, found by testing rather than anticipated by the plan:
+   * skip entirely if any word contains CJK characters. Tesseract's "word"
+   * segmentation for Chinese/Japanese/Korean does not carry the same
+   * per-word confidence semantics it does for space-separated Latin text —
+   * confirmed by reproduction against test10-low-quality.png (bench, ja),
+   * where this filter dropped 表れ (a real, meaningful part of "遅れました")
+   * as a low-confidence "outlier" relative to the rest of the line, turning
+   * a already-imperfect 80% similarity result into 60%. Mirrors the same
+   * CJK skip _isMostlyGarbled() already applies for the same underlying
+   * reason (a heuristic tuned on Latin word statistics doesn't transfer).
+   *
+   * @param {Array<{words: Array}>} lines - from _extractTesseractLines()
+   * @returns {{text: string, confidence: number}|null} null means "don't
+   *   change anything" (too few words, filtering would remove everything,
+   *   or the text contains CJK)
+   * @private
+   */
+  _filterTesseractWordsByConfidence(lines) {
+    const allWords = [];
+    for (const line of lines) {
+      for (const word of line.words) allWords.push({ ...word, _line: line });
+    }
+    if (allWords.length <= 1) return null;
+
+    const hasCJK = allWords.some(w => /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(w.text || ''));
+    if (hasCJK) return null;
+
+    const avgConf = allWords.reduce((sum, w) => sum + w.confidence, 0) / allWords.length;
+    const threshold = avgConf * 0.25;
+    const kept = allWords.filter(w => w.confidence >= threshold);
+    if (kept.length === 0 || kept.length === allWords.length) return null;
+
+    const keptTextByLine = new Map();
+    for (const w of kept) {
+      if (!keptTextByLine.has(w._line)) keptTextByLine.set(w._line, []);
+      keptTextByLine.get(w._line).push(w.text);
+    }
+    const rebuiltLines = [];
+    for (const line of lines) {
+      const words = keptTextByLine.get(line);
+      if (words && words.length) rebuiltLines.push(words.join(' '));
+    }
+
+    return {
+      text: rebuiltLines.join('\n'),
+      confidence: kept.reduce((sum, w) => sum + w.confidence, 0) / kept.length
+    };
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): diagnostic stats for
+   * scripts/test-ocr-images.js's --tess-upscale=/--tess-psm= sweep — median
+   * word-line height (to pick an upscale factor by target glyph height
+   * rather than a blind multiplier) and the same relative-threshold split
+   * used by _filterTesseractWordsByConfidence(), reported as the mean
+   * confidence of the words on each side of it. A config whose "kept" and
+   * "dropped" means move together (both rising with a bigger upscale, say)
+   * isn't actually discriminating garbage from real text — it's just
+   * inflating confidence uniformly — which the raw similarity score alone
+   * would not reveal.
+   * @private
+   */
+  _computeTesseractWordStats(lines) {
+    const words = [];
+    for (const line of lines) for (const w of line.words) words.push(w);
+    if (words.length === 0) return null;
+
+    const heights = words
+      .map(w => w.bbox.y1 - w.bbox.y0)
+      .filter(h => h > 0)
+      .sort((a, b) => a - b);
+    const medianLineHeightPx = heights.length ? heights[Math.floor(heights.length / 2)] : null;
+
+    if (words.length <= 1) {
+      return { medianLineHeightPx, meanConfidenceKept: words[0].confidence, meanConfidenceDropped: null, totalWords: 1, droppedWords: 0 };
+    }
+
+    const avgConf = words.reduce((sum, w) => sum + w.confidence, 0) / words.length;
+    const threshold = avgConf * 0.25; // same ratio as _filterTesseractWordsByConfidence()
+    const kept = words.filter(w => w.confidence >= threshold);
+    const dropped = words.filter(w => w.confidence < threshold);
+
+    return {
+      medianLineHeightPx,
+      meanConfidenceKept: kept.length ? kept.reduce((sum, w) => sum + w.confidence, 0) / kept.length : null,
+      meanConfidenceDropped: dropped.length ? dropped.reduce((sum, w) => sum + w.confidence, 0) / dropped.length : null,
+      totalWords: words.length,
+      droppedWords: dropped.length
+    };
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): REAL pixel preprocessing for
+   * the Tesseract path — decode -> optional upscale -> optional grayscale ->
+   * optional Otsu binarization -> re-encode. Replaces the old version, which
+   * never touched a pixel and only (mis)set `tessedit_threshold_value`,
+   * which isn't a real Tesseract variable (Tesseract's own SetVariable call
+   * would have silently no-op'd on an unrecognized name). Follows the same
+   * nativeImage decode -> toBitmap -> mutate -> createFromBitmap pattern
+   * paddle-preprocess.js already uses for the Paddle path, so this needs no
+   * new dependency (no sharp/jimp/canvas).
+   * @private
+   */
+  async _preprocessImage(imageBuffer) {
+    const { nativeImage } = require('electron');
+    const img = nativeImage.createFromBuffer(imageBuffer);
+    const size = img.getSize();
+    const factor = this._tesseractOptions.upscaleFactor;
+
+    let working = img;
+    if (factor !== 1.0) {
+      working = img.resize({
+        width: Math.max(1, Math.round(size.width * factor)),
+        height: Math.max(1, Math.round(size.height * factor))
+      });
+    }
+
+    if (this._preprocessing.grayscale || this._tesseractOptions.otsuThreshold) {
+      const { width, height } = working.getSize();
+      const bitmap = working.toBitmap();
+      grayscaleBGRA(bitmap);
+      if (this._tesseractOptions.otsuThreshold) {
+        otsuThresholdBGRA(bitmap);
+      }
+      working = nativeImage.createFromBitmap(bitmap, { width, height });
+    }
+
+    return working.toPNG();
   }
 
   /**
@@ -740,9 +1281,17 @@ class OcrService extends EventEmitter {
     // v3.13.03: DON'T remove lone CJK characters — a single kanji or kana
     // is a valid word (e.g. 設 = setting, 図 = diagram). Only remove lone
     // Latin single chars except 'I' and 'a'.
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, ' ');
-    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, '');
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]$/g, '');
+    // v3.13.79: the class below still had 'I' in it despite the comment —
+    // it was deleting the English pronoun "I" from every capture where it
+    // stood alone. Fixed by removing 'I' from the class. Also protect
+    // button-prompt letters ("Press X to skip") via context — see
+    // isProtectedButtonLetter() above.
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : ' ');
+    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]$/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
 
     // Step 7: Remove stray punctuation-only fragments at start/end
     cleaned = cleaned.replace(/^\s*[.\-,;:!?]+\s+(?=[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ffa-zA-Z])/g, '');
@@ -817,7 +1366,13 @@ class OcrService extends EventEmitter {
     // 6a: 1→l when 1 appears between or after letters (Tesseract sees l as 1)
     //     e.g., "trans1ate" → "translate", "Underta1e" → "Undertale"
     cleaned = cleaned.replace(/([a-zA-Z])1(?=[a-zA-Z])/g, '$1l');
-    cleaned = cleaned.replace(/([a-zA-Z])1\b/g, '$1l');
+    // v3.13.79: the trailing-boundary variant used to match ANY letter before
+    // a final "1" (e.g. "Level1" → "Levell", "F1" → "Fl", "A1 B2 C3" →
+    // "Al B2 C3") — it was destroying real numbers/callsigns, not just fixing
+    // misreads. The one case it's actually meant for is "ll" misread as "l1"
+    // (wil1→will, al1→all, fal1→fall), so restrict the preceding letter to
+    // l/L. Case-insensitive on purpose — WIL1→WILL should still work.
+    cleaned = cleaned.replace(/([lL])1\b/g, '$1l');
 
     // 6b: l→1 when l appears in a NUMBER context (Tesseract sees 1 as l)
     //     Pattern: word ending in 'l' followed by dash/colon/period suggests
@@ -861,12 +1416,31 @@ class OcrService extends EventEmitter {
 
     // Step 10: Remove stray single-character noise words.
     // Preserve 'I' and 'a' — they are real English words.
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, ' ');
-    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, '');
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]$/g, '');
+    // v3.13.79: the class below still had 'I' in it despite the comment —
+    // fixed by removing 'I' from the class (mirrors _cleanPaddleOcrText).
+    // Also protect button-prompt letters ("Press X to skip") via context —
+    // see isProtectedButtonLetter() above.
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : ' ');
+    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]$/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
 
     // Step 11: Fix truncated word at the end of text.
-    cleaned = cleaned.replace(/\s+[a-zA-Z]{1,2}$/g, '');
+    // v3.13.79: used to blindly strip ANY trailing 1-2 letter word, which
+    // destroyed real short words at the end of a line ("It is OK" → "It is",
+    // "12:45 PM" → "12:45"). Only strip it when it's actually garbled —
+    // COMMON_SHORT_WORDS (shared with _isGarbledWord()) is the same list
+    // that already protects "I"/"a"/"to" elsewhere in this pipeline. Also
+    // check isProtectedButtonLetter(): without it, a single button-prompt
+    // letter Step 10 just preserved ("Press X") gets stripped right back
+    // here when it's the very last token and has no "to"/"key" after it.
+    cleaned = cleaned.replace(/\s+([a-zA-Z]{1,2})$/g, (match, word, offset) => {
+      if (COMMON_SHORT_WORDS.has(word.toLowerCase())) return match;
+      if (word.length === 1 && isProtectedButtonLetter(cleaned, offset, match.length)) return match;
+      return '';
+    });
 
     // Step 12: Final whitespace cleanup
     cleaned = cleaned.replace(/\s+/g, ' ').trim();
@@ -932,13 +1506,7 @@ class OcrService extends EventEmitter {
     const w = word.replace(/^[^a-zA-Z]+|[^a-zA-Z]+$/g, '');
     if (w.length === 0) return false;
 
-    const commonShort = new Set([
-      'i', 'a', 'an', 'am', 'be', 'do', 'go', 'he', 'in', 'is',
-      'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up',
-      'us', 'we', 'as', 'at', 'by', 'if', 'no', 'ok', 'oh'
-    ]);
-
-    if (w.length <= 2) return !commonShort.has(w.toLowerCase());
+    if (w.length <= 2) return !COMMON_SHORT_WORDS.has(w.toLowerCase());
 
     const hasVowel = /[aeiouyAEIOUY]/.test(w);
     if (!hasVowel) return true;
@@ -955,7 +1523,19 @@ class OcrService extends EventEmitter {
    * @returns {boolean}
    */
   _isMostlyGarbled(text) {
-    if (!text || text.length < 5) return true;
+    if (!text) return true;
+
+    // v3.13.79: dropped the old "text.length < 5 -> garbled" floor. It ran
+    // BEFORE the CJK exemption below, so it was blanket-killing every short
+    // real result regardless of script: common English interjections
+    // ("Well", "Stop", "Nice" — all 4 chars) and even short CJK replies
+    // ("はい", 2 chars). The upstream min-chars gate (ocr.js, before this
+    // call) already requires >=2 real chars (or >=1 CJK char), and the
+    // per-word heuristics below already correctly judge short text on its
+    // own merits (real short words via the commonShort Set in
+    // _isGarbledWord, real noise via the vowel/consonant checks) — so this
+    // extra length floor was redundant on top of them, not a needed safety
+    // net.
 
     // v3.13.08-fix: CJK-aware garbled check. For text containing CJK characters,
     // skip the garbled word check entirely — vowel/consonant heuristics are designed
@@ -964,6 +1544,10 @@ class OcrService extends EventEmitter {
     if (cjkCount > 0) return false; // CJK text is never "garbled" by Latin heuristics
 
     const words = text.split(/\s+/).filter(w => w.replace(/[^a-zA-Z]/g, '').length > 0);
+    // v3.13.79: a string with zero Latin "words" but real digits (clocks,
+    // counters, HP/scores) isn't garbled \u2014 it's just not Latin prose. Only
+    // the CJK/word-heuristic path below is meant for Latin noise detection.
+    if (words.length === 0 && /[0-9]/.test(text)) return false;
     if (words.length === 0) return true;
 
     let garbledCount = 0;
@@ -1013,65 +1597,48 @@ class OcrService extends EventEmitter {
     // Check for hangul characters that Tesseract-English can't read at all
     const hasHangul = /[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/.test(trimmedText);
 
-    // If Tesseract produced empty or very low quality output, it likely
-    // encountered non-English text. In a VN/translation context, Japanese
-    // is the most common language, so try that first. Korean is second.
-    if (isEmpty || isMostlyGarbled || isVeryLowConfidence || hasHangul) {
-      // Determine which language to try first
-      const targetLang = hasHangul ? 'kor' : 'jpn';
-      const targetLangName = hasHangul ? 'Korean' : 'Japanese';
-
-      log.info(`[OCR] Auto-detect: English Tesseract produced ${isEmpty ? 'empty' : isMostlyGarbled ? 'garbled' : isVeryLowConfidence ? 'low confidence' : 'hangul-containing'} text (${confidence.toFixed(1)}%) — switching to ${targetLangName} model`);
-
-      try {
-        // Terminate current worker and reinitialize with new language
-        if (this._worker) {
-          try { await this._worker.terminate(); } catch (e) { /* ignore */ }
-          this._worker = null;
-        }
-
-        this._language = targetLang;
-        this._worker = await Tesseract.createWorker(this._language, 1, {
-          logger: (m) => {
-            if (m.status === 'recognizing text') {
-              this.emit('progress', m.progress);
-            }
-            log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
-          }
-        });
-
-        log.info(`[OCR] Switched Tesseract to ${targetLangName} model for auto-detect`);
-        return true;
-      } catch (err) {
-        log.warn(`[OCR] Failed to switch Tesseract to ${targetLangName}: ${err.message}`);
-        // Try the other language as fallback
-        const fallbackLang = hasHangul ? 'jpn' : 'kor';
-        const fallbackLangName = hasHangul ? 'Japanese' : 'Korean';
-        try {
-          if (this._worker) {
-            try { await this._worker.terminate(); } catch (e) { /* ignore */ }
-            this._worker = null;
-          }
-
-          this._language = fallbackLang;
-          this._worker = await Tesseract.createWorker(this._language, 1, {
-            logger: (m) => {
-              if (m.status === 'recognizing text') {
-                this.emit('progress', m.progress);
-              }
-            }
-          });
-
-          log.info(`[OCR] Switched Tesseract to ${fallbackLangName} model as fallback`);
-          return true;
-        } catch (fbErr) {
-          log.warn(`[OCR] Fallback to ${fallbackLangName} also failed: ${fbErr.message}`);
-          // Stay with English — at least we can try to read some Latin characters
-          return false;
-        }
-      }
+    // v3.13.79 (2.3): a pure digit/punctuation capture (a clock, a counter,
+    // "35:97") has NO letters of any script, so _isMostlyGarbled() below
+    // classifies it as "mostly garbled" purely because it has zero
+    // alphabetic words to check — not because it's actually CJK. That was
+    // the real cause of the log line this round's plan was built around:
+    // "35:97" -> switched to Japanese -> hallucinated "2 に" at 24%
+    // confidence. A frame like this is genuinely inconclusive (could be a
+    // timer, could be a scoreboard) — treat it as neither good nor bad
+    // evidence rather than guessing, and leave the fail streak untouched.
+    const hasAnyLetters = /[a-zA-Z\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/.test(trimmedText);
+    const isMostlyDigitsOrPunct = trimmedText.length > 0 && !hasAnyLetters;
+    if (isMostlyDigitsOrPunct) {
+      log.info(`[OCR] Auto-detect: ignoring digit/punctuation-only capture as evidence: "${trimmedText.substring(0, 30)}"`);
+      return false;
     }
 
+    // v3.13.79 (2.2): hangul showing up in English-model output is direct,
+    // unambiguous evidence (the model has no way to produce those code
+    // points on its own) so it still acts immediately, same as before this
+    // round. Everything else (empty/garbled/low-confidence) is much weaker
+    // evidence on its own — a single bad frame used to be enough to switch
+    // the whole session to Japanese and never come back. Now non-hangul
+    // evidence has to repeat for 3 consecutive frames before it's trusted.
+    if (hasHangul) {
+      this._autoDetectFailStreak = 0;
+      log.info(`[OCR] Auto-detect: English Tesseract produced hangul-containing text (${confidence.toFixed(1)}%) — switching to Korean model`);
+      return this._attemptAutoDetectSwitch('kor', 'Korean', 'jpn', 'Japanese');
+    }
+
+    if (isEmpty || isMostlyGarbled || isVeryLowConfidence) {
+      this._autoDetectFailStreak++;
+      const reason = isEmpty ? 'empty' : isMostlyGarbled ? 'garbled' : 'low confidence';
+      log.info(`[OCR] Auto-detect: English Tesseract produced ${reason} text (${confidence.toFixed(1)}%) — streak ${this._autoDetectFailStreak}/3: "${trimmedText.substring(0, 30)}"`);
+      if (this._autoDetectFailStreak < 3) return false;
+
+      this._autoDetectFailStreak = 0;
+      log.info('[OCR] Auto-detect: 3 consecutive bad English frames — switching to Japanese model');
+      return this._attemptAutoDetectSwitch('jpn', 'Japanese', 'kor', 'Korean');
+    }
+
+    // A good English frame — whatever streak was building resets.
+    this._autoDetectFailStreak = 0;
     return false;
   }
 
