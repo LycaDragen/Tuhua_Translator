@@ -264,6 +264,26 @@
             // llm-providers.js's seedProviderKeysFromLegacyOpenAIKey, which
             // promotes it into llmProviderKeys once, in the main process.
             engineApiKeys.llm = { ...(settings.llmProviderKeys || {}) };
+            // v3.13.80 fix: restore deeplCustomInstructions UNCONDITIONALLY —
+            // not gated behind `savedEngine === 'deepl'` like the rest of this
+            // block. Real bug found live by Lyca: `engine` is ALSO
+            // profile-scoped, so a freshly created blank profile (default
+            // engine: 'google-free') flips the dropdown away from DeepL on
+            // load — but this restore used to live INSIDE the DeepL-only
+            // branch below, so it never ran at all for that profile, and the
+            // PREVIOUS profile's text stayed sitting in the (now hidden)
+            // textarea's real .value. The moment anything re-selects DeepL —
+            // or anything saves while that stale value is present —
+            // it resurfaces, which is how a "default" profile ended up
+            // carrying instructions nobody ever typed into it. Must run on
+            // every init() (i.e. every profile switch, since loadProfile()
+            // calls init()) regardless of which engine is currently active.
+            document.getElementById('deepl-custom-instructions').value =
+                (settings.deeplCustomInstructions && settings.deeplCustomInstructions.length > 0)
+                    ? settings.deeplCustomInstructions.join('\n')
+                    : '';
+            updateDeepLInstructionsCount();
+            updateDeepLInstructionsUI();
             if (savedEngine === 'deepl') {
                 document.getElementById('api-key').value = engineApiKeys.deepl || '';
                 // v3.11.23: Restore DeepL formality setting
@@ -278,12 +298,6 @@
                         api.saveSettings({ deeplFormality: formality });
                     }
                 }
-                // v3.11.29: Restore custom instructions + update default indicator
-                if (settings.deeplCustomInstructions && settings.deeplCustomInstructions.length > 0) {
-                    document.getElementById('deepl-custom-instructions').value = settings.deeplCustomInstructions.join('\n');
-                }
-                updateDeepLInstructionsCount();
-                updateDeepLInstructionsUI();
                 // v3.11.29: Set initial placeholder based on UI language
                 updateDeepLInstructionsPlaceholder();
                 // v3.11.28: Fetch language features for dynamic UI
