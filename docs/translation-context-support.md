@@ -31,7 +31,7 @@ de en un plan efímero.
 
 | Motor | Contexto | Glosario | Estado en Tuhua |
 |---|---|---|---|
-| DeepL | `context` (líneas previas unidas con `\n`, recortado desde la más vieja si excede 2000 caracteres — tope autoimpuesto, no de DeepL) | `glossary_id` resuelto por llamada (manual por perfil, o auto-sincronizado — ver abajo) | Implementado. `model_type` configurable (`prefer_quality_optimized` por defecto). Sólo se manda un `glossary_id`, no la variante plural — ver "Fuera de alcance" |
+| DeepL | `context` (líneas previas unidas con `\n`, recortado desde la más vieja si excede 2000 caracteres — tope autoimpuesto, no de DeepL) | `glossary_id` resuelto por llamada (manual por perfil, o auto-sincronizado — ver abajo) | Implementado. `model_type` configurable (`prefer_quality_optimized` por defecto). Sólo se manda un `glossary_id`, no la variante plural — ver "Fuera de alcance". Además implementa `custom_instructions` (3 directivas ocultas por defecto, por perfil desde v3.13.80) y `style_id` (cableado, sin UI) — ver la sección propia abajo, no cubierta por la tabla de contexto/glosario de más arriba |
 | OpenAI / OpenRouter / DeepSeek / Google Gemini / Anthropic / Groq / servidor local (LM Studio, Ollama, llama.cpp, KoboldCpp) | Turnos de chat reales para el diálogo previo, más `{contextBoth}`/`{contextOriginal}`/`{contextTranslation}` disponibles en la plantilla de prompt | Instrucción de prompt (`glossaryMode`: `literal` / `prompt` / `hybrid`, default `hybrid`) + placeholder opaco para términos que deben quedar sin traducir | Implementado, ver [`llm-prompting.md`](llm-prompting.md) para el detalle completo |
 | Google Translate (`google-free`), LibreTranslate, Custom MT | ❌ (sin mecanismo nativo) | Sustitución literal antes de traducir, sin instrucción de prompt (no aplica — no son motores de prompt) | Sin cambios en este trabajo |
 | Bing | ❌ | ❌ | Roto, fuera de alcance |
@@ -51,6 +51,45 @@ no un comportamiento silencioso.
 Al borrar un perfil, su glosario remoto en DeepL se borra también
 (best-effort, nunca bloquea el borrado del perfil si la llamada falla).
 
+### DeepL: `custom_instructions`, `style_id`, `translation_memory_id` — verificado contra la API real, no contra la doc
+
+Agregado 2026-08-22, al revisar un mail promocional de DeepL contra lo que
+Tuhua ya tenía implementado (`deepl.js` desde v3.11.28-29, antes de que
+existiera este documento). **La documentación oficial de DeepL afirma que
+`custom_instructions` y `style_id` requieren API Pro** — ver
+[About style rules](https://support.deepl.com/hc/en-us/articles/20515591890204-About-style-rules).
+**Esto es incorrecto**, al menos para la cuenta usada en la verificación:
+probado con la key Free real de Lyca (`:fx`), pidiendo la misma frase con
+instrucciones contradictorias sobre el mismo texto:
+
+| Request | Salida |
+|---|---|
+| sin `custom_instructions` | `"Yuki-san, por favor, espérame en la estación."` |
+| `["...replace -san with the word Senor..."]` | `"Senor Yuki, por favor, espérame en la estación."` |
+| `["Use extremely archaic, formal Spanish..."]` | `"Vuestra merced, Yuki-san, ruego se digne aguardarme en la estación."` |
+
+Las dos instrucciones cambiaron la salida de forma inconfundible — la
+feature funciona en Free. Sondeo completo de esa sesión:
+
+| Parámetro / endpoint | API Free | Estado en Tuhua |
+|---|---|---|
+| `custom_instructions` | ✅ funciona (verificado arriba) | Implementado, UI completa, **profile-scoped desde v3.13.80** — mismo argumento que `deeplGlossaryId`: qué instrucciones mandar depende de qué JUEGO está activo |
+| `style_id` | ✅ disponible (`GET /v3/style_rules` → HTTP 200, lista vacía) | Cableado en el motor (`deepl.js`), **sin UI** y sin forma de obtener un id desde la app — habría que crear la lista de reglas en la web de DeepL primero |
+| `model_type: quality_optimized` | ✅ | Implementado, configurable solo por settings, sin UI |
+| `translation_memory_id` | ❌ **HTTP 403 Forbidden** — requiere plan Business/Enterprise | Cableado en el motor (se deja — 5 líneas, sirve a quien tenga ese plan). El endpoint de listado de TMs de la cuenta (`deepl-fetch-translation-memories`) se **borró** en v3.13.80: cero consumidores en el renderer y apunta a un endpoint inalcanzable en Free |
+
+**Si una sesión futura lee la documentación oficial y concluye que hay que
+gatear `custom_instructions`/`style_id` detrás de una detección de plan
+Pro: no lo hagas sin repetir esta prueba primero.** Ídem el precedente ya
+existente en `scripts/test-deepl-glossary-sync.js`, que documenta la misma
+verificación empírica para glosarios — en este proyecto la API real le
+gana a la doc del proveedor.
+
+`deeplFormality` se dejó deliberadamente **global**, no por perfil: es un
+solo eje fijo con UI que el usuario ya puede haber ajustado, un caso más
+débil que instrucciones de texto libre. Si en el futuro alguien pide
+formalidad distinta por juego, ahí se reconsidera.
+
 ## Fuera de alcance (decisiones explícitas, no huecos)
 
 - **`glossary_ids` plural (hasta 5) de DeepL**: no implementado. No se pudo
@@ -63,6 +102,16 @@ Al borrar un perfil, su glosario remoto en DeepL se borra también
 - **Azure Translator, motor nuevo**: Tuhua no lo implementa hoy; no forma
   parte de este trabajo.
 - **Motor Bing**: roto de antes, documentado aparte, no se toca acá.
+- **UI para `style_id`**: funciona en Free (ver la sección de arriba), pero
+  exige crear la lista de reglas en la web de DeepL primero — `custom_instructions`
+  cubre el mismo caso sin salir de la app. Solo valdría la pena si alguien
+  necesita reusar >10 instrucciones entre herramientas.
+- **`translation_memory_id`**: 403 en Free, requiere Business/Enterprise
+  (ver arriba). Tuhua ya tiene TM local con fuzzy matching, offline, sin
+  plan, aislada por perfil — mejor para este caso de uso.
+- **Migrar glosarios a la API v3** (multilingües, editables): el sync v2
+  actual es lazy por hash y funciona; beneficio marginal frente al costo de
+  migrar el delete+create.
 
 ## Ver también
 

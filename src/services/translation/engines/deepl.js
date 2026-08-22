@@ -13,12 +13,17 @@
  *           Added translation_memory_id + translation_memory_threshold.
  *           Changed default formality from 'default' to 'prefer_more'
  *           (safer — won't error if language doesn't support formality).
- *           Added tag_handling_version v2 support.
  *           Better handling of features that may not be available on Free tier.
  * v3.11.29: Added default hidden instructions for VN translation.
  *           Only send custom_instructions when target language supports style_rules.
  *           Migrate removed formality options ('more'→'prefer_more', 'less'→'prefer_less').
  *           Removed strict formality options from engine logic.
+ * v3.13.80: Fixed the 401/403 cross-endpoint retry skipping fixTermSpacing() —
+ *           extracted _buildResult() so the main path and the retry can't
+ *           diverge again. Removed the changelog line above that claimed
+ *           tag_handling_version v2 support was added in v3.11.28 — grep
+ *           confirms tag_handling was never actually sent; Tuhua doesn't
+ *           translate XML/HTML-tagged content.
  */
 const axios = require('axios');
 const log = require('electron-log');
@@ -349,34 +354,9 @@ class DeepLEngine {
 
     try {
       const response = await this._makeRequest(payload);
-      const data = response.data;
-      if (data.translations && data.translations[0]) {
-        let resultText = data.translations[0].text;
-        // v3.13.6x (Fase 6): verified against a real DeepL glossary_id call
-        // — a "keep unchanged" (source===target) term survives correctly
-        // but DeepL's own server-side glossary application doesn't
-        // reliably insert the space its own boundary needs ("a la桜花学園"
-        // instead of "a la 桜花学園"), the identical artifact
-        // maskKeepUnchanged's restore() fixes for the LLM path. DeepL
-        // applies its glossary server-side with no placeholder step Tuhua
-        // controls, so this scans the OUTPUT for the known keep-unchanged
-        // terms instead. Only entries the request actually SENT a
-        // glossary for are candidates — options.keepUnchangedTerms is
-        // populated by the pipeline from the same effective glossary the
-        // resolved glossary_id was built from.
-        if (options.glossaryId && Array.isArray(options.keepUnchangedTerms) && options.keepUnchangedTerms.length) {
-          resultText = fixTermSpacing(resultText, options.keepUnchangedTerms);
-        }
-        const result = {
-          text: resultText,
-          detectedLang: data.translations[0].detected_source_language?.toLowerCase() || null,
-          engine: this.name
-        };
-
-        log.info(`[DeepL] Success: "${text.substring(0, 30)}..." → "${result.text.substring(0, 30)}..."`);
-        return result;
-      }
-      throw new Error('Unexpected DeepL response format');
+      const result = this._buildResult(response.data, options);
+      log.info(`[DeepL] Success: "${text.substring(0, 30)}..." → "${result.text.substring(0, 30)}..."`);
+      return result;
     } catch (err) {
       // v3.11.27: Log the full error for diagnosis
       const status = err.response?.status;
@@ -407,17 +387,14 @@ class DeepLEngine {
           this.baseUrl = altUrl;
           log.info(`[DeepL] Switched to ${altUrl} — future requests will use this endpoint`);
 
-          const data = response.data;
-          if (data.translations && data.translations[0]) {
-            const result = {
-              text: data.translations[0].text,
-              detectedLang: data.translations[0].detected_source_language?.toLowerCase() || null,
-              engine: this.name
-            };
-
-            return result;
-          }
-          throw new Error('Unexpected DeepL response format');
+          // v3.13.80 bugfix: this used to reconstruct the result inline with
+          // the raw data.translations[0].text, skipping the fixTermSpacing()
+          // call the main path applies below — a "keep unchanged" glossary
+          // term lost its spacing fix ("a la桜花学園") whenever the request
+          // happened to fall through this retry. Routed through the same
+          // _buildResult() helper as the main path so the two can't diverge
+          // again.
+          return this._buildResult(response.data, options);
         } catch (altErr) {
           const altStatus = altErr.response?.status;
           const altErrData = altErr.response?.data;
@@ -427,6 +404,40 @@ class DeepLEngine {
       }
       throw err;
     }
+  }
+
+  /**
+   * v3.13.80: Turns a raw /translate response into the engine's result
+   * shape, applying the glossary spacing fix. Extracted so the main
+   * request path and the 401/403 cross-endpoint retry (translate(), above)
+   * can't drift apart again — see the retry's call site for the bug this
+   * fixed.
+   */
+  _buildResult(data, options) {
+    if (!data.translations || !data.translations[0]) {
+      throw new Error('Unexpected DeepL response format');
+    }
+    let resultText = data.translations[0].text;
+    // v3.13.6x (Fase 6): verified against a real DeepL glossary_id call
+    // — a "keep unchanged" (source===target) term survives correctly
+    // but DeepL's own server-side glossary application doesn't
+    // reliably insert the space its own boundary needs ("a la桜花学園"
+    // instead of "a la 桜花学園"), the identical artifact
+    // maskKeepUnchanged's restore() fixes for the LLM path. DeepL
+    // applies its glossary server-side with no placeholder step Tuhua
+    // controls, so this scans the OUTPUT for the known keep-unchanged
+    // terms instead. Only entries the request actually SENT a
+    // glossary for are candidates — options.keepUnchangedTerms is
+    // populated by the pipeline from the same effective glossary the
+    // resolved glossary_id was built from.
+    if (options.glossaryId && Array.isArray(options.keepUnchangedTerms) && options.keepUnchangedTerms.length) {
+      resultText = fixTermSpacing(resultText, options.keepUnchangedTerms);
+    }
+    return {
+      text: resultText,
+      detectedLang: data.translations[0].detected_source_language?.toLowerCase() || null,
+      engine: this.name
+    };
   }
 
   _makeRequest(payload) {
@@ -466,7 +477,13 @@ class DeepLEngine {
     // v3.11.29: Migrate removed strict options to soft preferences
     if (formality === 'more') formality = 'prefer_more';
     if (formality === 'less') formality = 'prefer_less';
-    this.formality = formality || 'prefer_more';
+    // v3.13.80: fallback changed prefer_more -> default, on Lyca's explicit
+    // request. A blank/unconfigured profile (deeplFormality === '' — see
+    // profile-schema.js's createProfile()) now behaves as DeepL's own
+    // neutral default instead of silently opinionated formal/usted — VN
+    // dialogue is often casual between characters, so defaulting to formal
+    // was actively wrong for the common case, not just an arbitrary choice.
+    this.formality = formality || 'default';
   }
 
   // v3.11.28: Set custom instructions

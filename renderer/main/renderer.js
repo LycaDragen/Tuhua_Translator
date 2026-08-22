@@ -264,26 +264,51 @@
             // llm-providers.js's seedProviderKeysFromLegacyOpenAIKey, which
             // promotes it into llmProviderKeys once, in the main process.
             engineApiKeys.llm = { ...(settings.llmProviderKeys || {}) };
+            // v3.13.80 fix: restore deeplCustomInstructions UNCONDITIONALLY —
+            // not gated behind `savedEngine === 'deepl'` like the rest of this
+            // block. Real bug found live by Lyca: `engine` is ALSO
+            // profile-scoped, so a freshly created blank profile (default
+            // engine: 'google-free') flips the dropdown away from DeepL on
+            // load — but this restore used to live INSIDE the DeepL-only
+            // branch below, so it never ran at all for that profile, and the
+            // PREVIOUS profile's text stayed sitting in the (now hidden)
+            // textarea's real .value. The moment anything re-selects DeepL —
+            // or anything saves while that stale value is present —
+            // it resurfaces, which is how a "default" profile ended up
+            // carrying instructions nobody ever typed into it. Must run on
+            // every init() (i.e. every profile switch, since loadProfile()
+            // calls init()) regardless of which engine is currently active.
+            document.getElementById('deepl-custom-instructions').value =
+                (settings.deeplCustomInstructions && settings.deeplCustomInstructions.length > 0)
+                    ? settings.deeplCustomInstructions.join('\n')
+                    : '';
+            updateDeepLInstructionsCount();
+            updateDeepLInstructionsUI();
+            // v3.13.80: formality is profile-scoped now too (Lyca's explicit
+            // request) — same fix as deeplCustomInstructions just above, and
+            // for the identical reason: this used to live inside the
+            // DeepL-only branch below, so switching to a profile whose own
+            // `engine` isn't 'deepl' skipped it entirely and left the
+            // dropdown showing the PREVIOUS profile's formality. Must always
+            // run. '' (a blank/unseeded profile) falls back to 'default' for
+            // display, matching deepl.js's setFormality() fallback — changed
+            // from 'prefer_more' on Lyca's explicit request, since defaulting
+            // every new profile to formal/usted was actively wrong for
+            // casual VN dialogue, not just an arbitrary choice. That
+            // fallback is NOT written back to the profile just for being
+            // displayed; only the legacy 'more'/'less' string migration is
+            // persisted, exactly as before.
+            {
+                let formality = settings.deeplFormality;
+                if (formality === 'more') formality = 'prefer_more';
+                if (formality === 'less') formality = 'prefer_less';
+                document.getElementById('deepl-formality').value = formality || 'default';
+                if (settings.deeplFormality && formality !== settings.deeplFormality) {
+                    api.saveSettings({ deeplFormality: formality });
+                }
+            }
             if (savedEngine === 'deepl') {
                 document.getElementById('api-key').value = engineApiKeys.deepl || '';
-                // v3.11.23: Restore DeepL formality setting
-                // v3.11.29: Migrate removed strict options
-                if (settings.deeplFormality) {
-                    let formality = settings.deeplFormality;
-                    if (formality === 'more') formality = 'prefer_more';
-                    if (formality === 'less') formality = 'prefer_less';
-                    document.getElementById('deepl-formality').value = formality;
-                    // Persist migrated value
-                    if (formality !== settings.deeplFormality) {
-                        api.saveSettings({ deeplFormality: formality });
-                    }
-                }
-                // v3.11.29: Restore custom instructions + update default indicator
-                if (settings.deeplCustomInstructions && settings.deeplCustomInstructions.length > 0) {
-                    document.getElementById('deepl-custom-instructions').value = settings.deeplCustomInstructions.join('\n');
-                }
-                updateDeepLInstructionsCount();
-                updateDeepLInstructionsUI();
                 // v3.11.29: Set initial placeholder based on UI language
                 updateDeepLInstructionsPlaceholder();
                 // v3.11.28: Fetch language features for dynamic UI
@@ -2567,6 +2592,15 @@
                     return;
                 }
                 nameInput.value = '';
+                // v3.13.80: switch to the new profile immediately — creating
+                // one and staying on the old one felt unnatural, and was the
+                // exact setup for the deeplCustomInstructions scoping bug
+                // (typing into a field that's still bound to the profile you
+                // never left). loadProfile() switches + re-hydrates the
+                // settings panel; loadProfiles() after it refreshes the card
+                // list so the new card shows as active (loadProfile() alone
+                // doesn't re-render the cards).
+                await loadProfile(result.profile.id);
                 await loadProfiles();
             } catch (e) {
                 // v3.13.40-fix: was silently swallowing exceptions before —

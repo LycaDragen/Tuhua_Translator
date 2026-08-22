@@ -17,7 +17,7 @@
  *   node scripts/test-profile-migration.js --quiet
  */
 const path = require('path');
-const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer } =
+const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions, seedDeeplFormality } =
   require(path.join('..', 'src', 'services', 'profiles', 'profile-migrations.js'));
 const ProfileStore = require(path.join('..', 'src', 'services', 'profiles', 'profile-store.js'));
 const { PROFILE_SCHEMA_VERSION, PROMOTED_TO_GLOBAL_KEYS } =
@@ -206,6 +206,19 @@ check('split-glossary-layer-equivalence-is-mode-source-target-never-id', () => {
   return { pass: result.length === 0, actual: result };
 });
 
+check('glossary-entry-key-does-not-collide-on-embedded-space', () => {
+  // Regression guard: glossaryEntryKey() must join fields with something
+  // that can't appear inside a real source/target (found live — a prior
+  // edit had silently swapped the `\0` separator for a plain space, which
+  // lets {source:'a b', target:'c'} collide with {source:'a', target:'b c'}
+  // under the same mode. A profile entry that's a genuine near-miss of a
+  // global entry must NOT be treated as a duplicate and dropped.
+  const global = [{ id: 'g1', mode: 'exact', source: 'a b', target: 'c', enabled: true, createdAt: 1 }];
+  const profileGlossary = [{ id: 'p1', mode: 'exact', source: 'a', target: 'b c', enabled: true, createdAt: 2 }];
+  const result = splitGlossaryLayer(profileGlossary, global);
+  return { pass: result.length === 1 && result[0].id === 'p1', actual: result };
+});
+
 // ─── The union invariant, asserted directly on every fixture above ────
 check('union-invariant-backup-is-verbatim-for-all-fixtures', () => {
   const fixtures = [
@@ -256,6 +269,145 @@ check('already-v1-store-changed-is-false', () => {
   const result = migrateProfiles({ profiles, settings: { deeplKey: 'already-global' }, globalGlossaryEntries: [], activeProfile: 'Por Defecto' });
   return { pass: result.changed === false, actual: result.changed };
 });
+
+// ─── v1 -> v2: seedDeeplCustomInstructions (pure function) ─────────────
+// v3.13.80: deeplCustomInstructions became profile-scoped after custom
+// instructions were verified to actually work on DeepL's Free tier. This
+// step exists so that promotion doesn't blank out instructions a user
+// already wrote in the (until now global-only) setting — every existing
+// profile is seeded from the current global value the first time an
+// already-migrated store passes through this step.
+const v1Profile = (overrides) => ({
+  id: overrides.id || `uuid-${overrides.name}`, name: 'Profile', isDefault: false,
+  createdAt: 1, savedAt: 1,
+  sourceLang: 'auto', inputMethod: 'textractor', engine: 'deepl',
+  customEndpoint: '', customModel: '', llmProvider: 'openai', llmModel: '', llmCustomBaseUrl: '',
+  localLlmEndpointPreset: 'custom', libretranslateEndpoint: '',
+  customMTEndpoint: '', customMTMethod: '', customMTBody: '', customMTResponsePath: '', customMTAuthHeader: '',
+  manualTextractorMode: false, deeplGlossaryId: '', deeplAutoGlossary: false, deeplGlossarySync: null,
+  glossary: [], hook: null, cover: null, history: [],
+  ...overrides
+});
+
+check('seed-deepl-custom-instructions-fills-empty-profiles-from-global', () => {
+  const profiles = [v1Profile({ name: 'A' }), v1Profile({ name: 'B' })];
+  const globalInstructions = ['Use archaic formal Spanish', 'Never translate the word Youkai'];
+  const { profiles: seeded, changed } = seedDeeplCustomInstructions(profiles, globalInstructions);
+  const pass = changed === true
+    && seeded.every((p) => JSON.stringify(p.deeplCustomInstructions) === JSON.stringify(globalInstructions));
+  return { pass, actual: seeded.map((p) => p.deeplCustomInstructions) };
+}, 'Without this seed, the first load-profile after v3.13.80 ships would overwrite the user\'s real global instructions with the new field\'s [] default — this is what prevents that.');
+
+check('seed-deepl-custom-instructions-is-idempotent-on-non-empty-profile', () => {
+  const alreadySeeded = ['Keep character names untranslated'];
+  const profiles = [v1Profile({ name: 'A', deeplCustomInstructions: alreadySeeded })];
+  const { profiles: seeded, changed } = seedDeeplCustomInstructions(profiles, ['A different global value']);
+  const pass = changed === false && JSON.stringify(seeded[0].deeplCustomInstructions) === JSON.stringify(alreadySeeded);
+  return { pass, actual: seeded[0].deeplCustomInstructions };
+}, 'A profile that already has its own instructions (re-run, or created after the field existed) is never overwritten by a global value — only a genuinely-empty profile gets seeded.');
+
+check('seed-deepl-custom-instructions-no-op-when-global-empty', () => {
+  const profiles = [v1Profile({ name: 'A' })];
+  const { profiles: seeded, changed } = seedDeeplCustomInstructions(profiles, []);
+  const pass = changed === false && seeded[0].deeplCustomInstructions.length === 0;
+  return { pass, actual: seeded[0].deeplCustomInstructions };
+}, 'A user who never wrote global instructions has nothing to preserve — the profile stays [], and the DeepL engine\'s own DEFAULT_INSTRUCTIONS fallback applies exactly as it did before this field existed.');
+
+// ─── v2 -> v3: seedDeeplFormality (pure function) ──────────────────────
+// v3.13.80, same day: deeplFormality became profile-scoped too, on Lyca's
+// explicit request after the instructions scoping above. Same shape of
+// step, same reason to exist — see seedDeeplCustomInstructions above.
+check('seed-deepl-formality-fills-empty-profiles-from-global', () => {
+  const profiles = [v1Profile({ name: 'A' }), v1Profile({ name: 'B' })];
+  const { profiles: seeded, changed } = seedDeeplFormality(profiles, 'prefer_more');
+  const pass = changed === true && seeded.every((p) => p.deeplFormality === 'prefer_more');
+  return { pass, actual: seeded.map((p) => p.deeplFormality) };
+}, 'Without this seed, the first load-profile after v3.13.80 ships would overwrite the user\'s already-tuned global formality with the new field\'s \'\' default.');
+
+check('seed-deepl-formality-is-idempotent-on-non-empty-profile', () => {
+  const profiles = [v1Profile({ name: 'A', deeplFormality: 'prefer_less' })];
+  const { profiles: seeded, changed } = seedDeeplFormality(profiles, 'prefer_more');
+  const pass = changed === false && seeded[0].deeplFormality === 'prefer_less';
+  return { pass, actual: seeded[0].deeplFormality };
+}, 'A profile that already has its own formality (re-run, or created after the field existed) is never overwritten by a global value — only a genuinely-unset (\'\') profile gets seeded.');
+
+check('seed-deepl-formality-no-op-when-global-empty', () => {
+  const profiles = [v1Profile({ name: 'A' })];
+  const { profiles: seeded, changed } = seedDeeplFormality(profiles, '');
+  const pass = changed === false && seeded[0].deeplFormality === '';
+  return { pass, actual: seeded[0].deeplFormality };
+}, "Global formality is never really empty in practice (main/index.js defaults it to 'prefer_more'), but the function must still no-op cleanly if it somehow is.");
+
+// ─── ProfileStore#migrate() stepping through an already-v1 store ──────
+check('migrate-from-v1-only-seeds-does-not-resplit-glossary', () => {
+  // The real risk this guards: re-running the FULL v0->v1 migrateProfiles
+  // (glossary re-split included) against an already-migrated store would
+  // re-evaluate splitGlossaryLayer() against whatever the CURRENT global
+  // glossary looks like now — which may have grown since the original v0
+  // migration to include terms that used to be profile-only, silently
+  // stripping them. Stepping from v1 must skip that entirely.
+  const profileOnlyEntry = glossaryEntry('Vanilla', 'Vanilla-chan');
+  const store = createFakeStore({
+    profiles: [v1Profile({ name: 'Nekopara', glossary: [profileOnlyEntry] })],
+    activeProfile: 'Nekopara',
+    profilesSchemaVersion: 1
+  });
+  const ps = new ProfileStore(store);
+  // The global glossary passed in now happens to already contain the same
+  // (mode, source, target) as the profile-only entry above — simulating
+  // "grew since the v0 migration ran". If migrate() re-ran the v0 step,
+  // this would strip it from the profile.
+  ps.migrate([profileOnlyEntry]);
+  const nekopara = ps.getById('uuid-Nekopara');
+  const pass = !!nekopara && nekopara.glossary.length === 1 && nekopara.glossary[0].source === 'Vanilla';
+  return { pass, actual: nekopara.glossary };
+}, 'An already-v1 store must only run the v1->v2 seed step — re-running the v0 glossary split here would be a real regression, not a harmless no-op.');
+
+check('migrate-from-v2-only-seeds-formality-does-not-reseed-instructions', () => {
+  // Mirrors the v1-stepping test above, one version later: a store that
+  // already went through the v1->v2 instructions seed (real content on the
+  // profile) must not have that content clobbered by re-running the v1->v2
+  // step again — only v2->v3 (formality) should run.
+  const alreadySeededInstructions = ['Keep character names untranslated'];
+  const store = createFakeStore({
+    profiles: [v1Profile({ name: 'Nekopara', deeplCustomInstructions: alreadySeededInstructions })],
+    activeProfile: 'Nekopara',
+    profilesSchemaVersion: 2,
+    // Deliberately different from what's already on the profile — if the
+    // v1->v2 step re-ran, this is what it would incorrectly overwrite with.
+    deeplCustomInstructions: ['A DIFFERENT global value that must not leak in'],
+    deeplFormality: 'prefer_less'
+  });
+  const ps = new ProfileStore(store);
+  ps.migrate([]);
+  const nekopara = ps.getById('uuid-Nekopara');
+  const pass = !!nekopara
+    && JSON.stringify(nekopara.deeplCustomInstructions) === JSON.stringify(alreadySeededInstructions)
+    && nekopara.deeplFormality === 'prefer_less';
+  return { pass, actual: nekopara };
+}, 'An already-v2 store must only run the v2->v3 formality seed — re-running the v1->v2 instructions seed here would be a real regression (it would still no-op given its own idempotency check, but the version-gate is what should actually prevent it from running at all).');
+
+check('migrate-from-v1-seeds-existing-profiles-and-bumps-version', () => {
+  const store = createFakeStore({
+    profiles: [v1Profile({ name: 'Nekopara' }), v1Profile({ name: 'Fate' })],
+    activeProfile: 'Nekopara',
+    profilesSchemaVersion: 1,
+    deeplCustomInstructions: ['Preserve honorifics like -senpai']
+  });
+  const ps = new ProfileStore(store);
+  const setCallsBefore = store._setCallCount();
+  const result = ps.migrate([]);
+  const setCallsAfter = store._setCallCount();
+  const raw = store._raw();
+  const pass = result.ran === true
+    && (setCallsAfter - setCallsBefore) === 1
+    && raw.profilesSchemaVersion === PROFILE_SCHEMA_VERSION
+    && raw.profiles.every((p) => JSON.stringify(p.deeplCustomInstructions) === JSON.stringify(['Preserve honorifics like -senpai']))
+    // v0->v1-only fields (profilesBackupV0) must NOT be (re)written when
+    // starting from v1 — nothing in this run touched credentials/glossary.
+    && raw.profilesBackupV0 === undefined;
+  return { pass, actual: raw };
+}, 'One write, both existing profiles seeded from the real global value, version lands on PROFILE_SCHEMA_VERSION — and no v0-only backup key appears, confirming the v0 step genuinely did not run.');
 
 // ─── Dead settings stripped ─────────────────────────────────────────
 check('dead-settings-are-stripped', () => {

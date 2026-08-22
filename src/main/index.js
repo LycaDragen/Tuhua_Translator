@@ -178,7 +178,7 @@ app.whenReady().then(() => {
   profileStore = new ProfileStore(store);
   const migration = profileStore.migrate(glossary.getAll());
   if (migration.ran) {
-    log.info('Profiles migrated to schema v1.', {
+    log.info('Profiles migrated.', {
       profileCount: migration.profiles.length,
       credentialConflicts: migration.report.credentialConflicts.map((c) => c.key),
       targetLangConflict: !!migration.report.targetLangConflict,

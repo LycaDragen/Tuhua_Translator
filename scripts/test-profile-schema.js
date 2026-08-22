@@ -45,6 +45,12 @@ const EXPECTED_FIELDS = [
   // are user-facing scoped settings, deeplGlossarySync is internal bookkeeping
   // (same category as hook/cover below).
   'deeplGlossaryId', 'deeplAutoGlossary', 'deeplGlossarySync',
+  // v3.13.80: DeepL custom_instructions, scoped per-game for the same
+  // reason as deeplGlossaryId two lines up.
+  'deeplCustomInstructions',
+  // v3.13.80: added on Lyca's explicit request after the instructions
+  // scoping above — a VN's register is exactly as game-specific.
+  'deeplFormality',
   'glossary', 'hook', 'cover', 'history'
 ].sort();
 
@@ -224,7 +230,7 @@ check('round-trip-identity-over-scoped-subset', () => {
   return { pass, actual: roundTripped, expected: original };
 });
 
-check('schema-version-is-1', () => ({ pass: PROFILE_SCHEMA_VERSION === 1 }));
+check('schema-version-is-3', () => ({ pass: PROFILE_SCHEMA_VERSION === 3 }));
 
 // ─── v3.13.58 (Fase 3): llmProvider* fields ─────────────────────────────
 check('llm-provider-keys-is-promoted-to-global-not-scoped', () => {
@@ -263,6 +269,26 @@ check('deeplGlossaryId-and-deeplAutoGlossary-default-to-empty-and-off', () => {
   const p = createProfile({ name: 'Test' });
   return { pass: p.deeplGlossaryId === '' && p.deeplAutoGlossary === false, actual: { id: p.deeplGlossaryId, auto: p.deeplAutoGlossary } };
 }, 'Auto-sync opt-in defaults OFF — sending glossary content to DeepL as a persistent account resource is materially different from a normal ephemeral translation request.');
+
+check('deeplCustomInstructions-is-profile-scoped', () => {
+  const pass = PROFILE_SCOPED_SETTING_KEYS.includes('deeplCustomInstructions');
+  return { pass };
+}, 'v3.13.80: verified against DeepL\'s real API (Free tier included) that custom_instructions is actually honored, contradicting DeepL\'s own docs — a global setting here would leak game 1\'s "keep these invented terms untranslated" directives into game 2 the moment you switched profiles, same failure mode deeplGlossaryId was scoped to prevent.');
+
+check('deeplCustomInstructions-defaults-to-empty-array', () => {
+  const p = createProfile({ name: 'Test' });
+  return { pass: Array.isArray(p.deeplCustomInstructions) && p.deeplCustomInstructions.length === 0, actual: p.deeplCustomInstructions };
+}, 'Empty means "no per-game override" — the DeepL engine falls back to its own DEFAULT_INSTRUCTIONS when the effective list is empty, not to silence.');
+
+check('deeplFormality-is-profile-scoped', () => {
+  const pass = PROFILE_SCOPED_SETTING_KEYS.includes('deeplFormality');
+  return { pass };
+}, "v3.13.80, Lyca's explicit request: a VN's register (formal vs. informal) is exactly as game-specific as its glossary or instructions. Verified against DeepL's real API that formality is genuinely honored on this Free-plan account.");
+
+check('deeplFormality-defaults-to-empty-string', () => {
+  const p = createProfile({ name: 'Test' });
+  return { pass: p.deeplFormality === '', actual: p.deeplFormality };
+}, "'' means \"no per-game override yet\". deepl.js's setFormality() treats '' as DeepL's own neutral 'default' (changed from 'prefer_more' same day, on Lyca's explicit request — VN dialogue is often casual between characters, so defaulting new profiles to formal/usted was actively wrong, not just arbitrary).");
 
 check('deeplGlossarySync-defaults-to-null', () => {
   const p = createProfile({ name: 'Test' });

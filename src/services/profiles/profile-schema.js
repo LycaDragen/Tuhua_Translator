@@ -21,7 +21,13 @@
 
 const crypto = require('crypto');
 
-const PROFILE_SCHEMA_VERSION = 1;
+// v3.13.80: bumped 1 -> 2 for the deeplCustomInstructions seed step, then
+// 2 -> 3 for deeplFormality's — see profile-migrations.js's
+// seedDeeplCustomInstructions()/seedDeeplFormality() and profile-store.js's
+// migrate(), which steps through versions instead of gating on a single
+// all-or-nothing check, so an already-migrated store doesn't re-run earlier
+// steps a second time.
+const PROFILE_SCHEMA_VERSION = 3;
 
 // The only fields copied INTO global settings when a profile activates,
 // and copied OUT of global settings when a profile is saved. Both
@@ -72,7 +78,22 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   // materially different from the ephemeral text of a normal translation
   // request.
   'deeplGlossaryId',
-  'deeplAutoGlossary'
+  'deeplAutoGlossary',
+  // v3.13.80: same reasoning as deeplGlossaryId/deeplAutoGlossary above,
+  // word for word — the custom_instructions a request should send are tied
+  // to which GAME is active ("keep this VN's invented terms untranslated",
+  // "use archaic formal Spanish for this period piece"), not a global user
+  // preference. Verified against DeepL's real API (Free tier included,
+  // 2026-08-22) that custom_instructions is actually honored — DeepL's own
+  // docs claim it's Pro-only, which is wrong, at least for this account.
+  'deeplCustomInstructions',
+  // v3.13.80: added on Lyca's explicit request, reversing the "stays
+  // global" call made earlier the same session — a VN's register (formal
+  // "usted" vs informal "tú") is exactly as game-specific as its glossary
+  // or custom instructions (a period piece vs. casual dialogue among
+  // friends). Verified against the real API that `formality` is genuinely
+  // honored on this Free-plan account (Spanish is in FORMALITY_LANGUAGES).
+  'deeplFormality'
 ];
 
 // Deliberately excluded from the profile schema — user/machine-level, not
@@ -146,6 +167,17 @@ function createProfile(overrides = {}) {
     // auto-synced one if deeplAutoGlossary is on, otherwise none".
     deeplGlossaryId: overrides.deeplGlossaryId || '',
     deeplAutoGlossary: overrides.deeplAutoGlossary === true,
+    // v3.13.80: '' / [] both mean "no per-game instructions — use whatever
+    // the DeepL engine falls back to" (the user's still-global instructions
+    // during the migration window, then DEFAULT_INSTRUCTIONS once seeded).
+    deeplCustomInstructions: Array.isArray(overrides.deeplCustomInstructions) ? overrides.deeplCustomInstructions : [],
+    // v3.13.80: '' means "no per-game override yet" — same semantics as
+    // deeplCustomInstructions above. deepl.js's setFormality() treats a
+    // falsy value as DeepL's own neutral 'default' (changed from
+    // 'prefer_more' the same day, on Lyca's explicit request — silently
+    // defaulting every new profile to formal/usted was wrong for casual VN
+    // dialogue between characters, not just an arbitrary starting point).
+    deeplFormality: overrides.deeplFormality || '',
 
     // v3.13.6x (Fase 6): internal bookkeeping for the auto-sync path
     // (deepl-glossary-sync.js) — {glossaryId, hash, sourceLang, targetLang}
