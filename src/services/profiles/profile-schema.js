@@ -172,10 +172,11 @@ function createProfile(overrides = {}) {
     // during the migration window, then DEFAULT_INSTRUCTIONS once seeded).
     deeplCustomInstructions: Array.isArray(overrides.deeplCustomInstructions) ? overrides.deeplCustomInstructions : [],
     // v3.13.80: '' means "no per-game override yet" — same semantics as
-    // deeplCustomInstructions above, not DeepL's own 'default' value (which
-    // is itself a meaningful, distinct choice). deepl.js's setFormality()
-    // already treats a falsy value as 'prefer_more', so an unseeded blank
-    // profile behaves exactly like the pre-scoping global default did.
+    // deeplCustomInstructions above. deepl.js's setFormality() treats a
+    // falsy value as DeepL's own neutral 'default' (changed from
+    // 'prefer_more' the same day, on Lyca's explicit request — silently
+    // defaulting every new profile to formal/usted was wrong for casual VN
+    // dialogue between characters, not just an arbitrary starting point).
     deeplFormality: overrides.deeplFormality || '',
 
     // v3.13.6x (Fase 6): internal bookkeeping for the auto-sync path

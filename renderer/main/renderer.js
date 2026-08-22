@@ -290,16 +290,19 @@
             // DeepL-only branch below, so switching to a profile whose own
             // `engine` isn't 'deepl' skipped it entirely and left the
             // dropdown showing the PREVIOUS profile's formality. Must always
-            // run. '' (a blank/unseeded profile) falls back to 'prefer_more'
-            // for display, matching deepl.js's setFormality() fallback — but
-            // that fallback is NOT written back to the profile just for
-            // being displayed; only the legacy 'more'/'less' string
-            // migration is persisted, exactly as before.
+            // run. '' (a blank/unseeded profile) falls back to 'default' for
+            // display, matching deepl.js's setFormality() fallback — changed
+            // from 'prefer_more' on Lyca's explicit request, since defaulting
+            // every new profile to formal/usted was actively wrong for
+            // casual VN dialogue, not just an arbitrary choice. That
+            // fallback is NOT written back to the profile just for being
+            // displayed; only the legacy 'more'/'less' string migration is
+            // persisted, exactly as before.
             {
                 let formality = settings.deeplFormality;
                 if (formality === 'more') formality = 'prefer_more';
                 if (formality === 'less') formality = 'prefer_less';
-                document.getElementById('deepl-formality').value = formality || 'prefer_more';
+                document.getElementById('deepl-formality').value = formality || 'default';
                 if (settings.deeplFormality && formality !== settings.deeplFormality) {
                     api.saveSettings({ deeplFormality: formality });
                 }

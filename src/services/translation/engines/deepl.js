@@ -477,7 +477,13 @@ class DeepLEngine {
     // v3.11.29: Migrate removed strict options to soft preferences
     if (formality === 'more') formality = 'prefer_more';
     if (formality === 'less') formality = 'prefer_less';
-    this.formality = formality || 'prefer_more';
+    // v3.13.80: fallback changed prefer_more -> default, on Lyca's explicit
+    // request. A blank/unconfigured profile (deeplFormality === '' — see
+    // profile-schema.js's createProfile()) now behaves as DeepL's own
+    // neutral default instead of silently opinionated formal/usted — VN
+    // dialogue is often casual between characters, so defaulting to formal
+    // was actively wrong for the common case, not just an arbitrary choice.
+    this.formality = formality || 'default';
   }
 
   // v3.11.28: Set custom instructions

@@ -288,7 +288,7 @@ check('deeplFormality-is-profile-scoped', () => {
 check('deeplFormality-defaults-to-empty-string', () => {
   const p = createProfile({ name: 'Test' });
   return { pass: p.deeplFormality === '', actual: p.deeplFormality };
-}, "'' means \"no per-game override yet\" — NOT DeepL's own 'default' value, which is itself a meaningful, distinct choice. deepl.js's setFormality() already treats '' as 'prefer_more'.");
+}, "'' means \"no per-game override yet\". deepl.js's setFormality() treats '' as DeepL's own neutral 'default' (changed from 'prefer_more' same day, on Lyca's explicit request — VN dialogue is often casual between characters, so defaulting new profiles to formal/usted was actively wrong, not just arbitrary).");
 
 check('deeplGlossarySync-defaults-to-null', () => {
   const p = createProfile({ name: 'Test' });
