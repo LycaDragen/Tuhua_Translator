@@ -292,7 +292,7 @@ class OcrService extends EventEmitter {
   async _recognizePaddle(imageBuffer, options = {}) {
     if (this._isBusy) {
       log.warn('[OCR] Busy, skipping PaddleOCR request');
-      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null, detGeometry: null, detectedBoxes: null };
     }
 
     this._isBusy = true;
@@ -324,7 +324,7 @@ class OcrService extends EventEmitter {
       if (!minCharsMet) {
         log.info(`[OCR/Paddle] Skipping empty result (0 meaningful chars): "${text.substring(0, 60)}"`);
         this.emit('status', 'ready');
-        return { text: '', confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
+        return { text: '', confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel, detGeometry: result.detGeometry, detectedBoxes: result.detectedBoxes };
       }
 
       // Log low confidence but still pass through — translation engine may handle it
@@ -339,19 +339,19 @@ class OcrService extends EventEmitter {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR/Paddle] Similar text skipped (${(similarity * 100).toFixed(0)}% similar): "${text.substring(0, 50)}"`);
         this.emit('status', 'ready');
-        return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
+        return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel, detGeometry: result.detGeometry, detectedBoxes: result.detectedBoxes };
       }
 
       this._lastEmittedText = text;
       log.info(`[OCR/Paddle] Recognized text (${(result.confidence * 100).toFixed(1)}%): "${text.substring(0, 80)}"`);
       this.emit('text', text, { force: !!options.force });
       this.emit('status', 'ready');
-      return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel };
+      return { text, confidence: result.confidence, regions: result.regions, regionStages: result.regionStages, recModel: result.recModel, detGeometry: result.detGeometry, detectedBoxes: result.detectedBoxes };
     } catch (err) {
       log.error('[OCR/Paddle] Recognition error:', err.message);
       this.emit('error', err);
       this.emit('status', 'error');
-      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null, detGeometry: null, detectedBoxes: null };
     } finally {
       this._isBusy = false;
     }

@@ -80,6 +80,8 @@ test-assets/
 test-images/
 tests/screenshots/
 scripts/ocr-report.json
+scripts/ocr-report-*.json
+scripts/box-dumps/
 scripts/context-report.json
 scripts/preset-divergence-report.json
 scripts/hook-cleaning-report.json

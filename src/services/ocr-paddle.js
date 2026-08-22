@@ -64,9 +64,24 @@ class PaddleOCREngine extends EventEmitter {
     this._sourceLang = 'auto';  // v3.13.04: Track source language for model selection
     this._options = {
       maxSideLen: 1280,
+      // v3.13.77 (Stage 3, OCR-refinement round): floor for detection input
+      // size, mirrored against maxSideLen. Confirmed a no-op on every bench
+      // CJK image (all have maxSide >= 1152); only engages on captures
+      // smaller than the bench has tested, e.g. the app's default 600x122
+      // capture area. See preprocessForDetection() in paddle-preprocess.js.
+      detMinSideLen: 960,
+      detMaxUpscale: 2.0,
       detBinThresh: 0.3,
       detBoxThresh: 0.3,
-      detUnclipRatio: 2.0,
+      // v3.13.77 (Stage 2, OCR-refinement round): re-defaulted 2.0 -> 1.5.
+      // The old value was tuned against a completely different (and wrong)
+      // formula — center-scaling the box 2x per axis (4x the area) — so it
+      // cannot be carried over now that decodeDetection() uses a real
+      // Vatti-style outward margin (see paddle-postprocess.js). Upstream
+      // PP-OCR's det_db_unclip_ratio default is 1.5; RapidOCR uses 1.5-1.6.
+      // Swept {1.2, 1.5, 1.8, 2.0} against the bench (both cjk and latin
+      // groups, plus the padding sweep) before picking this value.
+      detUnclipRatio: 1.5,
       recMinConfidence: 0,    // v3.13.08-fix: Removed threshold — same as Tesseract path, let translation engine decide
       // v3.13.03: Multi-region filtering and merging options
       minRegionArea: 100,
@@ -379,15 +394,24 @@ class PaddleOCREngine extends EventEmitter {
       if (detResult.boxes.length === 0) {
         this.emit('status', 'ready');
         this._isBusy = false;
-        return { text: '', confidence: 0, regions: 0, regionStages, recModel: currentRecLang };
+        return { text: '', confidence: 0, regions: 0, regionStages, recModel: currentRecLang, detGeometry: detResult.geometry, detectedBoxes: [] };
       }
 
       // v3.13.03+04: Filter and merge detected regions before recognition
       let boxes = detResult.boxes;
 
       // Filter: remove very small regions (likely noise/icons)
+      //
+      // v3.13.77 (Stage 2, OCR-refinement round): measure against box.raw
+      // (pre-unclip component bounds), not the unclipped x1/y1/x2/y2.
+      // minRegionArea:100 was calibrated against boxes inflated ~4x in area
+      // by the old center-scaling unclip — with the Vatti-style margin now
+      // used for cropping, the same real text would measure ~4x smaller here
+      // and sit right at the cutoff. Using raw decouples this threshold from
+      // whatever unclipRatio happens to mean.
       boxes = boxes.filter(box => {
-        const area = (box.x2 - box.x1) * (box.y2 - box.y1);
+        const r = box.raw || box;
+        const area = (r.x2 - r.x1) * (r.y2 - r.y1);
         return area >= this._options.minRegionArea;
       });
       regionStages.afterMinArea = boxes.length;
@@ -408,9 +432,14 @@ class PaddleOCREngine extends EventEmitter {
       // under any plausible line height in these bench images) targets the
       // actual distinguishing feature instead of guessing a larger ratio
       // number that could still misfire in either direction.
+      // v3.13.77: measured against box.raw for the same reason as
+      // minRegionArea above — the <12px absolute-height guard is meant to
+      // catch a genuinely thin decorative rule, and the old unclip inflation
+      // roughly doubled every box's height, silently loosening this filter.
       boxes = boxes.filter(box => {
-        const w = box.x2 - box.x1;
-        const h = box.y2 - box.y1;
+        const r = box.raw || box;
+        const w = r.x2 - r.x1;
+        const h = r.y2 - r.y1;
         if (w > 0 && h > 0 && h < 12 && w / h > 20) return false;
         return true;
       });
@@ -650,14 +679,22 @@ class PaddleOCREngine extends EventEmitter {
         confidence,
         regions: validRegions,
         regionStages,
-        recModel: this._modelManager.getActiveRecLang()
+        recModel: this._modelManager.getActiveRecLang(),
+        // v3.13.77 (Stage 1, OCR-refinement round): geometry + the boxes
+        // actually sent to cropRegion(), for the bench's --dump-boxes and
+        // for diagnosing Stage 2's coordinate-mapping fix. `detectedBoxes`
+        // are POST-unclip coordinates (what cropRegion used), not the raw
+        // component bounds — that distinction is why Stage 2 introduces a
+        // separate `raw` field per box.
+        detGeometry: detResult.geometry,
+        detectedBoxes: boxes
       };
     } catch (err) {
       log.error('[PaddleOCR] Recognition error:', err.message);
       this.emit('status', 'error');
       this.emit('error', err);
       this._isBusy = false;
-      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null };
+      return { text: '', confidence: 0, regions: 0, regionStages: null, recModel: null, detGeometry: null, detectedBoxes: null };
     }
   }
 
@@ -671,7 +708,9 @@ class PaddleOCREngine extends EventEmitter {
 
     const { tensor, shape, ratio, origW, origH } = preprocessForDetection(
       imageBuffer,
-      this._options.maxSideLen
+      this._options.maxSideLen,
+      this._options.detMinSideLen,
+      this._options.detMaxUpscale
     );
 
     const inputTensor = new ort.Tensor('float32', tensor, shape);
@@ -680,12 +719,33 @@ class PaddleOCREngine extends EventEmitter {
     const outputName = session.outputNames[0];
     const output = results[outputName];
 
+    // v3.13.77 (Stage 1, OCR-refinement round): confirm empirically whether
+    // the DB output map is full input resolution or reduced by stride,
+    // BEFORE Stage 2 relies on that for the per-axis coordinate scale-back
+    // (decodeDetection currently divides by the single scalar `ratio`
+    // instead, which is the anisotropic-resize bug the round is fixing).
+    // This repo has already been burned once by an unverified model-shape
+    // assumption — see the rec input height history in
+    // paddle-preprocess.js's preprocessForRecognition docstring. Logged once
+    // per distinct input size, not every call, since this runs on every
+    // capture in production (~every 3.5s).
+    const dstH = shape[2];
+    const dstW = shape[3];
+    const outH = output.dims[2];
+    const outW = output.dims[3];
+    const sizeKey = `${dstW}x${dstH}`;
+    if (this._loggedDetGeometryFor !== sizeKey) {
+      const strideX = dstW / outW;
+      const strideY = dstH / outH;
+      log.info(`[PaddleOCR] Detection geometry: input ${dstW}x${dstH} -> output map ${outW}x${outH} (stride ${strideX.toFixed(2)}x${strideY.toFixed(2)}, expect 1.00x1.00 for a full-resolution DB head)`);
+      this._loggedDetGeometryFor = sizeKey;
+    }
+
     const boxes = decodeDetection(
       output.data,
       output.dims,
       origW,
       origH,
-      ratio,
       {
         binThresh: this._options.detBinThresh,
         boxThresh: this._options.detBoxThresh,
@@ -693,7 +753,7 @@ class PaddleOCREngine extends EventEmitter {
       }
     );
 
-    return { boxes };
+    return { boxes, geometry: { origW, origH, dstW, dstH, ratio, outW, outH } };
   }
 
   /**
@@ -744,6 +804,17 @@ class PaddleOCREngine extends EventEmitter {
    * to be within `gap`/vertically-aligned on its own merits; the envelope
    * (`current.x1/y1/x2/y2`) is still tracked and returned for cropping, but
    * no longer used to decide what merges next.
+   *
+   * v3.13.77 (Stage 2, OCR-refinement round): the same-line and gap checks
+   * now measure `box.raw` (pre-unclip component bounds) instead of the
+   * unclipped x1/y1/x2/y2. `mergeRegionGap:15` is an absolute pixel gap —
+   * under the old 4x-area unclip inflation, real gaps between adjacent
+   * words/labels shrank (sometimes into overlap), so lines merged that
+   * shouldn't have and vice versa depending on layout. Measuring on raw
+   * bounds makes this threshold mean "15px between the actual glyphs" again,
+   * independent of whatever unclipRatio happens to be. `current.raw` is
+   * unioned alongside the unclipped envelope so any later stage that still
+   * wants the un-inflated bounds of a merged group has them.
    * @private
    */
   _mergeNearbyBoxes(boxes) {
@@ -752,6 +823,7 @@ class PaddleOCREngine extends EventEmitter {
     const gap = this._options.mergeRegionGap;
     const merged = [];
     const used = new Set();
+    const rawOf = box => box.raw || box;
 
     const sorted = [...boxes].sort((a, b) => {
       const dy = a.y1 - b.y1;
@@ -762,7 +834,7 @@ class PaddleOCREngine extends EventEmitter {
     for (let i = 0; i < sorted.length; i++) {
       if (used.has(i)) continue;
 
-      let current = { ...sorted[i] };
+      let current = { ...sorted[i], raw: { ...rawOf(sorted[i]) } };
       let lastAbsorbed = sorted[i]; // v3.13.17: compare against this, not `current`'s envelope
       used.add(i);
 
@@ -770,20 +842,26 @@ class PaddleOCREngine extends EventEmitter {
         if (used.has(j)) continue;
 
         const other = sorted[j];
+        const lastRaw = rawOf(lastAbsorbed);
+        const otherRaw = rawOf(other);
 
-        const vOverlap = Math.min(lastAbsorbed.y2, other.y2) - Math.max(lastAbsorbed.y1, other.y1);
-        const minHeight = Math.min(lastAbsorbed.y2 - lastAbsorbed.y1, other.y2 - other.y1);
+        const vOverlap = Math.min(lastRaw.y2, otherRaw.y2) - Math.max(lastRaw.y1, otherRaw.y1);
+        const minHeight = Math.min(lastRaw.y2 - lastRaw.y1, otherRaw.y2 - otherRaw.y1);
         const isSameLine = vOverlap > minHeight * 0.5;
 
         if (!isSameLine) continue;
 
-        const hGap = Math.max(0, other.x1 - lastAbsorbed.x2);
+        const hGap = Math.max(0, otherRaw.x1 - lastRaw.x2);
         if (hGap <= gap) {
           current.x1 = Math.min(current.x1, other.x1);
           current.y1 = Math.min(current.y1, other.y1);
           current.x2 = Math.max(current.x2, other.x2);
           current.y2 = Math.max(current.y2, other.y2);
           current.score = Math.max(current.score, other.score);
+          current.raw.x1 = Math.min(current.raw.x1, otherRaw.x1);
+          current.raw.y1 = Math.min(current.raw.y1, otherRaw.y1);
+          current.raw.x2 = Math.max(current.raw.x2, otherRaw.x2);
+          current.raw.y2 = Math.max(current.raw.y2, otherRaw.y2);
           lastAbsorbed = other;
           used.add(j);
         }

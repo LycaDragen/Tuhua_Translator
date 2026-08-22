@@ -17,11 +17,32 @@
  * Resizes to fit within maxSideLen (rounded to multiple of 32),
  * normalizes with symmetric normalization, and creates NCHW tensor.
  *
+ * v3.13.77 (Stage 3, OCR-refinement round): added minSideLen/maxUpscale.
+ * The old code only ever downscaled (`if (maxSide > maxSideLen)`) — a small
+ * capture (e.g. the default 600x122 capture-area minus its 28px title bar)
+ * went into detection at native resolution with no floor, so small on-screen
+ * text got fewer detection-map pixels than a large capture of the same text
+ * would. Real PP-OCR's `det_limit_side_len` is a floor+ceiling pair
+ * (`limit_type='min'` vs `'max'`); this mirrors that with an explicit upscale
+ * cap so it doesn't blow up CPU time on a tiny capture. Confirmed against
+ * the bench: every existing CJK image has maxSide >= 1152, so
+ * minSideLen=960 is a no-op for all of them — this only engages on captures
+ * smaller than the bench has ever exercised, which is exactly the untested
+ * gap Lyca's real-world testing found (lat06, a 12px-text bench image,
+ * started returning empty output post-Stage-2 because the corrected,
+ * no-longer-inflated geometric filters correctly measure it as too small —
+ * upscaling before detection is the intended fix, not loosening those
+ * filters back to compensate for the old bug).
+ *
  * @param {Buffer} imageBuffer - Raw image data (PNG/JPEG buffer)
  * @param {number} maxSideLen - Maximum side length for resize (default: 960)
+ * @param {number} minSideLen - Minimum side length; smaller captures are
+ *   upscaled toward this, capped by maxUpscale (default: 960)
+ * @param {number} maxUpscale - Hard cap on the upscale factor, so a tiny
+ *   capture can't balloon CPU/memory cost (default: 2.0)
  * @returns {{ tensor: Float32Array, shape: number[], ratio: number, padH: number, padW: number }}
  */
-function preprocessForDetection(imageBuffer, maxSideLen = 960) {
+function preprocessForDetection(imageBuffer, maxSideLen = 960, minSideLen = 960, maxUpscale = 2.0) {
   // Decode image using Electron's NativeImage
   const { nativeImage } = require('electron');
   const img = nativeImage.createFromBuffer(imageBuffer);
@@ -34,6 +55,8 @@ function preprocessForDetection(imageBuffer, maxSideLen = 960) {
   const maxSide = Math.max(origW, origH);
   if (maxSide > maxSideLen) {
     ratio = maxSideLen / maxSide;
+  } else if (maxSide < minSideLen) {
+    ratio = Math.min(minSideLen / maxSide, maxUpscale);
   }
 
   let dstW = Math.round(origW * ratio);

@@ -24,20 +24,27 @@
 /**
  * DB Post-process: Convert detection model output to bounding boxes.
  *
+ * v3.13.77: dropped the scalar `ratio` parameter — preprocessForDetection()
+ * resizes width and height to independent multiples of 32, so a single
+ * scalar under/over-corrected coordinates depending on which axis needed more
+ * rounding (confirmed: up to a 28% Y error on real capture-area sizes). Boxes
+ * are now scaled back per-axis directly from origW/outW and origH/outH,
+ * derived from this function's own parameters — see the Stage 2 comment
+ * below for the equivalence proof.
+ *
  * @param {Float32Array} output - Detection model output [1, 1, H, W]
  * @param {number[]} outputShape - Shape of the output tensor
  * @param {number} origW - Original image width
  * @param {number} origH - Original image height
- * @param {number} ratio - Resize ratio used in preprocessing
  * @param {object} options - Detection options
  * @param {number} options.binThresh - Binarization threshold (default: 0.3)
  * @param {number} options.boxThresh - Minimum box score threshold (default: 0.5)
  * @param {number} options.maxCandidates - Maximum number of candidate boxes (default: 1000)
  * @param {number} options.minArea - Minimum box area in pixels (default: 9)
- * @param {number} options.unclipRatio - Box expansion ratio (default: 1.6)
- * @returns {Array<{ x1: number, y1: number, x2: number, y2: number, score: number }>}
+ * @param {number} options.unclipRatio - Vatti-style outward margin ratio (default: 1.6)
+ * @returns {Array<{ x1: number, y1: number, x2: number, y2: number, score: number, raw: {x1,y1,x2,y2} }>}
  */
-function decodeDetection(output, outputShape, origW, origH, ratio, options = {}) {
+function decodeDetection(output, outputShape, origW, origH, options = {}) {
   const binThresh = options.binThresh || 0.3;
   const boxThresh = options.boxThresh || 0.5;
   const maxCandidates = options.maxCandidates || 1000;
@@ -47,6 +54,20 @@ function decodeDetection(output, outputShape, origW, origH, ratio, options = {})
   // Output shape is [1, 1, H, W]
   const outH = outputShape[2];
   const outW = outputShape[3];
+
+  // v3.13.77 (Stage 2, OCR-refinement round): per-axis scale-back, replacing
+  // the single scalar `ratio`. preprocessForDetection() resizes to dstW x dstH
+  // independently per axis (each rounded to its own multiple of 32), so a
+  // coordinate in the outW x outH detection map maps back to original pixels
+  // via origW/outW and origH/outH SEPARATELY — using one scalar for both
+  // axes drifted boxes down/right by up to ~28% on real capture-area sizes
+  // (confirmed: 600x122 -> 608x128 is a 4.9% Y error; a 600x100 capture would
+  // be 28%). Stage 1's telemetry confirmed the output map is full input
+  // resolution (stride 1.00x1.00) here, so this composes to exactly
+  // origW/outW with no stride correction needed — see the plan for the
+  // scale-invariance proof this relies on.
+  const sx = origW / outW;
+  const sy = origH / outH;
 
   // Step 1: Create probability map and binary map
   const probMap = new Float32Array(outH * outW);
@@ -76,21 +97,49 @@ function decodeDetection(output, outputShape, origW, origH, ratio, options = {})
     const boxH = comp.maxY - comp.minY + 1;
     if (boxW * boxH < minArea) continue;
 
-    // Unclip: expand box by unclipRatio
-    const centerX = (comp.minX + comp.maxX) / 2;
-    const centerY = (comp.minY + comp.maxY) / 2;
-    const halfW = (boxW * unclipRatio) / 2;
-    const halfH = (boxH * unclipRatio) / 2;
+    // v3.13.77 (Stage 2, OCR-refinement round): Vatti-style polygon offset,
+    // replacing the old center-scaling unclip. The old code did
+    // `half = (boxW * unclipRatio) / 2` — a LINEAR scale of the box about its
+    // center, so unclipRatio=2.0 meant "2x the width AND 2x the height about
+    // the center" = 4x the area. Real PaddleOCR/RapidOCR unclip a fixed
+    // outward margin `d = area * unclipRatio / perimeter` instead, which
+    // grows with box size but stays small for small boxes (a 3x3 component
+    // gets d=1.1px at ratio 1.5, not a 4x blowup) — the opposite of the old
+    // formula, and why tiny detections no longer swallow their neighborhood.
+    // At recognition, the crop's full height is squeezed into the model's
+    // fixed input height (e.g. 48px) — a box inflated 2x in each axis meant
+    // real glyphs occupied only ~half those rows. This is the direct cause
+    // of "bigger capture window -> worse recognition": more margin in the
+    // detected box means more of the model's fixed input height is wasted on
+    // background. `d` is computed in detection-map space and is scale-
+    // invariant under the per-axis scale-back below (see the plan for the
+    // algebraic proof: computing d here and multiplying by sx/sy afterward is
+    // exactly equivalent to computing it in original-image space directly).
+    const perimeter = 2 * (boxW + boxH);
+    const d = perimeter > 0 ? (boxW * boxH * unclipRatio) / perimeter : 0;
 
-    // Map back to original image coordinates
-    const x1 = Math.max(0, Math.round((centerX - halfW) / ratio));
-    const y1 = Math.max(0, Math.round((centerY - halfH) / ratio));
-    const x2 = Math.min(origW, Math.round((centerX + halfW) / ratio));
-    const y2 = Math.min(origH, Math.round((centerY + halfH) / ratio));
+    // `raw`: the undilated... actually pre-unclip component bounds, scaled to
+    // original coordinates with NO offset. Geometric filters in ocr-paddle.js
+    // (minRegionArea, the hairline aspect filter, filterFuriganaBoxes,
+    // _mergeNearbyBoxes' gap/same-line decisions) use `raw` instead of the
+    // unclipped box — those thresholds were tuned against boxes that used to
+    // be inflated 4x in area, and would otherwise need re-tuning every time
+    // unclipRatio's meaning changes. Only cropRegion() should use the
+    // unclipped x1/y1/x2/y2 (it needs the margin, to not clip glyph edges).
+    const rawX1 = Math.max(0, Math.round(comp.minX * sx));
+    const rawY1 = Math.max(0, Math.round(comp.minY * sy));
+    const rawX2 = Math.min(origW, Math.round((comp.maxX + 1) * sx));
+    const rawY2 = Math.min(origH, Math.round((comp.maxY + 1) * sy));
+
+    // Map back to original image coordinates, per-axis (see sx/sy above).
+    const x1 = Math.max(0, Math.round((comp.minX - d) * sx));
+    const y1 = Math.max(0, Math.round((comp.minY - d) * sy));
+    const x2 = Math.min(origW, Math.round((comp.maxX + 1 + d) * sx));
+    const y2 = Math.min(origH, Math.round((comp.maxY + 1 + d) * sy));
 
     if (x2 - x1 < 3 || y2 - y1 < 3) continue;
 
-    boxes.push({ x1, y1, x2, y2, score });
+    boxes.push({ x1, y1, x2, y2, score, raw: { x1: rawX1, y1: rawY1, x2: rawX2, y2: rawY2 } });
   }
 
   // Step 5: Sort by reading order (top-to-bottom, left-to-right)
@@ -365,15 +414,28 @@ function filterFuriganaBoxes(boxes, options = {}) {
   const dropped = [];
   const droppedIndices = new Set();
 
+  // v3.13.77 (Stage 2, OCR-refinement round): measure against `raw` (the
+  // pre-unclip component bounds) instead of the unclipped x1/y1/x2/y2. These
+  // thresholds were calibrated against boxes inflated ~4x in area by the old
+  // center-scaling unclip; under that inflation heightRatio (aH/bH) happened
+  // to be scale-invariant (both boxes grew by the same FACTOR), but under
+  // the Vatti-style margin now used for cropping, both boxes gain the same
+  // ABSOLUTE margin `2d` — so a small furigana box gains proportionally
+  // more, pushing its measured ratio toward the 0.71 false-positive risk
+  // this function's original tuning already flagged. Falls back to the
+  // unclipped coordinates if a box has no `raw` field (defensive — every
+  // box produced by decodeDetection() has one).
+  const rawOf = box => box.raw || box;
+
   for (let i = 0; i < boxes.length; i++) {
-    const a = boxes[i];
+    const a = rawOf(boxes[i]);
     const aH = a.y2 - a.y1;
     const aW = a.x2 - a.x1;
     if (aH <= 0 || aW <= 0) continue;
 
     for (let j = 0; j < boxes.length; j++) {
       if (i === j) continue;
-      const b = boxes[j];
+      const b = rawOf(boxes[j]);
       const bH = b.y2 - b.y1;
       if (bH <= 0) continue;
 
@@ -393,7 +455,7 @@ function filterFuriganaBoxes(boxes, options = {}) {
       const gap = b.y1 - a.y2; // negative = overlap
       if (gap < -vOverlapMax * aH || gap > vGapMax * aH) continue;
 
-      dropped.push({ box: a, baseBox: b, heightRatio, horizontalOverlap });
+      dropped.push({ box: boxes[i], baseBox: boxes[j], heightRatio, horizontalOverlap });
       droppedIndices.add(i);
       break; // one matching base line is enough to drop A
     }

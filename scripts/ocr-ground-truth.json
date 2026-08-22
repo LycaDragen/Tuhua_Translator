@@ -14,13 +14,22 @@
     "`lang` is what to pass to setSourceLang(). `alsoTestAuto` marks the cases",
     "worth re-running under 'auto', which is the path the v3.13.15 const bug broke.",
     "`notes` records why a case is hard, and `knownUnreadable` marks text that no",
-    "OCR can recover (e.g. glyphs cropped by the image border)."
+    "OCR can recover (e.g. glyphs cropped by the image border).",
+    "",
+    "`group` splits the bench for the OCR-refinement round (v3.13.77+): 'cjk' is",
+    "the original 12-image set (all ja/zh/ko/lzh); 'latin' is the synthetic",
+    "en-VN-dialogue set from scripts/gen-ocr-latin-images.js, authored at",
+    "app-realistic, DELIBERATELY non-multiple-of-32 sizes (the cjk set's sizes",
+    "all happen to land on or near a multiple of 32, which makes it blind to the",
+    "anisotropic-resize/scalar-ratio bug); 'real' is real screenshots from Lyca's",
+    "own VN sessions, added when available. Report mean similarity PER GROUP, not",
+    "just overall — a mixed mean can hide a cjk regression behind a latin gain."
   ],
-
   "images": [
     {
       "file": "test01-japanese-simple.png",
       "lang": "ja",
+      "group": "cjk",
       "expected": "こんにちの世界",
       "difficulty": "trivial",
       "notes": "High contrast, light background. Baseline sanity check. Note the rendered text is こんにちの世界, NOT こんにちは世界."
@@ -28,6 +37,7 @@
     {
       "file": "test02-chinese-simple.png",
       "lang": "zh",
+      "group": "cjk",
       "expected": "今天天气很好",
       "difficulty": "trivial",
       "notes": "Clean simplified Chinese, native to the default zh model."
@@ -36,6 +46,7 @@
       "file": "test03-korean-simple.png",
       "lang": "ko",
       "alsoTestAuto": true,
+      "group": "cjk",
       "expected": "안녕하시오",
       "difficulty": "hard",
       "notes": "The reported Korean issue. The zh model has no hangul in its dictionary, so under 'auto' this triggers the model switch — the exact path the const bug made return empty. Glyphs are very large (~400px tall)."
@@ -43,6 +54,7 @@
     {
       "file": "test04-vn-dialogue.png",
       "lang": "ja",
+      "group": "cjk",
       "expected": "私は学生てす。\n毎日学校に行きます。",
       "difficulty": "medium",
       "notes": "Semi-transparent dialogue box over a background. White text with outline. てす has no dakuten in the source."
@@ -51,6 +63,7 @@
       "file": "test05-game-menu.png",
       "lang": "ja",
       "alsoTestAuto": true,
+      "group": "cjk",
       "expected": "ばじめから\nつづきから\n設定\n因書館\n移了",
       "difficulty": "hard",
       "notes": "Black background, white glow text, 5 separate regions. Near-miss glyphs: 因 not 図, 移 not 終, ばじめから not はじめから. The ▶ menu cursor is intentionally stripped by _cleanPaddleOcrText and is not in the expected text."
@@ -58,6 +71,7 @@
     {
       "file": "test06-vertical-text.png",
       "lang": "ja",
+      "group": "cjk",
       "expected": "今日は良い天気てすわ",
       "difficulty": "hard",
       "notes": "Vertical single column on the right side. Very noisy dark background. Portrait 768x1344. Exercises isVerticalText() + rotate90CCW() and the vertical reading order fixed in Phase 0."
@@ -66,6 +80,7 @@
       "file": "test07-mixed-ja-en.png",
       "lang": "ja",
       "alsoTestAuto": true,
+      "group": "cjk",
       "expected": "東京タワーへ行きましよう\nLet's go to Tokyo Tower\n入場料は大人1000円です",
       "difficulty": "medium",
       "notes": "Mixed JA/EN/digits. Phase 3 per-region script detection targets this: a Latin line sits between two Japanese ones. ましよう uses a large よ, not the small ょ."
@@ -74,6 +89,7 @@
       "file": "test08-multiple-speakers.png",
       "lang": "ja",
       "alsoTestAuto": true,
+      "group": "cjk",
       "expected": "秀太郎\nどこへ行くの?\n美咲\n因書館に本を返しに行くの。",
       "difficulty": "hard",
       "notes": "Dark scene, 2 speaker labels + 2 bubbles = 4 regions whose order and association must survive. _mergeNearbyBoxes only merges horizontally today, so labels stay detached from their bubble (Phase 3). 因 not 図."
@@ -82,14 +98,18 @@
       "file": "test09-rpg-battle.png",
       "lang": "ja",
       "alsoTestAuto": true,
+      "group": "cjk",
       "expected": "HP: 100/100\nMP: 50/50\nたたかう\nまほう\nにげる\nどうく",
-      "knownUnreadable": ["ヌライノ"],
+      "knownUnreadable": [
+        "ヌライノ"
+      ],
       "difficulty": "hard",
       "notes": "Pixel font, dark background, ~7 scattered regions. The yellow katakana is CROPPED BY THE RIGHT IMAGE BORDER — unrecoverable, so it is excluded from `expected` and listed under knownUnreadable. どうく is likely meant to be どうぐ. Pixel fonts have diagonal-only glyph connections, which 4-connectivity flood fill fragments (Phase 2)."
     },
     {
       "file": "test10-low-quality.png",
       "lang": "ja",
+      "group": "cjk",
       "expected": "遅れました",
       "difficulty": "hard",
       "notes": "The reported low-quality issue. Heavy sensor-style noise over a near-black background, 864x1152 (below maxSideLen 1280, so it is not even upscaled today). Primary target for CLAHE + autoInvert in Phase 1."
@@ -97,8 +117,12 @@
     {
       "file": "test11-furigana.png",
       "lang": "ja",
+      "group": "cjk",
       "expected": "漢字の上にぶりが\nながあります",
-      "furigana": ["か", "で"],
+      "furigana": [
+        "か",
+        "で"
+      ],
       "difficulty": "hard",
       "notes": "The reported furigana issue. Small kana above 漢 and 上. These must NOT appear in the output — they are listed under `furigana` so the bench can score them as false positives if they leak in. minRegionArea 100 currently discards them before they can even be filtered geometrically."
     },
@@ -106,9 +130,370 @@
       "file": "test12-classical-chinese.png",
       "lang": "lzh",
       "alsoTestAuto": true,
+      "group": "cjk",
       "expected": "學而時瞀之，不亦説乎？\n不亦説乎？有朋自遠方來，\n不亦樂乎？學而時時\n阴時 祒時",
       "difficulty": "hard",
       "notes": "The reported classical Chinese issue. Traditional/classical glyphs read by a SIMPLIFIED model (lzh maps to zh). The trailing 學而時時/阴時/祒時 are degenerate repetitions in the source image, not OCR errors. Several glyphs are genuinely ambiguous at this resolution — score by similarity, never exact match."
+    },
+    {
+      "file": "lat01-tight-dialogue.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "I never thought I'd see you again.",
+      "difficulty": "medium",
+      "notes": "600x122, generated by gen-ocr-latin-images.js. Tight VN dialogue box, white text on a dark semi-transparent bar — the capture window closely matches the text bounding box. Control image for the padding A/B: same text and font size as lat02, minimal empty margin."
+    },
+    {
+      "file": "lat02-padded-dialogue.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "I never thought I'd see you again.",
+      "difficulty": "medium",
+      "notes": "1200x400, generated by gen-ocr-latin-images.js. IDENTICAL text and font size to lat01, rendered inside a much larger, mostly-empty capture region — this is Lyca's reported complaint reproduced directly. Compare lat01 vs lat02 similarity as the A/B pair; the gap between them is the number the round's Stage 2 fix must close."
+    },
+    {
+      "file": "lat03-visual-novel-serif.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "The old library still smelled of dust and rain.",
+      "difficulty": "medium",
+      "notes": "900x150, generated by gen-ocr-latin-images.js. Black serif text on a plain white background — the Ren'Py default dialogue look, unlike the dark boxes elsewhere in this group."
+    },
+    {
+      "file": "lat04-outlined-noisy.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "Are you sure about this?",
+      "difficulty": "hard",
+      "notes": "1000x220, generated by gen-ocr-latin-images.js. White text with a dark outline/shadow over a busy noisy gradient background — stresses both engines' handling of low local contrast."
+    },
+    {
+      "file": "lat05-speaker-dialogue.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "Maya\nDon't wait up for me tonight.",
+      "difficulty": "medium",
+      "notes": "800x180, generated by gen-ocr-latin-images.js. Speaker name label above a dialogue line — 2 separate regions whose order and association must survive, same shape of problem as test08 but in Latin script."
+    },
+    {
+      "file": "lat06-small-text.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "You should get some rest before tomorrow.",
+      "difficulty": "hard",
+      "notes": "600x122, generated by gen-ocr-latin-images.js. Small 12px font — exercises the Stage 3 detMinSideLen upscale path; the cjk group's smallest maxSide is 1152, well above the 960 floor, so only this image and the padding sweep can validate that change."
+    },
+    {
+      "file": "lat07-punctuation.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "\"Wait—don't go,\" she said, her voice barely a whisper.",
+      "difficulty": "medium",
+      "notes": "900x150, generated by gen-ocr-latin-images.js. Curly quotes, an em dash, mixed case and digits — Latin punctuation the cjk group never exercises."
+    },
+    {
+      "file": "lat08-ui-menu.png",
+      "lang": "en",
+      "group": "latin",
+      "expected": "New Game\nContinue\nSettings\nGallery\nQuit",
+      "difficulty": "hard",
+      "notes": "1000x300, generated by gen-ocr-latin-images.js. 5 short scattered UI labels — exercises _mergeNearbyBoxes (must NOT merge unrelated labels) and maxRegions:15 in a large, mostly-empty capture region, same shape of problem as test09's RPG battle menu but in Latin script."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_1.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "There's literally no point in trying to reschedule now. A snowstorm like this will put the entire city out of commission for a while.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_1.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "There's literally no point in trying to reschedule now. A snowstorm like this will put the entire city out of commission for a while.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_1.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "There's literally no point in trying to reschedule now. A snowstorm like this will put the entire city out of commission for a while.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_2.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Standing at my frost-covered window, I'm greeted by huge, looming, mountainous piles of snow. It had been ages since I had seen anything like this",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_2.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Standing at my frost-covered window, I'm greeted by huge, looming, mountainous piles of snow. It had been ages since I had seen anything like this",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_2.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Standing at my frost-covered window, I'm greeted by huge, looming, mountainous piles of snow. It had been ages since I had seen anything like this",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_3.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "He gives me something between a grimace and a smile, clearly trying to lighten the mood as I shiver next to the door. He looks me up and down again.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_3.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "He gives me something between a grimace and a smile, clearly trying to lighten the mood as I shiver next to the door. He looks me up and down again.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_3.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "He gives me something between a grimace and a smile, clearly trying to lighten the mood as I shiver next to the door. He looks me up and down again.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Promises to Keep', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_5.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Famed across the kingdom for its advanced arcane research, its vast array of hard-working craftsmen, and home to the esteemed royal family of old...",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_5.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Famed across the kingdom for its advanced arcane research, its vast array of hard-working craftsmen, and home to the esteemed royal family of old...",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_5.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Famed across the kingdom for its advanced arcane research, its vast array of hard-working craftsmen, and home to the esteemed royal family of old...",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_6.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Marauder's District: Bonebreaker Mercenary Company Guild Building.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_6.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Marauder's District: Bonebreaker Mercenary Company Guild Building.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_6.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Marauder's District: Bonebreaker Mercenary Company Guild Building.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_7.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Mugs of mead littered the broken-down bar along with racks of weapons and overdue bills from the adventurer's guild.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_7.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Mugs of mead littered the broken-down bar along with racks of weapons and overdue bills from the adventurer's guild.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_7.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Mugs of mead littered the broken-down bar along with racks of weapons and overdue bills from the adventurer's guild.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Temptation Ballad', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_8.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Even though you're here you're going to try and run again...",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_8.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Even though you're here you're going to try and run again...",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_8.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Even though you're here you're going to try and run again...",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_9.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "My phone's been dead for the past two hours. I didn't know it would take us eight hours to get there.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_10.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Whether that dig was purposeful or not, I still feel a little embarrassed.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_10.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Whether that dig was purposeful or not, I still feel a little embarrassed.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_10.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Whether that dig was purposeful or not, I still feel a little embarrassed.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_11.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "I'll admit, I got us lost for a few hours. Route 93 is hard to find, even with the GPS.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_11.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "I'll admit, I got us lost for a few hours. Route 93 is hard to find, even with the GPS.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_11.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "I'll admit, I got us lost for a few hours. Route 93 is hard to find, even with the GPS.",
+      "difficulty": "hard",
+      "notes": "Real screenshot from 'Echo', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_12.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "I am currently in front of Elphedor High, where reports are coming in about a devastating explosion that has left twelve injured.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_12.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "I am currently in front of Elphedor High, where reports are coming in about a devastating explosion that has left twelve injured.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_12.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "I am currently in front of Elphedor High, where reports are coming in about a devastating explosion that has left twelve injured.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_13.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Or I dropped my phone on my face while falling asleep. I did promise myself not to do that anymore… but I’m not great with promises, especially to myself.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_13.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Or I dropped my phone on my face while falling asleep. I did promise myself not to do that anymore… but I’m not great with promises, especially to myself.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_13.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Or I dropped my phone on my face while falling asleep. I did promise myself not to do that anymore… but I’m not great with promises, especially to myself.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_fit_to_dialogue_14.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Didn't mean to be rude by complaining about your empty void, but us alone in here was starting to be quite boring, especially with your refusal to collaborate in any way, shape, or form.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). tight capture around only the dialogue line. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_dialogue_box_14.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Didn't mean to be rude by complaining about your empty void, but us alone in here was starting to be quite boring, especially with your refusal to collaborate in any way, shape, or form.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). capture around the whole dialogue box (extra vertical margin, quick-menu bar in frame). Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
+    },
+    {
+      "file": "ocr_real_image_full_vn_14.png",
+      "lang": "en",
+      "group": "real",
+      "expected": "Didn't mean to be rude by complaining about your empty void, but us alone in here was starting to be quite boring, especially with your refusal to collaborate in any way, shape, or form.",
+      "difficulty": "medium",
+      "notes": "Real screenshot from 'Lust Shards', provided by Lyca (2026-08-21). capture of the entire game window (title bar + full scene + dialogue box + quick-menu bar) — the real-world analogue of Lyca's original complaint: a capture region much bigger than the text. Expected is the dialogue line ONLY — any quick-menu bar (Back/History/Skip/Auto/Save/...) or window title bar text also in frame is intentionally excluded per Lyca's request; if it gets recognized anyway it will show up as extra characters in `actual` and lower the raw similarity score without indicating an OCR quality problem."
     }
   ]
 }
