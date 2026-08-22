@@ -11,7 +11,7 @@
  */
 
 const { createProfile, normalizeProfile, PROFILE_SCHEMA_VERSION } = require('./profile-schema');
-const { migrateProfiles, seedDeeplCustomInstructions } = require('./profile-migrations');
+const { migrateProfiles, seedDeeplCustomInstructions, seedDeeplFormality } = require('./profile-migrations');
 
 const DEFAULT_PROFILE_NAME = 'Por Defecto';
 
@@ -219,6 +219,13 @@ class ProfileStore {
       profiles = result.profiles;
       changed = changed || result.changed;
       currentVersion = 2;
+    }
+
+    if (currentVersion < 3) {
+      const result = seedDeeplFormality(profiles, settings.deeplFormality);
+      profiles = result.profiles;
+      changed = changed || result.changed;
+      currentVersion = 3;
     }
 
     const toWrite = {

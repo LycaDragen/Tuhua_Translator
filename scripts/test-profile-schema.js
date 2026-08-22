@@ -48,6 +48,9 @@ const EXPECTED_FIELDS = [
   // v3.13.80: DeepL custom_instructions, scoped per-game for the same
   // reason as deeplGlossaryId two lines up.
   'deeplCustomInstructions',
+  // v3.13.80: added on Lyca's explicit request after the instructions
+  // scoping above — a VN's register is exactly as game-specific.
+  'deeplFormality',
   'glossary', 'hook', 'cover', 'history'
 ].sort();
 
@@ -227,7 +230,7 @@ check('round-trip-identity-over-scoped-subset', () => {
   return { pass, actual: roundTripped, expected: original };
 });
 
-check('schema-version-is-2', () => ({ pass: PROFILE_SCHEMA_VERSION === 2 }));
+check('schema-version-is-3', () => ({ pass: PROFILE_SCHEMA_VERSION === 3 }));
 
 // ─── v3.13.58 (Fase 3): llmProvider* fields ─────────────────────────────
 check('llm-provider-keys-is-promoted-to-global-not-scoped', () => {
@@ -276,6 +279,16 @@ check('deeplCustomInstructions-defaults-to-empty-array', () => {
   const p = createProfile({ name: 'Test' });
   return { pass: Array.isArray(p.deeplCustomInstructions) && p.deeplCustomInstructions.length === 0, actual: p.deeplCustomInstructions };
 }, 'Empty means "no per-game override" — the DeepL engine falls back to its own DEFAULT_INSTRUCTIONS when the effective list is empty, not to silence.');
+
+check('deeplFormality-is-profile-scoped', () => {
+  const pass = PROFILE_SCOPED_SETTING_KEYS.includes('deeplFormality');
+  return { pass };
+}, "v3.13.80, Lyca's explicit request: a VN's register (formal vs. informal) is exactly as game-specific as its glossary or instructions. Verified against DeepL's real API that formality is genuinely honored on this Free-plan account.");
+
+check('deeplFormality-defaults-to-empty-string', () => {
+  const p = createProfile({ name: 'Test' });
+  return { pass: p.deeplFormality === '', actual: p.deeplFormality };
+}, "'' means \"no per-game override yet\" — NOT DeepL's own 'default' value, which is itself a meaningful, distinct choice. deepl.js's setFormality() already treats '' as 'prefer_more'.");
 
 check('deeplGlossarySync-defaults-to-null', () => {
   const p = createProfile({ name: 'Test' });

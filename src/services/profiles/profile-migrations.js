@@ -233,6 +233,39 @@ function seedDeeplCustomInstructions(profiles, globalCustomInstructions) {
   return { profiles: seeded, changed };
 }
 
+/**
+ * Migration 2 -> 3 — pure, additive-only, same shape as
+ * seedDeeplCustomInstructions() just above (see that doc comment for the
+ * full rationale — this is the same problem, for `deeplFormality` instead
+ * of the instructions array). Seeds every profile's new `deeplFormality`
+ * from the CURRENT global `deeplFormality`, so promoting it to
+ * profile-scoped (Lyca's explicit request, same session as the
+ * instructions scoping) doesn't silently reset an already-tuned register
+ * back to a blank default the next time a profile loads.
+ *
+ * "Already has a value" means a non-empty string, not array length —
+ * `''` is the only sentinel for "no per-game override yet" (see
+ * profile-schema.js's createProfile() comment on this field). Idempotent:
+ * a profile that already carries a non-empty deeplFormality is left
+ * untouched. Always leaves the field present as a string, even when
+ * there's nothing to seed, for the same validateProfile() reason as the
+ * instructions field.
+ */
+function seedDeeplFormality(profiles, globalFormality) {
+  const globalValue = typeof globalFormality === 'string' ? globalFormality : '';
+  let changed = false;
+  const seeded = profiles.map((p) => {
+    const existing = typeof p.deeplFormality === 'string' ? p.deeplFormality : '';
+    if (existing !== '') return p;
+    if (globalValue === '') {
+      return typeof p.deeplFormality === 'string' ? p : { ...p, deeplFormality: '' };
+    }
+    changed = true;
+    return { ...p, deeplFormality: globalValue };
+  });
+  return { profiles: seeded, changed };
+}
+
 module.exports = {
   PROMOTABLE_CREDENTIAL_KEYS,
   DEAD_SETTING_KEYS,
@@ -241,5 +274,6 @@ module.exports = {
   glossaryEntryKey,
   maskSecret,
   migrateProfiles,
-  seedDeeplCustomInstructions
+  seedDeeplCustomInstructions,
+  seedDeeplFormality
 };

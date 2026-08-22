@@ -284,20 +284,28 @@
                     : '';
             updateDeepLInstructionsCount();
             updateDeepLInstructionsUI();
+            // v3.13.80: formality is profile-scoped now too (Lyca's explicit
+            // request) — same fix as deeplCustomInstructions just above, and
+            // for the identical reason: this used to live inside the
+            // DeepL-only branch below, so switching to a profile whose own
+            // `engine` isn't 'deepl' skipped it entirely and left the
+            // dropdown showing the PREVIOUS profile's formality. Must always
+            // run. '' (a blank/unseeded profile) falls back to 'prefer_more'
+            // for display, matching deepl.js's setFormality() fallback — but
+            // that fallback is NOT written back to the profile just for
+            // being displayed; only the legacy 'more'/'less' string
+            // migration is persisted, exactly as before.
+            {
+                let formality = settings.deeplFormality;
+                if (formality === 'more') formality = 'prefer_more';
+                if (formality === 'less') formality = 'prefer_less';
+                document.getElementById('deepl-formality').value = formality || 'prefer_more';
+                if (settings.deeplFormality && formality !== settings.deeplFormality) {
+                    api.saveSettings({ deeplFormality: formality });
+                }
+            }
             if (savedEngine === 'deepl') {
                 document.getElementById('api-key').value = engineApiKeys.deepl || '';
-                // v3.11.23: Restore DeepL formality setting
-                // v3.11.29: Migrate removed strict options
-                if (settings.deeplFormality) {
-                    let formality = settings.deeplFormality;
-                    if (formality === 'more') formality = 'prefer_more';
-                    if (formality === 'less') formality = 'prefer_less';
-                    document.getElementById('deepl-formality').value = formality;
-                    // Persist migrated value
-                    if (formality !== settings.deeplFormality) {
-                        api.saveSettings({ deeplFormality: formality });
-                    }
-                }
                 // v3.11.29: Set initial placeholder based on UI language
                 updateDeepLInstructionsPlaceholder();
                 // v3.11.28: Fetch language features for dynamic UI

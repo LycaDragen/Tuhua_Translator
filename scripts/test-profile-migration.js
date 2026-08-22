@@ -17,7 +17,7 @@
  *   node scripts/test-profile-migration.js --quiet
  */
 const path = require('path');
-const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions } =
+const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions, seedDeeplFormality } =
   require(path.join('..', 'src', 'services', 'profiles', 'profile-migrations.js'));
 const ProfileStore = require(path.join('..', 'src', 'services', 'profiles', 'profile-store.js'));
 const { PROFILE_SCHEMA_VERSION, PROMOTED_TO_GLOBAL_KEYS } =
@@ -313,6 +313,31 @@ check('seed-deepl-custom-instructions-no-op-when-global-empty', () => {
   return { pass, actual: seeded[0].deeplCustomInstructions };
 }, 'A user who never wrote global instructions has nothing to preserve — the profile stays [], and the DeepL engine\'s own DEFAULT_INSTRUCTIONS fallback applies exactly as it did before this field existed.');
 
+// ─── v2 -> v3: seedDeeplFormality (pure function) ──────────────────────
+// v3.13.80, same day: deeplFormality became profile-scoped too, on Lyca's
+// explicit request after the instructions scoping above. Same shape of
+// step, same reason to exist — see seedDeeplCustomInstructions above.
+check('seed-deepl-formality-fills-empty-profiles-from-global', () => {
+  const profiles = [v1Profile({ name: 'A' }), v1Profile({ name: 'B' })];
+  const { profiles: seeded, changed } = seedDeeplFormality(profiles, 'prefer_more');
+  const pass = changed === true && seeded.every((p) => p.deeplFormality === 'prefer_more');
+  return { pass, actual: seeded.map((p) => p.deeplFormality) };
+}, 'Without this seed, the first load-profile after v3.13.80 ships would overwrite the user\'s already-tuned global formality with the new field\'s \'\' default.');
+
+check('seed-deepl-formality-is-idempotent-on-non-empty-profile', () => {
+  const profiles = [v1Profile({ name: 'A', deeplFormality: 'prefer_less' })];
+  const { profiles: seeded, changed } = seedDeeplFormality(profiles, 'prefer_more');
+  const pass = changed === false && seeded[0].deeplFormality === 'prefer_less';
+  return { pass, actual: seeded[0].deeplFormality };
+}, 'A profile that already has its own formality (re-run, or created after the field existed) is never overwritten by a global value — only a genuinely-unset (\'\') profile gets seeded.');
+
+check('seed-deepl-formality-no-op-when-global-empty', () => {
+  const profiles = [v1Profile({ name: 'A' })];
+  const { profiles: seeded, changed } = seedDeeplFormality(profiles, '');
+  const pass = changed === false && seeded[0].deeplFormality === '';
+  return { pass, actual: seeded[0].deeplFormality };
+}, "Global formality is never really empty in practice (main/index.js defaults it to 'prefer_more'), but the function must still no-op cleanly if it somehow is.");
+
 // ─── ProfileStore#migrate() stepping through an already-v1 store ──────
 check('migrate-from-v1-only-seeds-does-not-resplit-glossary', () => {
   // The real risk this guards: re-running the FULL v0->v1 migrateProfiles
@@ -337,6 +362,30 @@ check('migrate-from-v1-only-seeds-does-not-resplit-glossary', () => {
   const pass = !!nekopara && nekopara.glossary.length === 1 && nekopara.glossary[0].source === 'Vanilla';
   return { pass, actual: nekopara.glossary };
 }, 'An already-v1 store must only run the v1->v2 seed step — re-running the v0 glossary split here would be a real regression, not a harmless no-op.');
+
+check('migrate-from-v2-only-seeds-formality-does-not-reseed-instructions', () => {
+  // Mirrors the v1-stepping test above, one version later: a store that
+  // already went through the v1->v2 instructions seed (real content on the
+  // profile) must not have that content clobbered by re-running the v1->v2
+  // step again — only v2->v3 (formality) should run.
+  const alreadySeededInstructions = ['Keep character names untranslated'];
+  const store = createFakeStore({
+    profiles: [v1Profile({ name: 'Nekopara', deeplCustomInstructions: alreadySeededInstructions })],
+    activeProfile: 'Nekopara',
+    profilesSchemaVersion: 2,
+    // Deliberately different from what's already on the profile — if the
+    // v1->v2 step re-ran, this is what it would incorrectly overwrite with.
+    deeplCustomInstructions: ['A DIFFERENT global value that must not leak in'],
+    deeplFormality: 'prefer_less'
+  });
+  const ps = new ProfileStore(store);
+  ps.migrate([]);
+  const nekopara = ps.getById('uuid-Nekopara');
+  const pass = !!nekopara
+    && JSON.stringify(nekopara.deeplCustomInstructions) === JSON.stringify(alreadySeededInstructions)
+    && nekopara.deeplFormality === 'prefer_less';
+  return { pass, actual: nekopara };
+}, 'An already-v2 store must only run the v2->v3 formality seed — re-running the v1->v2 instructions seed here would be a real regression (it would still no-op given its own idempotency check, but the version-gate is what should actually prevent it from running at all).');
 
 check('migrate-from-v1-seeds-existing-profiles-and-bumps-version', () => {
   const store = createFakeStore({

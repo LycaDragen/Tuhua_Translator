@@ -21,12 +21,13 @@
 
 const crypto = require('crypto');
 
-// v3.13.80: bumped 1 -> 2 for the deeplCustomInstructions seed step — see
-// profile-migrations.js's seedDeeplCustomInstructions() and profile-store.js's
-// migrate(), which now steps through versions instead of gating on a single
-// all-or-nothing check, so an already-v1 store doesn't re-run the v0->v1
-// credential-promotion/glossary-split logic a second time.
-const PROFILE_SCHEMA_VERSION = 2;
+// v3.13.80: bumped 1 -> 2 for the deeplCustomInstructions seed step, then
+// 2 -> 3 for deeplFormality's — see profile-migrations.js's
+// seedDeeplCustomInstructions()/seedDeeplFormality() and profile-store.js's
+// migrate(), which steps through versions instead of gating on a single
+// all-or-nothing check, so an already-migrated store doesn't re-run earlier
+// steps a second time.
+const PROFILE_SCHEMA_VERSION = 3;
 
 // The only fields copied INTO global settings when a profile activates,
 // and copied OUT of global settings when a profile is saved. Both
@@ -85,10 +86,14 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   // preference. Verified against DeepL's real API (Free tier included,
   // 2026-08-22) that custom_instructions is actually honored — DeepL's own
   // docs claim it's Pro-only, which is wrong, at least for this account.
-  // deeplFormality stays global on purpose: it's a single fixed axis with
-  // existing UI users may have already tuned, not free text — weaker case
-  // for per-game scoping than open-ended instructions.
-  'deeplCustomInstructions'
+  'deeplCustomInstructions',
+  // v3.13.80: added on Lyca's explicit request, reversing the "stays
+  // global" call made earlier the same session — a VN's register (formal
+  // "usted" vs informal "tú") is exactly as game-specific as its glossary
+  // or custom instructions (a period piece vs. casual dialogue among
+  // friends). Verified against the real API that `formality` is genuinely
+  // honored on this Free-plan account (Spanish is in FORMALITY_LANGUAGES).
+  'deeplFormality'
 ];
 
 // Deliberately excluded from the profile schema — user/machine-level, not
@@ -166,6 +171,12 @@ function createProfile(overrides = {}) {
     // the DeepL engine falls back to" (the user's still-global instructions
     // during the migration window, then DEFAULT_INSTRUCTIONS once seeded).
     deeplCustomInstructions: Array.isArray(overrides.deeplCustomInstructions) ? overrides.deeplCustomInstructions : [],
+    // v3.13.80: '' means "no per-game override yet" — same semantics as
+    // deeplCustomInstructions above, not DeepL's own 'default' value (which
+    // is itself a meaningful, distinct choice). deepl.js's setFormality()
+    // already treats a falsy value as 'prefer_more', so an unseeded blank
+    // profile behaves exactly like the pre-scoping global default did.
+    deeplFormality: overrides.deeplFormality || '',
 
     // v3.13.6x (Fase 6): internal bookkeeping for the auto-sync path
     // (deepl-glossary-sync.js) — {glossaryId, hash, sourceLang, targetLang}
