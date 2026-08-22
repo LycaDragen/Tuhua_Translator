@@ -21,7 +21,12 @@
 
 const crypto = require('crypto');
 
-const PROFILE_SCHEMA_VERSION = 1;
+// v3.13.80: bumped 1 -> 2 for the deeplCustomInstructions seed step — see
+// profile-migrations.js's seedDeeplCustomInstructions() and profile-store.js's
+// migrate(), which now steps through versions instead of gating on a single
+// all-or-nothing check, so an already-v1 store doesn't re-run the v0->v1
+// credential-promotion/glossary-split logic a second time.
+const PROFILE_SCHEMA_VERSION = 2;
 
 // The only fields copied INTO global settings when a profile activates,
 // and copied OUT of global settings when a profile is saved. Both
@@ -72,7 +77,18 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   // materially different from the ephemeral text of a normal translation
   // request.
   'deeplGlossaryId',
-  'deeplAutoGlossary'
+  'deeplAutoGlossary',
+  // v3.13.80: same reasoning as deeplGlossaryId/deeplAutoGlossary above,
+  // word for word — the custom_instructions a request should send are tied
+  // to which GAME is active ("keep this VN's invented terms untranslated",
+  // "use archaic formal Spanish for this period piece"), not a global user
+  // preference. Verified against DeepL's real API (Free tier included,
+  // 2026-08-22) that custom_instructions is actually honored — DeepL's own
+  // docs claim it's Pro-only, which is wrong, at least for this account.
+  // deeplFormality stays global on purpose: it's a single fixed axis with
+  // existing UI users may have already tuned, not free text — weaker case
+  // for per-game scoping than open-ended instructions.
+  'deeplCustomInstructions'
 ];
 
 // Deliberately excluded from the profile schema — user/machine-level, not
@@ -146,6 +162,10 @@ function createProfile(overrides = {}) {
     // auto-synced one if deeplAutoGlossary is on, otherwise none".
     deeplGlossaryId: overrides.deeplGlossaryId || '',
     deeplAutoGlossary: overrides.deeplAutoGlossary === true,
+    // v3.13.80: '' / [] both mean "no per-game instructions — use whatever
+    // the DeepL engine falls back to" (the user's still-global instructions
+    // during the migration window, then DEFAULT_INSTRUCTIONS once seeded).
+    deeplCustomInstructions: Array.isArray(overrides.deeplCustomInstructions) ? overrides.deeplCustomInstructions : [],
 
     // v3.13.6x (Fase 6): internal bookkeeping for the auto-sync path
     // (deepl-glossary-sync.js) — {glossaryId, hash, sourceLang, targetLang}

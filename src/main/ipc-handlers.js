@@ -1324,43 +1324,6 @@ class IpcHandlers {
       }
     });
 
-    // v3.11.28: Fetch DeepL Translation Memories from user's account
-    ipcMain.handle('deepl-fetch-translation-memories', async (event, { apiKey }) => {
-      if (!apiKey || typeof apiKey !== 'string') {
-        return { success: false, error: 'API key required', memories: [] };
-      }
-      try {
-        const isFree = apiKey.endsWith(':fx');
-        const baseUrl = isFree
-          ? 'https://api-free.deepl.com/v3/translation_memories'
-          : 'https://api.deepl.com/v3/translation_memories';
-
-        const response = await axios.get(baseUrl, {
-          timeout: 8000,
-          headers: { 'Authorization': `DeepL-Auth-Key ${apiKey}` }
-        });
-
-        if (response.data && response.data.translation_memories) {
-          return {
-            success: true,
-            memories: response.data.translation_memories.map(tm => ({
-              id: tm.translation_memory_id,
-              name: tm.name,
-              sourceLanguage: tm.source_language,
-              targetLanguages: tm.target_languages,
-              segmentCount: tm.segment_count
-            }))
-          };
-        }
-        return { success: false, error: 'No translation memories found', memories: [] };
-      } catch (err) {
-        const status = err.response?.status;
-        const msg = err.response?.data?.message || err.message;
-        console.warn(`[DeepL] /v3/translation_memories failed: HTTP ${status || 'N/A'} — ${msg}`);
-        return { success: false, error: `HTTP ${status || 'N/A'}: ${msg}`, memories: [] };
-      }
-    });
-
     // ===== Connection Test =====
     ipcMain.handle('test-connection', async (event, { host, port }) => {
       return new Promise((resolve) => {
@@ -2340,7 +2303,7 @@ class IpcHandlers {
       // v3.11.27: VNDB glossary import
       'vndb-search', 'vndb-import',
       // v3.11.28: DeepL feature detection
-      'deepl-fetch-features', 'deepl-fetch-translation-memories',
+      'deepl-fetch-features',
       // v3.11.30: Regex text filter
       'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
       'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',

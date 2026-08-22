@@ -11,7 +11,7 @@
  */
 
 const { createProfile, normalizeProfile, PROFILE_SCHEMA_VERSION } = require('./profile-schema');
-const { migrateProfiles } = require('./profile-migrations');
+const { migrateProfiles, seedDeeplCustomInstructions } = require('./profile-migrations');
 
 const DEFAULT_PROFILE_NAME = 'Por Defecto';
 
@@ -167,40 +167,71 @@ class ProfileStore {
   }
 
   /**
-   * One-time schema migration 0 -> 1, gated by `profilesSchemaVersion`.
-   * Idempotent: a store already at PROFILE_SCHEMA_VERSION is left
-   * untouched (returns { ran: false }) rather than re-running the pure
-   * migration and re-writing an identical backup.
+   * One-time schema migration, gated by `profilesSchemaVersion` and run
+   * STEP BY STEP through intermediate versions — not a single
+   * all-or-nothing gate — so a store already sitting at v1 (everyone who
+   * migrated before v3.13.80) only runs the new v1->v2 step, instead of
+   * re-running the v0->v1 credential-promotion/glossary-layer-split logic
+   * a second time against data that has moved on since (e.g. the global
+   * glossary has grown, which would make splitGlossaryLayer() strip MORE
+   * profile-only entries than it did the first time — a real regression,
+   * not idempotent no-op).
    *
-   * The backup and the migrated data land in ONE store.set() call —
-   * verified against the real electron-store package that set(object)
-   * only touches the keys present in it (leaves every other setting
-   * alone), so this does not require pre-spreading store.get() first.
-   * Two separate writes would leave a window where credentials are
-   * already stripped from profiles but not yet promoted to global.
+   * Idempotent: a store already at PROFILE_SCHEMA_VERSION is left
+   * untouched (returns { ran: false }). Each step is itself safe to
+   * re-run — migrateProfiles() only fires for genuinely-v0 data,
+   * seedDeeplCustomInstructions() only fills profiles with an empty
+   * `deeplCustomInstructions`.
+   *
+   * The whole result lands in ONE store.set() call — verified against the
+   * real electron-store package that set(object) only touches the keys
+   * present in it (leaves every other setting alone), so this does not
+   * require pre-spreading store.get() first. A single write avoids a
+   * window where profiles reflect one step but not the other.
    */
   migrate(globalGlossaryEntries = []) {
-    const currentVersion = this.store.get('profilesSchemaVersion', 0);
+    let currentVersion = this.store.get('profilesSchemaVersion', 0);
     if (currentVersion >= PROFILE_SCHEMA_VERSION) {
       return { ran: false };
     }
 
-    const profiles = this.store.get('profiles', []);
+    let profiles = this.store.get('profiles', []);
     const activeProfile = this.store.get('activeProfile', DEFAULT_PROFILE_NAME);
-    const settings = this.store.get();
+    let settings = this.store.get();
+    let activeProfileId = this.store.get('activeProfileId', null);
+    let backup;
+    let report = { credentialConflicts: [], targetLangConflict: null, textractorPortConflict: null };
+    let changed = false;
 
-    const result = migrateProfiles({ profiles, settings, globalGlossaryEntries, activeProfile });
+    if (currentVersion < 1) {
+      const result = migrateProfiles({ profiles, settings, globalGlossaryEntries, activeProfile });
+      profiles = result.profiles;
+      settings = result.settings;
+      activeProfileId = result.activeProfileId;
+      backup = result.backup;
+      report = result.report;
+      changed = changed || result.changed;
+      currentVersion = 1;
+    }
 
-    this.store.set({
-      ...result.settings,
-      profiles: result.profiles,
+    if (currentVersion < 2) {
+      const result = seedDeeplCustomInstructions(profiles, settings.deeplCustomInstructions);
+      profiles = result.profiles;
+      changed = changed || result.changed;
+      currentVersion = 2;
+    }
+
+    const toWrite = {
+      ...settings,
+      profiles,
       activeProfile,
-      activeProfileId: result.activeProfileId,
-      profilesBackupV0: result.backup,
+      activeProfileId,
       profilesSchemaVersion: PROFILE_SCHEMA_VERSION
-    });
+    };
+    if (backup) toWrite.profilesBackupV0 = backup;
+    this.store.set(toWrite);
 
-    return { ran: true, ...result };
+    return { ran: true, changed, report, profiles, activeProfileId };
   }
 }
 

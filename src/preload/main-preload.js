@@ -59,7 +59,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   // v3.11.27: VNDB glossary import
   'vndb-search', 'vndb-import',
   // v3.11.28: DeepL feature detection
-  'deepl-fetch-features', 'deepl-fetch-translation-memories',
+  'deepl-fetch-features',
   // v3.11.30: Regex text filter
   'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
   'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',
@@ -355,10 +355,6 @@ const api = {
   deeplFetchFeatures: (apiKey) => {
     if (typeof apiKey !== 'string') throw new Error('Invalid API key');
     return secureInvoke('deepl-fetch-features', { apiKey });
-  },
-  deeplFetchTranslationMemories: (apiKey) => {
-    if (typeof apiKey !== 'string') throw new Error('Invalid API key');
-    return secureInvoke('deepl-fetch-translation-memories', { apiKey });
   },
 
   // v3.11.30: Regex text filter

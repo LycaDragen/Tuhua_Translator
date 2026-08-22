@@ -350,11 +350,22 @@ class WindowManager {
    */
   showOutputOverlay() {
     if (this.outputOverlay && !this.outputOverlay.isDestroyed()) {
+      // v3.13.80: only call .show() when actually hidden. This is called
+      // unconditionally at the end of EVERY save-settings request while
+      // Tuhua is active (see ipc-handlers.js's unified overlay-visibility
+      // block) — including autosave-per-keystroke fields like DeepL custom
+      // instructions. .show() re-activates the window every time it runs,
+      // which steals OS keyboard focus from whatever the user is typing
+      // into on Windows. Real bug found live: typing in "Instrucciones
+      // Personalizadas" lost focus after every character, only while
+      // active (never while paused, since the paused branch calls
+      // hideOutputOverlay() instead). setAlwaysOnTop stays unconditional —
+      // it's a z-order op, not a focus op, and re-asserting it defends
+      // against another window stealing the on-top slot.
       if (!this.outputOverlay.isVisible()) {
         console.log('[WindowManager] Showing output overlay');
+        this.outputOverlay.show();
       }
-      this.outputOverlay.show();
-      // v3.13.04: Re-assert alwaysOnTop when showing
       this.outputOverlay.setAlwaysOnTop(true, 'screen-saver');
     }
   }
