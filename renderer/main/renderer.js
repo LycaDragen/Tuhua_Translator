@@ -2581,6 +2581,15 @@
                     return;
                 }
                 nameInput.value = '';
+                // v3.13.80: switch to the new profile immediately — creating
+                // one and staying on the old one felt unnatural, and was the
+                // exact setup for the deeplCustomInstructions scoping bug
+                // (typing into a field that's still bound to the profile you
+                // never left). loadProfile() switches + re-hydrates the
+                // settings panel; loadProfiles() after it refreshes the card
+                // list so the new card shows as active (loadProfile() alone
+                // doesn't re-render the cards).
+                await loadProfile(result.profile.id);
                 await loadProfiles();
             } catch (e) {
                 // v3.13.40-fix: was silently swallowing exceptions before —
