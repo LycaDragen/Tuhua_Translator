@@ -67,6 +67,76 @@ const LANG_MAP = {
   'auto': 'eng'  // Default to English for OCR — more universal, cleaner results
 };
 
+/**
+ * v3.13.77 (Stage 4, OCR-refinement round): BT.601 luma grayscale, in place,
+ * over a BGRA bitmap (electron's nativeImage.toBitmap() format — B,G,R,A
+ * byte order). Alpha is left untouched. Both PaddleOCR's DB detection head
+ * and Tesseract's LSTM do their own internal normalization, so this is
+ * expected to be close to a no-op quality-wise — it mainly matters for
+ * making the `grayscale: true` preprocessing option (previously a
+ * declared-but-inert flag with zero code behind it) actually do what it
+ * claims. Module-level, not a class method: it has no dependency on OcrService
+ * state, and scripts/test-ocr-images.js can reuse it directly if needed.
+ */
+function grayscaleBGRA(bitmap) {
+  for (let i = 0; i < bitmap.length; i += 4) {
+    const b = bitmap[i];
+    const g = bitmap[i + 1];
+    const r = bitmap[i + 2];
+    const luma = Math.round(0.114 * b + 0.587 * g + 0.299 * r);
+    bitmap[i] = luma;
+    bitmap[i + 1] = luma;
+    bitmap[i + 2] = luma;
+  }
+}
+
+/**
+ * v3.13.77 (Stage 4, OCR-refinement round): Otsu's method — finds the
+ * threshold that maximizes between-class variance of an ALREADY-GRAYSCALE
+ * BGRA bitmap (call grayscaleBGRA() first), then binarizes in place (0 or
+ * 255 per pixel). Off by default (`otsuThreshold: false`) — real VN
+ * dialogue text with an outline or drop shadow loses those soft edges to a
+ * hard binarization; kept as an explicit opt-in for games whose text is
+ * flat-colored with no outline, where it may help on a noisy background.
+ */
+function otsuThresholdBGRA(bitmap) {
+  const histogram = new Array(256).fill(0);
+  const pixelCount = bitmap.length / 4;
+  for (let i = 0; i < bitmap.length; i += 4) {
+    histogram[bitmap[i]]++; // already grayscale — B/G/R are identical
+  }
+
+  let sumAll = 0;
+  for (let t = 0; t < 256; t++) sumAll += t * histogram[t];
+
+  let sumB = 0;
+  let weightB = 0;
+  let maxVariance = 0;
+  let threshold = 128;
+  for (let t = 0; t < 256; t++) {
+    weightB += histogram[t];
+    if (weightB === 0) continue;
+    const weightF = pixelCount - weightB;
+    if (weightF === 0) break;
+
+    sumB += t * histogram[t];
+    const meanB = sumB / weightB;
+    const meanF = (sumAll - sumB) / weightF;
+    const variance = weightB * weightF * (meanB - meanF) * (meanB - meanF);
+    if (variance > maxVariance) {
+      maxVariance = variance;
+      threshold = t;
+    }
+  }
+
+  for (let i = 0; i < bitmap.length; i += 4) {
+    const v = bitmap[i] >= threshold ? 255 : 0;
+    bitmap[i] = v;
+    bitmap[i + 1] = v;
+    bitmap[i + 2] = v;
+  }
+}
+
 class OcrService extends EventEmitter {
   constructor() {
     super();
@@ -79,19 +149,26 @@ class OcrService extends EventEmitter {
     this._isAutoCapturing = false;
     this._lastImageData = null;
     this._changeThreshold = 5;
-    this._preprocessing = {
-      grayscale: true,
-      threshold: false,
-      thresholdValue: 128,
-      contrast: false,
-      contrastValue: 1.5
+    // v3.13.77 (Stage 4, OCR-refinement round): replaces the old
+    // `_preprocessing` shape ({grayscale, threshold, thresholdValue,
+    // contrast, contrastValue}), which was almost entirely cosmetic —
+    // grayscale/contrast had zero code branches (pure no-ops), and
+    // `threshold` set `tessedit_threshold_value`, which isn't a real
+    // Tesseract variable name. These are the options that actually do
+    // something now, tuned by sweeping scripts/test-ocr-images.js
+    // --tess-upscale=/--tess-psm= against the bench (see the plan for the
+    // grid results): upscaleFactor resamples the crop before Tesseract sees
+    // it, psm sets tessedit_pageseg_mode, otsuThreshold applies a real
+    // Otsu binarization (off by default — real VN text with outline/
+    // antialiasing tends to lose strokes to it; only worth enabling if a
+    // specific game's bench numbers ask for it).
+    this._tesseractOptions = {
+      upscaleFactor: 1.0,
+      psm: '6', // Tesseract's own compiled default (SINGLE_BLOCK)
+      otsuThreshold: false
     };
+    this._preprocessing = { grayscale: true };
     this._autoCaptureMs = 3500; // v3.9.9: reduced from 7000ms for faster scanning
-    // v3.13.08: Lowered from 55 to 0 — same philosophy as PaddleOCR path:
-    // the translation engine handles imperfect OCR better than no input.
-    // A 55% threshold was rejecting RPG battle text and low-quality scans.
-    // Users can override via the 'ocrMinConfidence' store key.
-    this._minConfidence = 0;
     this._initialized = false;
     this._lastEmittedText = '';
     this._captureFn = null;
@@ -234,6 +311,33 @@ class OcrService extends EventEmitter {
   }
 
   /**
+   * v3.13.77 (Stage 4, OCR-refinement round): single place to create a
+   * tesseract.js worker, used by _initializeTesseract() and by the two
+   * auto-detect re-creation sites in _maybeSwitchTesseractLangForAutoDetect().
+   * Previously each of those three call sites duplicated the same options
+   * object with no `cachePath` — tesseract.js defaults to caching
+   * traineddata under the process CWD, which on a packaged Windows install
+   * is frequently non-writable, so the ~15-30MB model silently re-downloaded
+   * every session (write failures there are caught and swallowed inside
+   * tesseract.js itself). `app.getPath('userData')` is always writable and
+   * is exactly where PaddleOCR already caches its own models
+   * (paddle-models.js), so this makes the two engines consistent.
+   * @private
+   */
+  async _createTesseractWorker(lang) {
+    const { app } = require('electron');
+    return Tesseract.createWorker(lang, 1, {
+      cachePath: app.getPath('userData'),
+      logger: (m) => {
+        if (m.status === 'recognizing text') {
+          this.emit('progress', m.progress);
+        }
+        log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
+      }
+    });
+  }
+
+  /**
    * Initialize Tesseract worker
    * @private
    */
@@ -253,14 +357,8 @@ class OcrService extends EventEmitter {
       this.emit('status', 'initializing');
       log.info(`[OCR] Initializing tesseract worker with language: ${this._language}`);
 
-      this._worker = await Tesseract.createWorker(this._language, 1, {
-        logger: (m) => {
-          if (m.status === 'recognizing text') {
-            this.emit('progress', m.progress);
-          }
-          log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
-        }
-      });
+      this._worker = await this._createTesseractWorker(this._language);
+      await this._applyTesseractParameters();
 
       this._isReady = true;
       this._initialized = true;
@@ -375,14 +473,31 @@ class OcrService extends EventEmitter {
     this.emit('status', 'recognizing');
 
     try {
+      // v3.13.77 (Stage 4, OCR-refinement round): _preprocessImage() now does
+      // real pixel work (upscale, BT.601 grayscale, optional Otsu) instead of
+      // being a no-op gated on flags that had no code behind them. Only skip
+      // it entirely when every knob is at its true no-op setting, so the
+      // common case (grayscale on, no upscale) still avoids decode/reencode
+      // when nothing would change.
       let processedImage = imageBuffer;
-      if (this._preprocessing.grayscale || this._preprocessing.threshold || this._preprocessing.contrast) {
+      if (this._tesseractOptions.upscaleFactor !== 1.0 || this._preprocessing.grayscale || this._tesseractOptions.otsuThreshold) {
         processedImage = await this._preprocessImage(imageBuffer);
       }
 
-      const result = await this._worker.recognize(processedImage);
+      // v3.13.77: request only {text, blocks} instead of tesseract.js's
+      // default {blocks, text, hocr, tsv} — hocr/tsv are never read anywhere
+      // in this codebase, and generating them costs real time on every
+      // ~3.5s auto-capture tick. `blocks` is what exposes word-level
+      // confidence (result.data.words doesn't actually exist despite the
+      // published .d.ts claiming it does — verified against the shipped
+      // 5.1.1 source in node_modules/tesseract.js/src/worker-script/utils/
+      // dump.js, which only ever populates `blocks`; words/lines/paragraphs
+      // must be walked via blocks[].paragraphs[].lines[].words[]).
+      const recognizeOutput = { text: true, blocks: true };
+      const result = await this._worker.recognize(processedImage, {}, recognizeOutput);
       let rawText = result.data.text.trim();
       let confidence = result.data.confidence;
+      let wordLines = this._extractTesseractLines(result.data.blocks);
 
       // v3.13.10: Auto-detect language switching for Tesseract.
       // When sourceLang is 'auto', Tesseract defaults to English (eng) which
@@ -395,15 +510,37 @@ class OcrService extends EventEmitter {
         if (switched) {
           // Re-recognize with the new language model
           try {
-            const reResult = await this._worker.recognize(processedImage);
+            const reResult = await this._worker.recognize(processedImage, {}, recognizeOutput);
             rawText = reResult.data.text.trim();
             confidence = reResult.data.confidence;
+            wordLines = this._extractTesseractLines(reResult.data.blocks);
             log.info(`[OCR] Re-recognized with ${this._language}: "${rawText.substring(0, 60)}" (${confidence.toFixed(1)}%)`);
           } catch (reErr) {
             log.warn(`[OCR] Re-recognition with ${this._language} failed: ${reErr.message}`);
           }
         }
       }
+
+      // v3.13.77 (Stage 4, OCR-refinement round): drop low-confidence
+      // outlier WORDS (garbage from UI clutter caught by an oversized
+      // capture region) before cleaning/emitting, using a threshold relative
+      // to this run's own mean word confidence — see
+      // _filterTesseractWordsByConfidence()'s docstring for why relative,
+      // not absolute.
+      const wordFilterResult = this._filterTesseractWordsByConfidence(wordLines);
+      if (wordFilterResult) {
+        log.info(`[OCR] Word confidence filter: "${rawText.substring(0, 40)}" -> "${wordFilterResult.text.substring(0, 40)}"`);
+        rawText = wordFilterResult.text;
+        confidence = wordFilterResult.confidence;
+      }
+
+      // v3.13.77 (Stage 4, OCR-refinement round): diagnostic stats for the
+      // bench's --tess-upscale=/--tess-psm= sweep (median word-line height,
+      // kept-vs-dropped confidence separation) — computed on the RAW word
+      // list regardless of whether the filter above actually changed
+      // anything, so the sweep can see the filter's discrimination even on
+      // inputs where the "never empty everything" guard left it a no-op.
+      const wordStats = this._computeTesseractWordStats(wordLines);
 
       const text = this._cleanOcrText(rawText);
 
@@ -422,7 +559,7 @@ class OcrService extends EventEmitter {
       if (!minCharsMet) {
         log.info(`[OCR] Skipping empty/meaningless result (${confidence.toFixed(1)}%, ${text.length} chars, ${cjkCount} CJK, ${latinLetterCount} Latin): "${text.substring(0, 60)}"`);
         this.emit('status', 'ready');
-        return { text: '', confidence };
+        return { text: '', confidence, wordStats };
       }
 
       // Log low confidence but still pass through (same as PaddleOCR path)
@@ -445,7 +582,7 @@ class OcrService extends EventEmitter {
       if (!hasCJKChars && this._isMostlyGarbled(text)) {
         log.info(`[OCR] Skipping garbled text (high garbled-word ratio): "${text.substring(0, 60)}"`);
         this.emit('status', 'ready');
-        return { text: '', confidence };
+        return { text: '', confidence, wordStats };
       }
 
       // v3.9.8: SIMILARITY-BASED DEDUP — don't re-emit text that is >80%
@@ -457,7 +594,7 @@ class OcrService extends EventEmitter {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR] Similar text skipped (${(similarity * 100).toFixed(0)}% similar to last): "${text.substring(0, 50)}"`);
         this.emit('status', 'ready');
-        return { text, confidence };
+        return { text, confidence, wordStats };
       }
 
       this._lastEmittedText = text;
@@ -465,7 +602,7 @@ class OcrService extends EventEmitter {
       this.emit('text', text, { force: !!options.force });
 
       this.emit('status', 'ready');
-      return { text, confidence };
+      return { text, confidence, wordStats };
     } catch (err) {
       log.error('[OCR] Recognition error:', err.message);
       this.emit('error', err);
@@ -487,25 +624,47 @@ class OcrService extends EventEmitter {
     await this.initialize(lang);
   }
 
-  setPreprocessing(options) {
-    this._preprocessing = { ...this._preprocessing, ...options };
-    log.info('[OCR] Preprocessing updated:', JSON.stringify(this._preprocessing));
-  }
-
   setChangeThreshold(threshold) {
     this._changeThreshold = Math.max(0, Math.min(100, threshold));
   }
 
   /**
-   * v3.13.08: Set the minimum Tesseract confidence threshold.
-   * Default is 0 (no minimum — let translation engine handle imperfect OCR).
-   * Can be raised via the 'ocrMinConfidence' store key for users who prefer
-   * stricter filtering.
-   * @param {number} threshold - Minimum confidence (0-100)
+   * v3.13.77 (Stage 4, OCR-refinement round): tune the Tesseract path's real
+   * preprocessing knobs. Test-bench-facing (scripts/test-ocr-images.js sweeps
+   * upscaleFactor x psm to pick data-backed defaults) — there is no
+   * settings-panel UI for this, matching the fact that these values are the
+   * same for every user rather than a per-user preference.
+   * @param {object} options - { upscaleFactor, psm, otsuThreshold }
    */
-  setMinConfidence(threshold) {
-    this._minConfidence = Math.max(0, Math.min(100, Number(threshold) || 0));
-    log.info(`[OCR] Min confidence set to: ${this._minConfidence}`);
+  setTesseractOptions(options) {
+    this._tesseractOptions = { ...this._tesseractOptions, ...options };
+    log.info('[OCR] Tesseract options updated:', JSON.stringify(this._tesseractOptions));
+    // Best-effort: a worker may not exist yet (applied lazily at init via
+    // _applyTesseractParameters() in _initializeTesseract()).
+    this._applyTesseractParameters().catch((err) => {
+      log.warn('[OCR] Failed to apply Tesseract options:', err.message);
+    });
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): push the current
+   * upscaleFactor/psm onto the live worker as real Tesseract variables
+   * (tessedit_pageseg_mode, user_defined_dpi). Split out from
+   * _preprocessImage() because these are worker-level parameters set once
+   * (at init, or when setTesseractOptions() changes them) — re-sending them
+   * on every single capture would cost a WASM round-trip every ~3.5s for
+   * values that essentially never change mid-session.
+   * @private
+   */
+  async _applyTesseractParameters() {
+    if (!this._worker) return;
+    await this._worker.setParameters({
+      tessedit_pageseg_mode: this._tesseractOptions.psm,
+      // v3.13.77: tell Tesseract the EFFECTIVE dpi after _preprocessImage()'s
+      // upscale, not the screen's raw ~96 DPI. A capture upscaled 2x really
+      // is closer to 192 DPI as far as the LSTM's input is concerned.
+      user_defined_dpi: String(Math.round(96 * this._tesseractOptions.upscaleFactor))
+    });
   }
 
   startAutoCapture(captureFn, intervalMs) {
@@ -572,8 +731,8 @@ class OcrService extends EventEmitter {
       sourceLang: this._sourceLang,
       autoCapturing: this.isAutoCapturing,
       preprocessing: { ...this._preprocessing },
+      tesseractOptions: { ...this._tesseractOptions },
       ocrEngine: this._ocrEngine,
-      minConfidence: this._minConfidence,  // v3.13.08: Expose current threshold
       paddleAvailable: PaddleOCREngine.isAvailable(),
       paddleStatus: this._paddleEngine.getStatus()
     };
@@ -601,22 +760,172 @@ class OcrService extends EventEmitter {
     return changePercent >= this._changeThreshold;
   }
 
-  async _preprocessImage(imageBuffer) {
-    try {
-      if (this._worker) {
-        const params = {};
-        if (this._preprocessing.threshold) {
-          params.tessedit_thresholding_method = '1';
-          params.tessedit_threshold_value = String(this._preprocessing.thresholdValue || 128);
-        }
-        if (Object.keys(params).length > 0) {
-          await this._worker.setParameters(params);
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): flatten tesseract.js's
+   * blocks[].paragraphs[].lines[].words[] tree into a flat array of lines
+   * (each still holding its own .words), for _filterTesseractWordsByConfidence().
+   * There is no shortcut — result.data.words/.lines/.paragraphs described in
+   * the package's .d.ts do not actually exist in the shipped 5.1.1 runtime
+   * (verified against worker-script/utils/dump.js); only .blocks is real.
+   * @private
+   */
+  _extractTesseractLines(blocks) {
+    const lines = [];
+    if (!blocks) return lines;
+    for (const block of blocks) {
+      for (const para of block.paragraphs || []) {
+        for (const line of para.lines || []) {
+          if (line.words && line.words.length) lines.push(line);
         }
       }
-    } catch (err) {
-      log.warn('[OCR] Preprocessing parameter error:', err.message);
     }
-    return imageBuffer;
+    return lines;
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): drop low-confidence outlier
+   * words, mirroring the relative-threshold outlier filter already used on
+   * the Paddle path (ocr-paddle.js: `threshold = avgConf * 0.25`) instead of
+   * a fixed cutoff. Tesseract's confidence is not calibrated across
+   * preprocessing configs — an aggressive upscale genuinely raises the
+   * LSTM's confidence on every word, garbage included, so a fixed absolute
+   * threshold would need re-tuning every time upscaleFactor/psm change. A
+   * threshold relative to this run's own mean confidence moves with it.
+   *
+   * Two guards, both mirrored from the Paddle version: never filter on a
+   * single word (nothing to compare against), and never let filtering empty
+   * the result — if the relative threshold would drop every word, it isn't
+   * discriminating anything useful on this input, so the caller should keep
+   * the original unfiltered text/confidence instead.
+   *
+   * A third guard, found by testing rather than anticipated by the plan:
+   * skip entirely if any word contains CJK characters. Tesseract's "word"
+   * segmentation for Chinese/Japanese/Korean does not carry the same
+   * per-word confidence semantics it does for space-separated Latin text —
+   * confirmed by reproduction against test10-low-quality.png (bench, ja),
+   * where this filter dropped 表れ (a real, meaningful part of "遅れました")
+   * as a low-confidence "outlier" relative to the rest of the line, turning
+   * a already-imperfect 80% similarity result into 60%. Mirrors the same
+   * CJK skip _isMostlyGarbled() already applies for the same underlying
+   * reason (a heuristic tuned on Latin word statistics doesn't transfer).
+   *
+   * @param {Array<{words: Array}>} lines - from _extractTesseractLines()
+   * @returns {{text: string, confidence: number}|null} null means "don't
+   *   change anything" (too few words, filtering would remove everything,
+   *   or the text contains CJK)
+   * @private
+   */
+  _filterTesseractWordsByConfidence(lines) {
+    const allWords = [];
+    for (const line of lines) {
+      for (const word of line.words) allWords.push({ ...word, _line: line });
+    }
+    if (allWords.length <= 1) return null;
+
+    const hasCJK = allWords.some(w => /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(w.text || ''));
+    if (hasCJK) return null;
+
+    const avgConf = allWords.reduce((sum, w) => sum + w.confidence, 0) / allWords.length;
+    const threshold = avgConf * 0.25;
+    const kept = allWords.filter(w => w.confidence >= threshold);
+    if (kept.length === 0 || kept.length === allWords.length) return null;
+
+    const keptTextByLine = new Map();
+    for (const w of kept) {
+      if (!keptTextByLine.has(w._line)) keptTextByLine.set(w._line, []);
+      keptTextByLine.get(w._line).push(w.text);
+    }
+    const rebuiltLines = [];
+    for (const line of lines) {
+      const words = keptTextByLine.get(line);
+      if (words && words.length) rebuiltLines.push(words.join(' '));
+    }
+
+    return {
+      text: rebuiltLines.join('\n'),
+      confidence: kept.reduce((sum, w) => sum + w.confidence, 0) / kept.length
+    };
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): diagnostic stats for
+   * scripts/test-ocr-images.js's --tess-upscale=/--tess-psm= sweep — median
+   * word-line height (to pick an upscale factor by target glyph height
+   * rather than a blind multiplier) and the same relative-threshold split
+   * used by _filterTesseractWordsByConfidence(), reported as the mean
+   * confidence of the words on each side of it. A config whose "kept" and
+   * "dropped" means move together (both rising with a bigger upscale, say)
+   * isn't actually discriminating garbage from real text — it's just
+   * inflating confidence uniformly — which the raw similarity score alone
+   * would not reveal.
+   * @private
+   */
+  _computeTesseractWordStats(lines) {
+    const words = [];
+    for (const line of lines) for (const w of line.words) words.push(w);
+    if (words.length === 0) return null;
+
+    const heights = words
+      .map(w => w.bbox.y1 - w.bbox.y0)
+      .filter(h => h > 0)
+      .sort((a, b) => a - b);
+    const medianLineHeightPx = heights.length ? heights[Math.floor(heights.length / 2)] : null;
+
+    if (words.length <= 1) {
+      return { medianLineHeightPx, meanConfidenceKept: words[0].confidence, meanConfidenceDropped: null, totalWords: 1, droppedWords: 0 };
+    }
+
+    const avgConf = words.reduce((sum, w) => sum + w.confidence, 0) / words.length;
+    const threshold = avgConf * 0.25; // same ratio as _filterTesseractWordsByConfidence()
+    const kept = words.filter(w => w.confidence >= threshold);
+    const dropped = words.filter(w => w.confidence < threshold);
+
+    return {
+      medianLineHeightPx,
+      meanConfidenceKept: kept.length ? kept.reduce((sum, w) => sum + w.confidence, 0) / kept.length : null,
+      meanConfidenceDropped: dropped.length ? dropped.reduce((sum, w) => sum + w.confidence, 0) / dropped.length : null,
+      totalWords: words.length,
+      droppedWords: dropped.length
+    };
+  }
+
+  /**
+   * v3.13.77 (Stage 4, OCR-refinement round): REAL pixel preprocessing for
+   * the Tesseract path — decode -> optional upscale -> optional grayscale ->
+   * optional Otsu binarization -> re-encode. Replaces the old version, which
+   * never touched a pixel and only (mis)set `tessedit_threshold_value`,
+   * which isn't a real Tesseract variable (Tesseract's own SetVariable call
+   * would have silently no-op'd on an unrecognized name). Follows the same
+   * nativeImage decode -> toBitmap -> mutate -> createFromBitmap pattern
+   * paddle-preprocess.js already uses for the Paddle path, so this needs no
+   * new dependency (no sharp/jimp/canvas).
+   * @private
+   */
+  async _preprocessImage(imageBuffer) {
+    const { nativeImage } = require('electron');
+    const img = nativeImage.createFromBuffer(imageBuffer);
+    const size = img.getSize();
+    const factor = this._tesseractOptions.upscaleFactor;
+
+    let working = img;
+    if (factor !== 1.0) {
+      working = img.resize({
+        width: Math.max(1, Math.round(size.width * factor)),
+        height: Math.max(1, Math.round(size.height * factor))
+      });
+    }
+
+    if (this._preprocessing.grayscale || this._tesseractOptions.otsuThreshold) {
+      const { width, height } = working.getSize();
+      const bitmap = working.toBitmap();
+      grayscaleBGRA(bitmap);
+      if (this._tesseractOptions.otsuThreshold) {
+        otsuThresholdBGRA(bitmap);
+      }
+      working = nativeImage.createFromBitmap(bitmap, { width, height });
+    }
+
+    return working.toPNG();
   }
 
   /**
@@ -1031,14 +1340,8 @@ class OcrService extends EventEmitter {
         }
 
         this._language = targetLang;
-        this._worker = await Tesseract.createWorker(this._language, 1, {
-          logger: (m) => {
-            if (m.status === 'recognizing text') {
-              this.emit('progress', m.progress);
-            }
-            log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
-          }
-        });
+        this._worker = await this._createTesseractWorker(this._language);
+        await this._applyTesseractParameters();
 
         log.info(`[OCR] Switched Tesseract to ${targetLangName} model for auto-detect`);
         return true;
@@ -1054,13 +1357,8 @@ class OcrService extends EventEmitter {
           }
 
           this._language = fallbackLang;
-          this._worker = await Tesseract.createWorker(this._language, 1, {
-            logger: (m) => {
-              if (m.status === 'recognizing text') {
-                this.emit('progress', m.progress);
-              }
-            }
-          });
+          this._worker = await this._createTesseractWorker(this._language);
+          await this._applyTesseractParameters();
 
           log.info(`[OCR] Switched Tesseract to ${fallbackLangName} model as fallback`);
           return true;

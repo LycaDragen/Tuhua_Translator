@@ -30,6 +30,27 @@
  *                    anisotropic-resize coordinate drift (or its absence,
  *                    post-fix) is visible instead of only inferred from
  *                    similarity scores.
+ *   --tess-upscale=1.0,1.5,2.0,2.5,3.0
+ *                    v3.13.77 (Stage 4): --engine=tesseract only. Sweeps
+ *                    OcrService's upscaleFactor. Combines with --tess-psm=
+ *                    as a full grid (every upscale x every psm), each run
+ *                    reported with its resulting median word-line height in
+ *                    px and its word-confidence "separation" (mean
+ *                    confidence of words kept vs dropped by the relative
+ *                    outlier filter) — a config that raises confidence on
+ *                    kept AND dropped words together isn't actually
+ *                    discriminating, no matter how good its similarity
+ *                    looks. Omit to run once at the engine's current default
+ *                    (upscaleFactor=1.0).
+ *   --tess-psm=3,6,11
+ *                    v3.13.77 (Stage 4): --engine=tesseract only. Sweeps
+ *                    tessedit_pageseg_mode (3=AUTO, 6=SINGLE_BLOCK — the
+ *                    default, 11=SPARSE_TEXT). See --tess-upscale=.
+ *   --tess-otsu      v3.13.77 (Stage 4): --engine=tesseract only. Enables
+ *                    Otsu binarization on top of whichever upscale/psm point
+ *                    is being measured — a single on/off toggle, not swept
+ *                    as a grid dimension (it's expected to be situational,
+ *                    not a universal win — see OcrService's docstring).
  *   --quiet          Suppress per-image detail, print summary only
  */
 
@@ -55,6 +76,14 @@ function parseArgs(argv) {
     args.padValues = String(args.pad).split(',').map(v => parseInt(v, 10)).filter(n => Number.isFinite(n) && n >= 0);
     if (!args.padValues.includes(0)) args.padValues.unshift(0); // pad0 is the slope's reference point
   }
+  // v3.13.77 (Stage 4): --tess-upscale=/--tess-psm= sweep grid, tesseract-only.
+  args.tessUpscaleValues = args['tess-upscale']
+    ? String(args['tess-upscale']).split(',').map(v => parseFloat(v)).filter(n => Number.isFinite(n) && n > 0)
+    : [1.0];
+  args.tessPsmValues = args['tess-psm']
+    ? String(args['tess-psm']).split(',').map(v => v.trim()).filter(Boolean)
+    : ['6'];
+  args.tessOtsu = Boolean(args['tess-otsu']);
   return args;
 }
 
@@ -324,14 +353,21 @@ async function run() {
 
   // Build the run list: each image once at its own language, plus an extra
   // 'auto' pass for the cases that exercise the model-switch path, times one
-  // pass per --pad value (just [0] i.e. no padding, if --pad wasn't given).
+  // pass per --pad value (just [0] i.e. no padding, if --pad wasn't given),
+  // times one pass per --tess-upscale=/--tess-psm= grid point (just the
+  // engine's current default, tesseract-only, if neither was given).
   const padValues = args.padValues || [0];
+  const tessSweep = args.engine === 'tesseract'
+    ? args.tessUpscaleValues.flatMap(upscaleFactor => args.tessPsmValues.map(psm => ({ upscaleFactor, psm })))
+    : [null];
   const runs = [];
   for (const entry of entries) {
     for (const pad of padValues) {
-      runs.push({ entry, lang: args.lang || entry.lang, pad });
-      if (args.auto && entry.alsoTestAuto && !args.lang) {
-        runs.push({ entry, lang: 'auto', pad });
+      for (const tess of tessSweep) {
+        runs.push({ entry, lang: args.lang || entry.lang, pad, tess });
+        if (args.auto && entry.alsoTestAuto && !args.lang) {
+          runs.push({ entry, lang: 'auto', pad, tess });
+        }
       }
     }
   }
@@ -380,7 +416,7 @@ async function run() {
 
   const results = [];
 
-  for (const { entry, lang, pad } of runs) {
+  for (const { entry, lang, pad, tess } of runs) {
     const imagePath = path.join(IMAGES_DIR, entry.file);
     if (!fs.existsSync(imagePath)) {
       console.error(`${C.red}missing: ${entry.file}${C.reset}`);
@@ -391,16 +427,28 @@ async function run() {
     let buffer = fs.readFileSync(imagePath);
     if (pad) buffer = padImageBuffer(buffer, pad);
 
+    // v3.13.77 (Stage 4): apply this run's sweep point before recognizing.
+    if (tess) {
+      ocr.setTesseractOptions({
+        upscaleFactor: tess.upscaleFactor,
+        psm: tess.psm,
+        otsuThreshold: args.tessOtsu
+      });
+    }
+
     const result = {
       file: entry.file,
       group: entry.group || null,
       lang,
       pad: pad || 0,
+      tessUpscale: tess ? tess.upscaleFactor : null,
+      tessPsm: tess ? tess.psm : null,
       difficulty: entry.difficulty,
       expected: entry.expected,
       knownUnreadable: entry.knownUnreadable || [],
       actual: '',
       confidence: 0,
+      wordStats: null,
       regions: null,
       regionStages: null,
       activeModel: '?',
@@ -426,6 +474,7 @@ async function run() {
 
       const res = await ocr.recognize(buffer);
       result.actual = (res.text || '').trim();
+      result.wordStats = res.wordStats || null;
       result.confidence = res.confidence || 0;
 
       if (args.engine === 'paddle') {
@@ -552,6 +601,41 @@ async function run() {
     console.log(`${C.dim}Furigana boxes dropped by the geometric filter: ${furiganaDrops.map(r => `${r.file}=${r.furiganaBoxesDropped}`).join(', ')}${C.reset}`);
   }
 
+  // v3.13.77 (Stage 4, OCR-refinement round): tesseract sweep grid summary —
+  // one row per (upscaleFactor, psm) point actually run, at pad=0 only (the
+  // sweep and the padding sweep are orthogonal; combining both would make an
+  // already-large grid unreadable). Reports mean similarity alongside median
+  // line height and the kept/dropped confidence separation, because a config
+  // that wins on similarity but shows kept/dropped confidence converging
+  // (see OcrService._computeTesseractWordStats()'s docstring) is winning by
+  // inflating confidence uniformly, not by discriminating real text from
+  // clutter — exactly the failure mode the plan flagged for this sweep.
+  let tessSweepReport = null;
+  if (args.engine === 'tesseract' && (args.tessUpscaleValues.length > 1 || args.tessPsmValues.length > 1)) {
+    console.log(`\n${C.bold}Tesseract sweep (pad=0 only)${C.reset}`);
+    tessSweepReport = [];
+    for (const upscaleFactor of args.tessUpscaleValues) {
+      for (const psm of args.tessPsmValues) {
+        const cell = results.filter(r => r.pad === 0 && r.tessUpscale === upscaleFactor && r.tessPsm === psm);
+        if (cell.length === 0) continue;
+        const cellSim = cell.reduce((s, r) => s + r.similarity, 0) / cell.length;
+        const withStats = cell.filter(r => r.wordStats);
+        const meanLineHeight = withStats.length
+          ? withStats.reduce((s, r) => s + (r.wordStats.medianLineHeightPx || 0), 0) / withStats.length
+          : null;
+        const keptConfs = withStats.map(r => r.wordStats.meanConfidenceKept).filter(v => v != null);
+        const droppedConfs = withStats.map(r => r.wordStats.meanConfidenceDropped).filter(v => v != null);
+        const meanKept = keptConfs.length ? keptConfs.reduce((s, v) => s + v, 0) / keptConfs.length : null;
+        const meanDropped = droppedConfs.length ? droppedConfs.reduce((s, v) => s + v, 0) / droppedConfs.length : null;
+        const separation = (meanKept != null && meanDropped != null) ? meanKept - meanDropped : null;
+        const row = { upscaleFactor, psm, meanSimilarity: cellSim, meanLineHeightPx: meanLineHeight, meanConfidenceKept: meanKept, meanConfidenceDropped: meanDropped, confidenceSeparation: separation, n: cell.length };
+        tessSweepReport.push(row);
+        const sepStr = separation != null ? `${separation >= 0 ? '+' : ''}${separation.toFixed(1)}` : 'n/a';
+        console.log(`  upscale=${String(upscaleFactor).padEnd(4)} psm=${psm.padEnd(2)}  sim=${(cellSim * 100).toFixed(1)}%  lineHeight=${meanLineHeight != null ? meanLineHeight.toFixed(1) + 'px' : 'n/a'}  kept=${meanKept != null ? meanKept.toFixed(1) : 'n/a'}  dropped=${meanDropped != null ? meanDropped.toFixed(1) : 'n/a'}  separation=${sepStr}  ${C.dim}(n=${cell.length})${C.reset}`);
+      }
+    }
+  }
+
   const report = {
     generatedAt: new Date().toISOString(),
     engine: args.engine,
@@ -560,6 +644,7 @@ async function run() {
     emptyOutput: emptyCount,
     groupSummary,
     padSlope: padSlopeReport,
+    tessSweep: tessSweepReport,
     results
   };
   fs.writeFileSync(args.json, JSON.stringify(report, null, 2));

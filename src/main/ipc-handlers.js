@@ -73,7 +73,6 @@ class IpcHandlers {
     this._lastOcrTextHash = '';
     // OCR state
     this._ocrActive = false;
-    this._ocrAutoCapture = false;
     this._ocrScanPaused = false; // v3.9.6: scan paused from capture area overlay
   }
 
@@ -1441,7 +1440,6 @@ class IpcHandlers {
 
     ipcMain.handle('ocr-stop', async () => {
       try {
-        this._ocrAutoCapture = false;
         this.ocrService.stopAutoCapture();
         await this.ocrService.terminate();
         this.windowManager.closeCaptureArea();
@@ -1500,57 +1498,8 @@ class IpcHandlers {
       }
     });
 
-    ipcMain.handle('ocr-set-language', async (event, lang) => {
-      if (typeof lang !== 'string') return { success: false, error: 'Invalid language' };
-      try {
-        await this.ocrService.setLanguage(lang);
-        return { success: true };
-      } catch (err) {
-        return { success: false, error: err.message };
-      }
-    });
-
-    ipcMain.handle('ocr-set-interval', async (event, ms) => {
-      if (typeof ms !== 'number' || ms < 300) return { success: false, error: 'Invalid interval' };
-      this.store.set('ocrAutoCaptureMs', ms);
-      // If auto-capture is running, restart with new interval
-      if (this._ocrAutoCapture && this.ocrService.isAutoCapturing) {
-        this._startOcrAutoCapture();
-      }
-      return { success: true };
-    });
-
-    ipcMain.handle('ocr-set-preprocessing', async (event, options) => {
-      if (typeof options !== 'object' || options === null) return { success: false, error: 'Invalid options' };
-      this.ocrService.setPreprocessing(options);
-      this.store.set('ocrPreprocessing', options);
-      return { success: true };
-    });
-
-    // v3.13.08: Set Tesseract minimum confidence threshold
-    ipcMain.handle('ocr-set-min-confidence', async (event, threshold) => {
-      if (typeof threshold !== 'number') return { success: false, error: 'Must be a number' };
-      const clamped = Math.max(0, Math.min(100, threshold));
-      this.ocrService.setMinConfidence(clamped);
-      this.store.set('ocrMinConfidence', clamped);
-      return { success: true, minConfidence: clamped };
-    });
-
     ipcMain.handle('ocr-status', async () => {
       return this.ocrService.getStatus();
-    });
-
-    ipcMain.handle('ocr-set-auto-capture', async (event, enabled) => {
-      if (typeof enabled !== 'boolean') return { success: false, error: 'Must be boolean' };
-      this._ocrAutoCapture = enabled;
-      this.store.set('ocrAutoCapture', enabled);
-
-      if (enabled && this._ocrActive) {
-        this._startOcrAutoCapture();
-      } else {
-        this.ocrService.stopAutoCapture();
-      }
-      return { success: true };
     });
 
     ipcMain.handle('ocr-close-capture-area', async () => {
@@ -2237,11 +2186,6 @@ class IpcHandlers {
         this.ocrService.setOcrEngine(settings.ocrEngine);
       }
 
-      // v3.13.08: Restore min confidence from settings (default: 0 = no minimum)
-      if (settings.ocrMinConfidence !== undefined) {
-        this.ocrService.setMinConfidence(settings.ocrMinConfidence);
-      }
-
       // Create and show capture area window
       this.windowManager.createCaptureArea();
       this.windowManager.showCaptureArea();
@@ -2317,14 +2261,11 @@ class IpcHandlers {
         });
       }
 
-      // Apply best preprocessing defaults automatically (grayscale ON, smart threshold)
-      this.ocrService.setPreprocessing({
-        grayscale: true,
-        threshold: false,
-        thresholdValue: 128,
-        contrast: false,
-        contrastValue: 1.5
-      });
+      // v3.13.77 (Stage 4, OCR-refinement round): no longer needed — the
+      // real preprocessing defaults (grayscale on, no upscale/Otsu) now
+      // live directly in OcrService's constructor. This used to re-push a
+      // hardcoded copy of the same defaults on every OCR start, which was
+      // never anything but a no-op restatement of the constructor values.
 
       // v3.13.50: auto-capture is NOT started here anymore — see this
       // method's doc comment. The capture area opens paused; the user's
@@ -2367,9 +2308,8 @@ class IpcHandlers {
       'get-profiles', 'save-profile', 'create-profile', 'delete-profile', 'load-profile',
       'get-active-profile', 'rename-profile', 'duplicate-profile',
       'validate-api-key', 'test-connection', 'detect-font-family',
-      'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-set-language',
-      'ocr-set-interval', 'ocr-set-preprocessing', 'ocr-set-min-confidence', 'ocr-status',
-      'ocr-set-auto-capture', 'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
+      'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-status',
+      'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-launch',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
