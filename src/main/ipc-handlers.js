@@ -2236,6 +2236,27 @@ class IpcHandlers {
         });
       });
 
+      // v3.13.79 (Fase 3, round-3 plan): the opposite direction of
+      // paddle-fallback above — Tesseract quality has been persistently
+      // poor for this session (see OcrService._trackTesseractQualityAndMaybeAdvise())
+      // and PaddleOCR is available to switch to. Same bridging pattern:
+      // internal event name changes at the IPC boundary
+      // ('engine-advice' -> 'ocr-engine-advice'), listener reset first
+      // because ocr-start can run repeatedly. This does NOT auto-switch the
+      // engine or touch the store — the renderer shows a dismissible
+      // suggestion and the user decides (mirrors the v3.13.76 game-engine
+      // advisory's "suggest, don't decide for the user" rule).
+      this.ocrService.removeAllListeners('engine-advice');
+      this.ocrService.on('engine-advice', ({ reason, badCount, meanConfidence }) => {
+        console.log(`[OCR] Suggesting PaddleOCR (reason=${reason}, badCount=${badCount}, meanConfidence=${meanConfidence})`);
+        this.windowManager.sendToMainWindow('ocr-engine-advice', {
+          suggestedEngine: 'paddle',
+          reason,
+          badCount,
+          meanConfidence
+        });
+      });
+
       this._ocrActive = true;
       // v3.13.50: see this method's doc comment — always paused on a
       // fresh start, regardless of whatever this flag was left at from

@@ -431,6 +431,18 @@
                     <p id="ocr-engine-desc" class="text-[9px] text-gray-400 italic" data-i18n="ocr_engine_tesseract_desc">Motor OCR predeterminado. Funciona con todos los idiomas.</p>
                     <!-- v3.13.14: Removed "~15MB model download" warning — models download automatically and silently -->
                     <p id="ocr-status-text" class="text-[9px] text-gray-400 text-center"></p>
+
+                    <!-- v3.13.79 (Fase 3, round-3 plan): proactive suggestion to try
+                         PaddleOCR when Tesseract quality has been persistently poor
+                         this session. Same visual language as #engine-advice (the
+                         v3.13.76 game-engine advisory) — amber banner, action is an
+                         explicit click, never an automatic switch. Text/button are
+                         rendered dynamically by renderOcrEngineAdvice(), no data-i18n
+                         on them directly. -->
+                    <div id="ocr-engine-advice" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800">
+                        <p id="ocr-engine-advice-text" class="text-[10px] text-amber-700 dark:text-amber-400 leading-relaxed"></p>
+                        <button id="ocr-engine-advice-action" type="button" onclick="applyOcrEngineAdvice()" class="mt-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 underline hover:no-underline"></button>
+                    </div>
                 </div>
 
                 <!-- XUAT Settings Section -->

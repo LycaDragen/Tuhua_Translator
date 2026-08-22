@@ -67,6 +67,39 @@ const LANG_MAP = {
   'auto': 'eng'  // Default to English for OCR — more universal, cleaner results
 };
 
+// v3.13.79: short English words that are real words on their own, not OCR
+// garbage — shared by _isGarbledWord() (per-word classification) and
+// _cleanOcrText()'s Step 11 (trailing-word truncation), which used to
+// blindly strip ANY 1-2 letter word at the end of a capture ("It is OK" →
+// "It is", "12:45 PM" → "12:45"). Single source of truth so the two checks
+// can't drift apart.
+const COMMON_SHORT_WORDS = new Set([
+  'i', 'a', 'an', 'am', 'be', 'do', 'go', 'he', 'in', 'is',
+  'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up',
+  'us', 'we', 'as', 'at', 'by', 'if', 'ok', 'oh',
+  'pm', 'hi', 'ah', 'eh', 'um'
+]);
+
+// v3.13.79: the lone-single-letter-noise filter (the class right below this
+// deletes stray single Latin characters left over from decorative UI/border
+// artifacts) has the exact same blind spot the 'I' bug had: a real single
+// uppercase letter that's meaningful on its own gets swept up too — most
+// commonly a button-prompt idiom ("Press X to skip", "Hold A", "Y to jump").
+// Rather than exempting a fixed set of letters (any of A/B/X/Y/L/R/Z could
+// be the real prompt letter, and exempting them all would gut the filter
+// for genuinely stray capitals elsewhere), this checks CONTEXT: a letter is
+// protected only when a prompt verb sits right before it or a prompt
+// continuation sits right after it. Everything else keeps being filtered as
+// before.
+const BUTTON_PROMPT_BEFORE = /\b(?:press|hold|tap|hit)\s*$/i;
+const BUTTON_PROMPT_AFTER = /^\s*(?:to|key|button)\b/i;
+
+function isProtectedButtonLetter(fullText, matchIndex, matchLength) {
+  const before = fullText.slice(0, matchIndex);
+  const after = fullText.slice(matchIndex + matchLength);
+  return BUTTON_PROMPT_BEFORE.test(before) || BUTTON_PROMPT_AFTER.test(after);
+}
+
 /**
  * v3.13.77 (Stage 4, OCR-refinement round): BT.601 luma grayscale, in place,
  * over a BGRA bitmap (electron's nativeImage.toBitmap() format — B,G,R,A
@@ -180,6 +213,21 @@ class OcrService extends EventEmitter {
     this._paddleEngine = new PaddleOCREngine();
     // v3.13.04: Track source language for PaddleOCR model selection
     this._paddleSourceLang = 'auto';
+    // v3.13.79 (Fase 3, round-3 plan): rolling window of the last 10
+    // Tesseract quality samples (garbled-vs-good, plus confidence), used to
+    // suggest switching to PaddleOCR when a game's typography is
+    // persistently readable to Paddle but not Tesseract — same real-world
+    // gap the round-2 bench measured for Echo/Lust Shards (95-100% on
+    // Paddle vs 79-92% on Tesseract). See _trackTesseractQualityAndMaybeAdvise().
+    this._tesseractQualityWindow = [];
+    this._engineAdviceEmitted = false;
+    // v3.13.79: consecutive-frame counter for Tesseract auto-detect (see
+    // _maybeSwitchTesseractLangForAutoDetect()) — a single bad frame (e.g. a
+    // clock/counter Tesseract-English can't read) used to be enough to
+    // switch the whole session to Japanese/Korean. Now non-hangul evidence
+    // has to repeat for a few frames before it's trusted; a real hangul
+    // sighting is still immediate (see the function for why).
+    this._autoDetectFailStreak = 0;
   }
 
   /**
@@ -196,6 +244,12 @@ class OcrService extends EventEmitter {
     }
     this._ocrEngine = engine;
     log.info(`[OCR] Engine set to: ${this._ocrEngine}`);
+    // v3.13.79: an engine switch (in either direction) makes the rolling
+    // quality window stale — a window built while reading Tesseract output
+    // shouldn't judge Paddle, or vice versa, and a user who already
+    // switched to Paddle doesn't need to be told to switch to Paddle.
+    this._tesseractQualityWindow = [];
+    this._engineAdviceEmitted = false;
   }
 
   /**
@@ -210,6 +264,41 @@ class OcrService extends EventEmitter {
    */
   isPaddleAvailable() {
     return PaddleOCREngine.isAvailable();
+  }
+
+  /**
+   * v3.13.79 (Fase 3, round-3 plan): feed one Tesseract recognition outcome
+   * into the rolling quality window and, at most once per session, suggest
+   * switching to PaddleOCR when the window is persistently bad AND Paddle
+   * is actually available to switch to. Deliberately only fed from the
+   * garbled-text-skip path and the successful-emit path in
+   * _recognizeTesseract() — NOT the empty-result path, since an empty
+   * capture usually just means no dialogue is on screen right now (normal
+   * between VN lines), not that Tesseract failed to read text that was
+   * there. Mixing that in would make the window mostly noise.
+   * @private
+   */
+  _trackTesseractQualityAndMaybeAdvise(confidence, isGood) {
+    if (this._ocrEngine !== 'tesseract') return;
+
+    this._tesseractQualityWindow.push({ confidence, isGood });
+    if (this._tesseractQualityWindow.length > 10) this._tesseractQualityWindow.shift();
+
+    if (this._engineAdviceEmitted) return;
+    if (this._tesseractQualityWindow.length < 10) return;
+    if (!PaddleOCREngine.isAvailable()) return;
+
+    const badCount = this._tesseractQualityWindow.filter((s) => !s.isGood).length;
+    const meanConfidence = this._tesseractQualityWindow.reduce((sum, s) => sum + s.confidence, 0) / this._tesseractQualityWindow.length;
+    // Heuristic thresholds, same status as the Fase 2 validation floors —
+    // a starting point, not something measured against real captures yet.
+    const persistentlyBad = badCount >= 5 || meanConfidence < 40;
+
+    if (persistentlyBad) {
+      this._engineAdviceEmitted = true;
+      log.info(`[OCR] Tesseract quality persistently low over the last ${this._tesseractQualityWindow.length} captures (badCount=${badCount}/10, meanConfidence=${meanConfidence.toFixed(1)}) — suggesting PaddleOCR`);
+      this.emit('engine-advice', { reason: 'low-quality', badCount, meanConfidence: Math.round(meanConfidence) });
+    }
   }
 
   /**
@@ -335,6 +424,66 @@ class OcrService extends EventEmitter {
         log.debug(`[OCR] Tesseract: ${m.status} (${Math.round((m.progress || 0) * 100)}%)`);
       }
     });
+  }
+
+  /**
+   * v3.13.79: single place that swaps the live Tesseract worker for a
+   * different language — terminate → create → re-apply psm/dpi params.
+   * Extracted out of _maybeSwitchTesseractLangForAutoDetect() so the same
+   * sequence can also be used to REVERT to English (see
+   * _attemptAutoDetectSwitch()'s final-fallback path and the validation
+   * step in _recognizeTesseract()), not just to switch away from it.
+   * Throws if worker creation fails — callers decide how to handle that.
+   * @private
+   */
+  async _switchTesseractLang(lang) {
+    if (this._worker) {
+      try { await this._worker.terminate(); } catch (e) { /* ignore */ }
+      this._worker = null;
+    }
+    this._language = lang;
+    this._worker = await this._createTesseractWorker(lang);
+    await this._applyTesseractParameters();
+  }
+
+  /**
+   * v3.13.79: try switching to `targetLang`, falling back to `fallbackLang`
+   * if that fails, exactly like the old inline try/catch in
+   * _maybeSwitchTesseractLangForAutoDetect() — extracted so the bug that
+   * lived here (see below) has one fix site instead of two near-duplicates.
+   *
+   * BUG FIXED: if BOTH attempts threw, the old code left `_worker = null`
+   * with `_isReady` still `true`. The next recognize() call would throw
+   * 'OCR worker not initialized. Call initialize() first.' with no way to
+   * recover short of an external initialize() call. Now it tries to
+   * restore an English worker as a last resort so the service stays usable;
+   * only if THAT also fails does it give up and mark `_isReady = false`,
+   * which is at least an honest, checkable state instead of a silent trap.
+   * @private
+   */
+  async _attemptAutoDetectSwitch(targetLang, targetLangName, fallbackLang, fallbackLangName) {
+    try {
+      await this._switchTesseractLang(targetLang);
+      log.info(`[OCR] Switched Tesseract to ${targetLangName} model for auto-detect`);
+      return true;
+    } catch (err) {
+      log.warn(`[OCR] Failed to switch Tesseract to ${targetLangName}: ${err.message}`);
+      try {
+        await this._switchTesseractLang(fallbackLang);
+        log.info(`[OCR] Switched Tesseract to ${fallbackLangName} model as fallback`);
+        return true;
+      } catch (fbErr) {
+        log.warn(`[OCR] Fallback to ${fallbackLangName} also failed: ${fbErr.message}`);
+        try {
+          await this._switchTesseractLang('eng');
+          log.info('[OCR] Restored English Tesseract worker after failed auto-detect switch');
+        } catch (revertErr) {
+          log.error(`[OCR] Could not restore English worker after failed auto-detect switch: ${revertErr.message}`);
+          this._isReady = false;
+        }
+        return false;
+      }
+    }
   }
 
   /**
@@ -508,15 +657,70 @@ class OcrService extends EventEmitter {
       if (this._sourceLang === 'auto' && this._language === 'eng') {
         const switched = await this._maybeSwitchTesseractLangForAutoDetect(rawText, confidence, imageBuffer);
         if (switched) {
+          // v3.13.79 (2.1): the pre-switch English result is the baseline
+          // to validate against — capture it before rawText/confidence get
+          // reassigned below.
+          const baselineText = rawText;
+          const baselineConfidence = confidence;
           // Re-recognize with the new language model
           try {
             const reResult = await this._worker.recognize(processedImage, {}, recognizeOutput);
-            rawText = reResult.data.text.trim();
-            confidence = reResult.data.confidence;
-            wordLines = this._extractTesseractLines(reResult.data.blocks);
-            log.info(`[OCR] Re-recognized with ${this._language}: "${rawText.substring(0, 60)}" (${confidence.toFixed(1)}%)`);
+            const newText = reResult.data.text.trim();
+            const newConfidence = reResult.data.confidence;
+
+            // v3.13.79 (2.1): validate the switch actually helped before
+            // committing to it. This is what catches the case the round-3
+            // plan was built around: a clock/counter ("35:97") switches to
+            // Japanese and the model hallucinates a couple of characters
+            // ("2 に") at low confidence — technically non-empty, but worse
+            // than staying in English, not better.
+            //
+            // Primary criterion is COMPARATIVE (new result has to beat the
+            // English baseline on both length and confidence) — robust,
+            // no magic numbers. The absolute floors below are a secondary
+            // path for the case where English produced nothing at all to
+            // compare against (baseline length 0); their exact values are
+            // heuristic placeholders, EXPLICITLY PENDING CALIBRATION against
+            // real main.log data from Windows (see the round-3 plan) — the
+            // instrumentation log line below exists specifically to gather
+            // that data before the floors get tuned.
+            const newLen = newText.replace(/\s/g, '').length;
+            const baselineLen = baselineText.replace(/\s/g, '').length;
+            const newIsMostlyGarbled = this._isMostlyGarbled(newText);
+            const isComparativelyBetter = newLen > baselineLen && newConfidence > baselineConfidence;
+            const MIN_CHARS_FLOOR = 4;
+            const MIN_CONFIDENCE_FLOOR = 40;
+            const passesAbsoluteFloor = newLen >= MIN_CHARS_FLOOR && newConfidence >= MIN_CONFIDENCE_FLOOR && !newIsMostlyGarbled;
+            const switchWorked = isComparativelyBetter || passesAbsoluteFloor;
+            const digitRatio = baselineText.length > 0
+              ? (baselineText.match(/[0-9]/g) || []).length / baselineText.length
+              : 0;
+
+            log.info(`[OCR] Auto-detect validation: lang=${this._language} baselineLen=${baselineLen} baselineConf=${baselineConfidence.toFixed(1)} baselineDigitRatio=${digitRatio.toFixed(2)} newLen=${newLen} newConf=${newConfidence.toFixed(1)} streak=${this._autoDetectFailStreak} comparative=${isComparativelyBetter} absoluteFloor=${passesAbsoluteFloor} decision=${switchWorked ? 'KEEP' : 'REVERT'}`);
+
+            if (switchWorked) {
+              rawText = newText;
+              confidence = newConfidence;
+              wordLines = this._extractTesseractLines(reResult.data.blocks);
+              log.info(`[OCR] Re-recognized with ${this._language}: "${rawText.substring(0, 60)}" (${confidence.toFixed(1)}%)`);
+            } else {
+              log.info(`[OCR] Auto-detect switch to ${this._language} did not beat the English baseline — reverting`);
+              try {
+                await this._switchTesseractLang('eng');
+              } catch (revertErr) {
+                log.error(`[OCR] Failed to revert Tesseract to English: ${revertErr.message}`);
+                this._isReady = false;
+              }
+              // rawText/confidence/wordLines stay at the pre-switch English values.
+            }
           } catch (reErr) {
             log.warn(`[OCR] Re-recognition with ${this._language} failed: ${reErr.message}`);
+            try {
+              await this._switchTesseractLang('eng');
+            } catch (revertErr) {
+              log.error(`[OCR] Failed to revert Tesseract to English: ${revertErr.message}`);
+              this._isReady = false;
+            }
           }
         }
       }
@@ -581,6 +785,7 @@ class OcrService extends EventEmitter {
       const hasCJKChars = (text.match(/[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/g) || []).length > 0;
       if (!hasCJKChars && this._isMostlyGarbled(text)) {
         log.info(`[OCR] Skipping garbled text (high garbled-word ratio): "${text.substring(0, 60)}"`);
+        this._trackTesseractQualityAndMaybeAdvise(confidence, false);
         this.emit('status', 'ready');
         return { text: '', confidence, wordStats };
       }
@@ -593,12 +798,14 @@ class OcrService extends EventEmitter {
       if (!options.force && this._lastEmittedText && this._isSimilarText(text, this._lastEmittedText)) {
         const similarity = this._computeSimilarity(text, this._lastEmittedText);
         log.info(`[OCR] Similar text skipped (${(similarity * 100).toFixed(0)}% similar to last): "${text.substring(0, 50)}"`);
+        this._trackTesseractQualityAndMaybeAdvise(confidence, true);
         this.emit('status', 'ready');
         return { text, confidence, wordStats };
       }
 
       this._lastEmittedText = text;
       log.info(`[OCR] Recognized text (${confidence.toFixed(1)}% confidence): "${text.substring(0, 80)}"`);
+      this._trackTesseractQualityAndMaybeAdvise(confidence, true);
       this.emit('text', text, { force: !!options.force });
 
       this.emit('status', 'ready');
@@ -713,6 +920,31 @@ class OcrService extends EventEmitter {
     this._isAutoCapturing = false;
     this._lastImageData = null;
     this._lastEmittedText = '';
+    // v3.13.79 (Fase 3): the engine-advice window/flag are scoped to one
+    // auto-capture session — a fresh session (new game, new capture region)
+    // deserves its own read on Tesseract's quality rather than inheriting a
+    // stale one, and the "once per session" promise wouldn't mean much
+    // otherwise.
+    this._tesseractQualityWindow = [];
+    this._engineAdviceEmitted = false;
+    // v3.13.79 (2.5): if auto-detect drifted the Tesseract model away from
+    // English during this session, don't let the NEXT startAutoCapture()
+    // silently inherit it. startAutoCapture() itself never calls
+    // initialize()/setLanguage() (only load-profile and save-settings do),
+    // so without this, stopping and restarting auto-capture mid-session
+    // (e.g. switching to a different capture region on the same game) would
+    // keep reading English dialogue with a Japanese/Korean model from
+    // whatever the last drift left behind. Fire-and-forget: this method is
+    // synchronous everywhere it's called from, and the reset only needs to
+    // land before the next recognize() call actually happens, not before
+    // this one returns.
+    if (this._sourceLang === 'auto' && this._ocrEngine === 'tesseract' && this._language !== 'eng') {
+      this._autoDetectFailStreak = 0;
+      log.info('[OCR] Auto-capture stopped mid-drift — resetting Tesseract back to English in the background');
+      this._switchTesseractLang('eng').catch((err) => {
+        log.error(`[OCR] Failed to reset Tesseract language on stopAutoCapture: ${err.message}`);
+      });
+    }
     log.info('[OCR] Auto-capture stopped');
     if (this._isReady) {
       this.emit('status', 'ready');
@@ -1049,9 +1281,17 @@ class OcrService extends EventEmitter {
     // v3.13.03: DON'T remove lone CJK characters — a single kanji or kana
     // is a valid word (e.g. 設 = setting, 図 = diagram). Only remove lone
     // Latin single chars except 'I' and 'a'.
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, ' ');
-    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, '');
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]$/g, '');
+    // v3.13.79: the class below still had 'I' in it despite the comment —
+    // it was deleting the English pronoun "I" from every capture where it
+    // stood alone. Fixed by removing 'I' from the class. Also protect
+    // button-prompt letters ("Press X to skip") via context — see
+    // isProtectedButtonLetter() above.
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : ' ');
+    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]$/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
 
     // Step 7: Remove stray punctuation-only fragments at start/end
     cleaned = cleaned.replace(/^\s*[.\-,;:!?]+\s+(?=[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ffa-zA-Z])/g, '');
@@ -1126,7 +1366,13 @@ class OcrService extends EventEmitter {
     // 6a: 1→l when 1 appears between or after letters (Tesseract sees l as 1)
     //     e.g., "trans1ate" → "translate", "Underta1e" → "Undertale"
     cleaned = cleaned.replace(/([a-zA-Z])1(?=[a-zA-Z])/g, '$1l');
-    cleaned = cleaned.replace(/([a-zA-Z])1\b/g, '$1l');
+    // v3.13.79: the trailing-boundary variant used to match ANY letter before
+    // a final "1" (e.g. "Level1" → "Levell", "F1" → "Fl", "A1 B2 C3" →
+    // "Al B2 C3") — it was destroying real numbers/callsigns, not just fixing
+    // misreads. The one case it's actually meant for is "ll" misread as "l1"
+    // (wil1→will, al1→all, fal1→fall), so restrict the preceding letter to
+    // l/L. Case-insensitive on purpose — WIL1→WILL should still work.
+    cleaned = cleaned.replace(/([lL])1\b/g, '$1l');
 
     // 6b: l→1 when l appears in a NUMBER context (Tesseract sees 1 as l)
     //     Pattern: word ending in 'l' followed by dash/colon/period suggests
@@ -1170,12 +1416,31 @@ class OcrService extends EventEmitter {
 
     // Step 10: Remove stray single-character noise words.
     // Preserve 'I' and 'a' — they are real English words.
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, ' ');
-    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]\s+/g, '');
-    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHIJKLMNOPQRSTUVWXYZ]$/g, '');
+    // v3.13.79: the class below still had 'I' in it despite the comment —
+    // fixed by removing 'I' from the class (mirrors _cleanPaddleOcrText).
+    // Also protect button-prompt letters ("Press X to skip") via context —
+    // see isProtectedButtonLetter() above.
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : ' ');
+    cleaned = cleaned.replace(/^[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]\s+/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
+    cleaned = cleaned.replace(/\s+[bcdefghjklmnopqrstuvwxyzBCDEFGHJKLMNOPQRSTUVWXYZ]$/g,
+      (m, offset) => isProtectedButtonLetter(cleaned, offset, m.length) ? m : '');
 
     // Step 11: Fix truncated word at the end of text.
-    cleaned = cleaned.replace(/\s+[a-zA-Z]{1,2}$/g, '');
+    // v3.13.79: used to blindly strip ANY trailing 1-2 letter word, which
+    // destroyed real short words at the end of a line ("It is OK" → "It is",
+    // "12:45 PM" → "12:45"). Only strip it when it's actually garbled —
+    // COMMON_SHORT_WORDS (shared with _isGarbledWord()) is the same list
+    // that already protects "I"/"a"/"to" elsewhere in this pipeline. Also
+    // check isProtectedButtonLetter(): without it, a single button-prompt
+    // letter Step 10 just preserved ("Press X") gets stripped right back
+    // here when it's the very last token and has no "to"/"key" after it.
+    cleaned = cleaned.replace(/\s+([a-zA-Z]{1,2})$/g, (match, word, offset) => {
+      if (COMMON_SHORT_WORDS.has(word.toLowerCase())) return match;
+      if (word.length === 1 && isProtectedButtonLetter(cleaned, offset, match.length)) return match;
+      return '';
+    });
 
     // Step 12: Final whitespace cleanup
     cleaned = cleaned.replace(/\s+/g, ' ').trim();
@@ -1241,13 +1506,7 @@ class OcrService extends EventEmitter {
     const w = word.replace(/^[^a-zA-Z]+|[^a-zA-Z]+$/g, '');
     if (w.length === 0) return false;
 
-    const commonShort = new Set([
-      'i', 'a', 'an', 'am', 'be', 'do', 'go', 'he', 'in', 'is',
-      'it', 'me', 'my', 'no', 'of', 'on', 'or', 'so', 'to', 'up',
-      'us', 'we', 'as', 'at', 'by', 'if', 'no', 'ok', 'oh'
-    ]);
-
-    if (w.length <= 2) return !commonShort.has(w.toLowerCase());
+    if (w.length <= 2) return !COMMON_SHORT_WORDS.has(w.toLowerCase());
 
     const hasVowel = /[aeiouyAEIOUY]/.test(w);
     if (!hasVowel) return true;
@@ -1264,7 +1523,19 @@ class OcrService extends EventEmitter {
    * @returns {boolean}
    */
   _isMostlyGarbled(text) {
-    if (!text || text.length < 5) return true;
+    if (!text) return true;
+
+    // v3.13.79: dropped the old "text.length < 5 -> garbled" floor. It ran
+    // BEFORE the CJK exemption below, so it was blanket-killing every short
+    // real result regardless of script: common English interjections
+    // ("Well", "Stop", "Nice" — all 4 chars) and even short CJK replies
+    // ("はい", 2 chars). The upstream min-chars gate (ocr.js, before this
+    // call) already requires >=2 real chars (or >=1 CJK char), and the
+    // per-word heuristics below already correctly judge short text on its
+    // own merits (real short words via the commonShort Set in
+    // _isGarbledWord, real noise via the vowel/consonant checks) — so this
+    // extra length floor was redundant on top of them, not a needed safety
+    // net.
 
     // v3.13.08-fix: CJK-aware garbled check. For text containing CJK characters,
     // skip the garbled word check entirely — vowel/consonant heuristics are designed
@@ -1273,6 +1544,10 @@ class OcrService extends EventEmitter {
     if (cjkCount > 0) return false; // CJK text is never "garbled" by Latin heuristics
 
     const words = text.split(/\s+/).filter(w => w.replace(/[^a-zA-Z]/g, '').length > 0);
+    // v3.13.79: a string with zero Latin "words" but real digits (clocks,
+    // counters, HP/scores) isn't garbled \u2014 it's just not Latin prose. Only
+    // the CJK/word-heuristic path below is meant for Latin noise detection.
+    if (words.length === 0 && /[0-9]/.test(text)) return false;
     if (words.length === 0) return true;
 
     let garbledCount = 0;
@@ -1322,54 +1597,48 @@ class OcrService extends EventEmitter {
     // Check for hangul characters that Tesseract-English can't read at all
     const hasHangul = /[\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F]/.test(trimmedText);
 
-    // If Tesseract produced empty or very low quality output, it likely
-    // encountered non-English text. In a VN/translation context, Japanese
-    // is the most common language, so try that first. Korean is second.
-    if (isEmpty || isMostlyGarbled || isVeryLowConfidence || hasHangul) {
-      // Determine which language to try first
-      const targetLang = hasHangul ? 'kor' : 'jpn';
-      const targetLangName = hasHangul ? 'Korean' : 'Japanese';
-
-      log.info(`[OCR] Auto-detect: English Tesseract produced ${isEmpty ? 'empty' : isMostlyGarbled ? 'garbled' : isVeryLowConfidence ? 'low confidence' : 'hangul-containing'} text (${confidence.toFixed(1)}%) — switching to ${targetLangName} model`);
-
-      try {
-        // Terminate current worker and reinitialize with new language
-        if (this._worker) {
-          try { await this._worker.terminate(); } catch (e) { /* ignore */ }
-          this._worker = null;
-        }
-
-        this._language = targetLang;
-        this._worker = await this._createTesseractWorker(this._language);
-        await this._applyTesseractParameters();
-
-        log.info(`[OCR] Switched Tesseract to ${targetLangName} model for auto-detect`);
-        return true;
-      } catch (err) {
-        log.warn(`[OCR] Failed to switch Tesseract to ${targetLangName}: ${err.message}`);
-        // Try the other language as fallback
-        const fallbackLang = hasHangul ? 'jpn' : 'kor';
-        const fallbackLangName = hasHangul ? 'Japanese' : 'Korean';
-        try {
-          if (this._worker) {
-            try { await this._worker.terminate(); } catch (e) { /* ignore */ }
-            this._worker = null;
-          }
-
-          this._language = fallbackLang;
-          this._worker = await this._createTesseractWorker(this._language);
-          await this._applyTesseractParameters();
-
-          log.info(`[OCR] Switched Tesseract to ${fallbackLangName} model as fallback`);
-          return true;
-        } catch (fbErr) {
-          log.warn(`[OCR] Fallback to ${fallbackLangName} also failed: ${fbErr.message}`);
-          // Stay with English — at least we can try to read some Latin characters
-          return false;
-        }
-      }
+    // v3.13.79 (2.3): a pure digit/punctuation capture (a clock, a counter,
+    // "35:97") has NO letters of any script, so _isMostlyGarbled() below
+    // classifies it as "mostly garbled" purely because it has zero
+    // alphabetic words to check — not because it's actually CJK. That was
+    // the real cause of the log line this round's plan was built around:
+    // "35:97" -> switched to Japanese -> hallucinated "2 に" at 24%
+    // confidence. A frame like this is genuinely inconclusive (could be a
+    // timer, could be a scoreboard) — treat it as neither good nor bad
+    // evidence rather than guessing, and leave the fail streak untouched.
+    const hasAnyLetters = /[a-zA-Z\u4E00-\u9FFF\u3040-\u309F\u30A0-\u30FF\uAC00-\uD7AF]/.test(trimmedText);
+    const isMostlyDigitsOrPunct = trimmedText.length > 0 && !hasAnyLetters;
+    if (isMostlyDigitsOrPunct) {
+      log.info(`[OCR] Auto-detect: ignoring digit/punctuation-only capture as evidence: "${trimmedText.substring(0, 30)}"`);
+      return false;
     }
 
+    // v3.13.79 (2.2): hangul showing up in English-model output is direct,
+    // unambiguous evidence (the model has no way to produce those code
+    // points on its own) so it still acts immediately, same as before this
+    // round. Everything else (empty/garbled/low-confidence) is much weaker
+    // evidence on its own — a single bad frame used to be enough to switch
+    // the whole session to Japanese and never come back. Now non-hangul
+    // evidence has to repeat for 3 consecutive frames before it's trusted.
+    if (hasHangul) {
+      this._autoDetectFailStreak = 0;
+      log.info(`[OCR] Auto-detect: English Tesseract produced hangul-containing text (${confidence.toFixed(1)}%) — switching to Korean model`);
+      return this._attemptAutoDetectSwitch('kor', 'Korean', 'jpn', 'Japanese');
+    }
+
+    if (isEmpty || isMostlyGarbled || isVeryLowConfidence) {
+      this._autoDetectFailStreak++;
+      const reason = isEmpty ? 'empty' : isMostlyGarbled ? 'garbled' : 'low confidence';
+      log.info(`[OCR] Auto-detect: English Tesseract produced ${reason} text (${confidence.toFixed(1)}%) — streak ${this._autoDetectFailStreak}/3: "${trimmedText.substring(0, 30)}"`);
+      if (this._autoDetectFailStreak < 3) return false;
+
+      this._autoDetectFailStreak = 0;
+      log.info('[OCR] Auto-detect: 3 consecutive bad English frames — switching to Japanese model');
+      return this._attemptAutoDetectSwitch('jpn', 'Japanese', 'kor', 'Korean');
+    }
+
+    // A good English frame — whatever streak was building resets.
+    this._autoDetectFailStreak = 0;
     return false;
   }
 

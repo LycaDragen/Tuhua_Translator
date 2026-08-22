@@ -86,7 +86,14 @@ class PaddleOCREngine extends EventEmitter {
       // v3.13.03: Multi-region filtering and merging options
       minRegionArea: 100,
       mergeRegionGap: 15,
-      maxRegions: 15,
+      // v3.13.79: raised from 15 to 40. Measured against the 57-image real-world
+      // bench (round 2): this cap truncated exactly ONE run out of 57 (a busy
+      // Ren'Py menu, 16→15 regions), and the median real capture has only 4
+      // regions after merge. The cap was an arbitrary top-N-by-score cut that
+      // almost never fires; crowdedMinConf below is the filter that's actually
+      // meant to separate signal from noise. Kept > crowdedRegionThresh so the
+      // confidence filter still gets a chance to run before this cap does.
+      maxRegions: 40,
       // v3.13.04: Dynamic region filtering for crowded screens (RPG battles)
       // v3.13.08-fix: Further relaxed — previous values still filtered out too many
       // regions on RPG battle screens and low-quality scans. The translation engine
@@ -95,7 +102,11 @@ class PaddleOCREngine extends EventEmitter {
       // approach of passing ALL detected regions through to the translation engine.
       // The translation engine is much better at handling imperfect OCR text than
       // our heuristics are at filtering it. Only filter truly noise-level regions.
-      crowdedRegionThresh: 50, // v3.13.14: Raised from 30 — allow even more regions before filtering
+      // v3.13.79: lowered from 50 to 25 (paired with the maxRegions raise above) —
+      // at 50 this filter was unreachable in practice, since maxRegions used to cut
+      // in first at 15. Now the confidence-based filter gets first pass on
+      // moderately busy screens (16-40 regions) instead of a blind top-N cut.
+      crowdedRegionThresh: 25,
       crowdedMinConf: 0.02,    // v3.13.14: Lowered from 0.05 — only filter absolute noise
       // v3.13.16 Phase 1 (scoped): median denoise + auto-invert on recognition
       // crops. Off by default — see preprocessForRecognition() in

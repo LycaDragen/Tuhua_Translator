@@ -100,6 +100,7 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'ocr-status',
   'ocr-text',
   'ocr-engine-fallback',
+  'ocr-engine-advice',
   'xuat-status',
   'xuat-install-progress',
   'xuat-game-connected',
@@ -309,6 +310,9 @@ const api = {
   onOcrText: (callback) => secureOn('ocr-text', callback),
   // v3.13.01-fix: PaddleOCR fallback notification
   onOcrEngineFallback: (callback) => secureOn('ocr-engine-fallback', callback),
+  // v3.13.79 (Fase 3, round-3 plan): proactive suggestion to try Paddle
+  // when Tesseract quality has been persistently poor this session
+  onOcrEngineAdvice: (callback) => secureOn('ocr-engine-advice', callback),
 
   // v3.10.0: Debug logs
   getDebugLogs: () => secureInvoke('get-debug-logs'),
