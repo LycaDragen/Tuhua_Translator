@@ -45,7 +45,9 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'detect-font-family',
   'textractor-validate-cli',
   'textractor-browse-cli',
+  'textractor-clear-cli-path',
   'list-game-processes',
+  'get-textractor-auto-detect-result',
   'textractor-launch',
   'textractor-kill',
   'textractor-cli-status',
@@ -86,6 +88,10 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'textractor-cli-output',
   'textractor-cli-error',
   'textractor-cli-arch-fallback',
+  // v3.13.8x (settings UX audit, Fase 5): live push for the "switched to
+  // Textractor mid-session, no saved path" auto-detect case — see the
+  // save-settings handler in ipc-handlers.js.
+  'textractor-cli-path-autodetected',
   // v3.13.32: was emitted by TextractorLauncher (src/main/index.js) since
   // v3.13.31 but missing here — secureOn silently rejects any channel not
   // in this Set, so the renderer's listener could never actually fire.
@@ -278,9 +284,15 @@ const api = {
     return secureInvoke('textractor-validate-cli', cliPath);
   },
   textractorBrowseCli: () => secureInvoke('textractor-browse-cli'),
+  // v3.13.8x (Fase 5, second pass): clears the saved path and immediately
+  // re-runs auto-detection — see the handler's own doc comment.
+  textractorClearCliPath: () => secureInvoke('textractor-clear-cli-path'),
   // v3.13.8x (settings UX audit, Fase 4): Windows-only game process picker
   // for the Game PID field — see the handler's own doc comment.
   listGameProcesses: () => secureInvoke('list-game-processes'),
+  // v3.13.8x (Fase 5): read-once startup auto-detect result — see the
+  // handler's own doc comment in ipc-handlers.js.
+  getTextractorAutoDetectResult: () => secureInvoke('get-textractor-auto-detect-result'),
   textractorLaunch: (cliPath, gamePid, port) => {
     if (typeof cliPath !== 'string') throw new Error('Invalid CLI path');
     if (typeof gamePid !== 'number') throw new Error('Invalid PID');
@@ -301,6 +313,8 @@ const api = {
   onTextractorCliOutput: (callback) => secureOn('textractor-cli-output', callback),
   onTextractorCliError: (callback) => secureOn('textractor-cli-error', callback),
   onTextractorCliArchFallback: (callback) => secureOn('textractor-cli-arch-fallback', callback),
+  // v3.13.8x (Fase 5): live push for the mid-session auto-detect case.
+  onTextractorCliPathAutodetected: (callback) => secureOn('textractor-cli-path-autodetected', callback),
   onTextractorCliPidWarning: (callback) => secureOn('textractor-cli-pid-warning', callback),
   onTextractorCliArchResolved: (callback) => secureOn('textractor-cli-arch-resolved', callback),
   onTextractorCliSearchStarted: (callback) => secureOn('textractor-cli-search-started', callback),

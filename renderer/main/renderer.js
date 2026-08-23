@@ -106,6 +106,14 @@
                 const text = document.getElementById('cli-status-text');
                 if (text) text.innerHTML = '<span class="text-amber-500 pulse-dot">⟳ ' + notice + '</span>';
             });
+            // v3.13.8x (settings UX audit, Fase 5): live push for the
+            // "switched to Textractor mid-session, no saved path" case —
+            // see handleTextractorAutoDetectResult()'s own doc comment.
+            // Registered once here; the read-once pull path (get-
+            // textractor-auto-detect-result, called from init() itself)
+            // covers the app-startup case, which can't safely use a push
+            // (the renderer isn't guaranteed ready yet at that point).
+            api.onTextractorCliPathAutodetected((result) => handleTextractorAutoDetectResult(result));
             // v3.13.32: was emitted by the launcher (src/main/index.js) but
             // missing from main-preload.js's ALLOWED_RECEIVE_CHANNELS, so
             // this listener could never actually fire — a warning meant to
@@ -376,6 +384,15 @@
             }
             if (settings.overlayOpacity) { document.getElementById('opacity-range').value = settings.overlayOpacity; document.getElementById('opacity-val').innerText = settings.overlayOpacity + '%'; }
             if (settings.textractorCliPath) document.getElementById('textractor-cli-path').value = settings.textractorCliPath;
+            // v3.13.8x (settings UX audit, Fase 5): read-once — the
+            // backend clears this after the first read, so calling it on
+            // every init() (including profile switches) is harmless; it
+            // only ever comes back non-null right after a fresh app
+            // startup that ran the auto-detect. Already reflected in
+            // `settings.textractorCliPath` above if found (index.js
+            // persists it before the renderer's first get-settings) — this
+            // call's real job is the toast, see its own doc comment.
+            handleTextractorAutoDetectResult(await api.getTextractorAutoDetectResult());
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
             // v3.13.8x (settings UX audit): stopped restoring a persisted
             // gamePid — a PID from a previous session is never valid for
@@ -3374,6 +3391,27 @@
             if (banner) banner.classList.add('hidden');
         }
 
+        // v3.13.8x (settings UX audit, Fase 5): "avisar siempre" from the
+        // plan — never silent in either the found or not-found branch.
+        // Shared by both delivery paths: the read-once pull
+        // (get-textractor-auto-detect-result, called from init()) for the
+        // app-startup trigger, and the live push
+        // (onTextractorCliPathAutodetected) for switching to Textractor
+        // mid-session. `result` is null when neither trigger ever ran this
+        // session (e.g. a path was already saved) — nothing to show.
+        function handleTextractorAutoDetectResult(result) {
+            if (!result) return;
+            const t = translations[currentLang] || translations['en'];
+            if (result.found) {
+                const input = document.getElementById('textractor-cli-path');
+                if (input) input.value = result.path;
+                const template = t.textractor_autodetect_found || 'Textractor detectado en {path}';
+                showToast(template.replace('{path}', result.path));
+            } else {
+                showToast(t.textractor_autodetect_not_found || 'No se encontró Textractor automáticamente — usá "Examinar" para indicar la ruta.');
+            }
+        }
+
         async function browseTextractorCli() {
             const result = await api.textractorBrowseCli();
             if (result.canceled) return;
@@ -3405,6 +3443,25 @@
 
             // Save the resolved .exe path (not the folder)
             api.saveSettings({ textractorCliPath: result.path });
+        }
+
+        // v3.13.8x (settings UX audit, Fase 5, second pass): the field
+        // above is `readonly`, so this is the only UI path back to "no
+        // saved path" — which both auto-detect triggers require to fire
+        // again. Immediately re-runs detection server-side (rather than
+        // just clearing and leaving it to a restart or an input-method
+        // toggle), reusing handleTextractorAutoDetectResult() for the
+        // found/not-found toast — same messaging as both other triggers.
+        async function clearTextractorCliPath() {
+            const input = document.getElementById('textractor-cli-path');
+            const status = document.getElementById('cli-path-status');
+            input.value = '';
+            const t = translations[currentLang] || translations['en'];
+            status.innerHTML = '<span class="text-gray-400">…</span>';
+            const result = await api.textractorClearCliPath();
+            status.innerHTML = '';
+            setTimeout(() => { status.innerHTML = ''; }, 5000);
+            handleTextractorAutoDetectResult(result);
         }
 
         // v3.13.37: extracted from the old manual launchTextractorCli() so

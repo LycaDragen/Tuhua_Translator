@@ -7,6 +7,8 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const Store = require('electron-store');
 const log = require('electron-log');
+const os = require('os');
+const path = require('path');
 
 const WindowManager = require('./window-manager');
 const IpcHandlers = require('./ipc-handlers');
@@ -24,6 +26,7 @@ const RegexFilterService = require('../services/regex-filter');
 const HookCleaningSettingsService = require('../services/hook-cleaning-settings');
 const llmProviders = require('../services/translation/llm-providers');
 const promptPresets = require('../services/translation/prompt-presets');
+const { runAutoDetectAndPersist } = require('../services/textractor-path-detect');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -252,8 +255,24 @@ app.whenReady().then(() => {
   xuatServer = new XuatServer(pipeline, settings.xuatPort || 8419);
 
   // Configure TextractorLauncher from saved settings
+  // v3.13.8x (settings UX audit, Fase 5): if there's no saved path AND the
+  // user's saved (or default — 'textractor' is the store's own default
+  // inputMethod, so a brand-new install hits this too) input method is
+  // Textractor, try to auto-detect an existing install rather than
+  // leaving the field blank for "Examinar" to be the only way forward.
+  // Gated on inputMethod so an OCR/XUAT/Clipboard user — who may never
+  // touch Textractor at all — never pays this cost or gets a notice about
+  // it. Runs synchronously (readdirSync + a PE header read on at most a
+  // handful of resolved candidates) — negligible next to everything else
+  // this function already does at startup.
+  let textractorAutoDetectResult = null;
   if (settings.textractorCliPath) {
     textractorLauncher.configure(settings.textractorCliPath);
+  } else if (process.platform === 'win32' && settings.inputMethod === 'textractor') {
+    textractorAutoDetectResult = runAutoDetectAndPersist({ store, textractorLauncher, tuhuaExePath: app.getPath('exe') });
+    if (textractorAutoDetectResult.found) {
+      log.info(`[Tuhua] Auto-detected Textractor at: ${textractorAutoDetectResult.path}`);
+    }
   }
 
   // Forward TextractorLauncher events to renderer
@@ -362,7 +381,13 @@ app.whenReady().then(() => {
   shortcuts.register();
 
   // Initialize IPC handlers (v3.11.25: pass shortcuts for OCR hotkey integration)
-  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings, profileStore);
+  // v3.13.8x: textractorAutoDetectResult is whatever the auto-detect above
+  // found (or null if it never ran) — IpcHandlers exposes it once via
+  // get-textractor-auto-detect-result so the renderer can toast about it
+  // after it's actually ready to receive IPC (pull, not push, sidesteps
+  // the startup-race class of bug the badge-replay mechanism elsewhere in
+  // this app had to work around).
+  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings, profileStore, textractorAutoDetectResult);
   ipcHandlers.register();
 
   // v3.13.07: Improved startup overlay state management.

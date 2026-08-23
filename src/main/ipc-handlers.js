@@ -9,6 +9,7 @@ const path = require('path');
 const axios = require('axios');
 const { exec } = require('child_process');
 const { parseProcessListJson } = require('../services/game-process-list');
+const { runAutoDetectAndPersist } = require('../services/textractor-path-detect');
 
 const XuatInstaller = require('../services/xuat-installer');
 const VndbService = require('../services/vndb');
@@ -53,7 +54,7 @@ function mainT(store, key) {
 }
 
 class IpcHandlers {
-  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings, profileStore) {
+  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings, profileStore, textractorAutoDetectResult) {
     this.store = store;
     this.pipeline = pipeline;
     this.glossary = glossary;
@@ -88,6 +89,14 @@ class IpcHandlers {
     // OCR state
     this._ocrActive = false;
     this._ocrScanPaused = false; // v3.9.6: scan paused from capture area overlay
+    // v3.13.8x (settings UX audit, Fase 5): whatever index.js's startup
+    // auto-detect found (or null if it never ran — no saved path but
+    // inputMethod wasn't 'textractor', or the platform isn't win32).
+    // Exposed via get-textractor-auto-detect-result, read-once (see that
+    // handler) so the renderer can toast about it once it's actually
+    // ready, without index.js having to push an IPC event that could race
+    // the main window's own readiness.
+    this._textractorAutoDetectResult = textractorAutoDetectResult || null;
   }
 
   /**
@@ -121,6 +130,16 @@ class IpcHandlers {
     // anymore.
     ipcMain.handle('get-settings', () => {
       return this.store.get() || {};
+    });
+
+    // v3.13.8x (settings UX audit, Fase 5): read-once — the renderer calls
+    // this once during its own init(), and whatever it gets back (a
+    // startup auto-detect result, or null) is cleared so a later
+    // get-settings/profile-switch reload doesn't re-show the same toast.
+    ipcMain.handle('get-textractor-auto-detect-result', () => {
+      const result = this._textractorAutoDetectResult;
+      this._textractorAutoDetectResult = null;
+      return result;
     });
 
     // v3.13.58 (LLM engine overhaul, Fase 3): read-only — llm-providers.js
@@ -325,6 +344,18 @@ class IpcHandlers {
             this.windowManager.hideOutputOverlay();
             this.windowManager.clearOverlayContent();
           }
+          // v3.13.8x (settings UX audit, Fase 5): the startup auto-detect
+          // (index.js) only fires for a user whose SAVED inputMethod was
+          // already 'textractor' — this covers the other real case,
+          // switching TO Textractor mid-session (e.g. from a fresh install
+          // that started on Clipboard/OCR) with no path saved yet. Unlike
+          // the startup path, this is a direct response to a live user
+          // click, so it's safe to push the result straight to the
+          // renderer via sendToMainWindow — no startup-race to sidestep.
+          if (!mergedSettings.textractorCliPath && process.platform === 'win32') {
+            const detected = runAutoDetectAndPersist({ store: this.store, textractorLauncher: this.textractorLauncher, tuhuaExePath: app.getPath('exe') });
+            this.windowManager.sendToMainWindow('textractor-cli-path-autodetected', detected);
+          }
           // Textractor mode: always try to connect TCP as a secondary channel
           // (CLI stdout is primary, but TCP works if "Start Server" extension is present)
           const port = this.store.get('textractorPort') || 9251;
@@ -492,6 +523,23 @@ class IpcHandlers {
     ipcMain.handle('textractor-validate-cli', async (event, cliPath) => {
       if (typeof cliPath !== 'string') return { valid: false, message: 'Invalid path' };
       return this.textractorLauncher.validatePath(cliPath);
+    });
+
+    // v3.13.8x (settings UX audit, Fase 5, second pass): the "Textractor"
+    // path field is `readonly` (only "Examinar" or an auto-detect can set
+    // it) — there was no way to get back to "no saved path" at all except
+    // editing config.json by hand, which is also the only way anyone could
+    // have re-triggered auto-detection after their first successful setup
+    // (both real triggers only fire when the SAVED path is already empty —
+    // see runAutoDetectAndPersist's callers). Clears it AND immediately
+    // re-runs detection in the same click, rather than just clearing and
+    // making the user restart the app or toggle input method to see
+    // anything happen.
+    ipcMain.handle('textractor-clear-cli-path', async () => {
+      this.store.set({ ...this.store.get(), textractorCliPath: '' });
+      this.textractorLauncher.configure('');
+      if (process.platform !== 'win32') return { found: false };
+      return runAutoDetectAndPersist({ store: this.store, textractorLauncher: this.textractorLauncher, tuhuaExePath: app.getPath('exe') });
     });
 
     ipcMain.handle('textractor-browse-cli', async () => {
@@ -2382,8 +2430,8 @@ class IpcHandlers {
       'validate-api-key', 'test-connection', 'detect-font-family',
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-status',
       'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
-      'textractor-validate-cli', 'textractor-browse-cli', 'textractor-launch',
-      'list-game-processes',
+      'textractor-validate-cli', 'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
+      'list-game-processes', 'get-textractor-auto-detect-result',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',

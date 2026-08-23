@@ -558,6 +558,14 @@
                                     <span>Test</span>
                                 </button>
                                 <button onclick="browseTextractorCli()" class="text-[10px] text-emerald-500 hover:text-emerald-400 font-medium" data-i18n="browse_btn">Examinar</button>
+                                <!-- v3.13.8x (Fase 5, second pass): the path
+                                     field above is `readonly` — this was the
+                                     only way (besides editing config.json by
+                                     hand) to get back to "no saved path",
+                                     which is also what both auto-detect
+                                     triggers require to ever fire again after
+                                     a first successful setup. -->
+                                <button onclick="clearTextractorCliPath()" class="text-[10px] text-red-500 hover:text-red-400 font-medium" data-i18n="textractor_clear_path_btn">🗑️ Borrar</button>
                             </div>
                         </div>
                         <div class="flex gap-2">
