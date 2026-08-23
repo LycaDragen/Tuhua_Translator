@@ -2267,16 +2267,25 @@ class IpcHandlers {
   }
 
   /**
-   * Start OCR auto-capture with the best default interval
+   * Start OCR auto-capture with the configured (or best default) interval
    */
   _startOcrAutoCapture() {
-    // v3.9.9: 3500ms interval (was 7000ms). Faster scanning means
-    // game dialogue is picked up sooner. The similarity-based dedup
-    // prevents re-translating the same text, so faster scans are safe.
-    // Sequential processing + change detection prevent overload.
+    // v3.9.9: 3500ms default (was 7000ms). Faster scanning means game
+    // dialogue is picked up sooner. The similarity-based dedup prevents
+    // re-translating the same text, so faster scans are safe. Sequential
+    // processing + change detection prevent overload.
+    // v3.13.8x (settings UX audit): exposed as `ocrCaptureIntervalMs` in
+    // the modal's Avanzado category — read fresh here, at OCR start, same
+    // as xuatPort and other settings this file only reads at the moment
+    // the corresponding session/server starts. Changing it while OCR is
+    // already running takes effect the next time capture (re)starts
+    // (switching input method away and back, or app restart) — not a live
+    // mid-session interval swap, which startAutoCapture()'s own setTimeout
+    // chain (see ocr.js) doesn't support.
+    const intervalMs = this.store.get('ocrCaptureIntervalMs', 3500);
     this.ocrService.startAutoCapture(async () => {
       return await this._captureScreenRegion();
-    }, 3500);
+    }, intervalMs);
   }
 
   unregister() {

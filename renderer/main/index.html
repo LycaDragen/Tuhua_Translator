@@ -59,6 +59,19 @@
         .pulse-dot { animation: pulseDot 2s ease-in-out infinite; }
         @keyframes pulseDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+        /* v3.13.8x (settings UX audit): Save button honesty. Idle (gray) =
+           nothing staged that needs a click; markUnsaved() swaps in
+           .save-btn-dirty (the emerald "there's something to save" look —
+           same colors the button used to wear unconditionally) and
+           markSaved() swaps back. See markUnsaved()'s own doc comment for
+           why this only reflects Tier B (staged) changes now — Tier A
+           controls (overlay appearance, HOOK cleaning, regex toggles, etc.)
+           apply immediately and never touch this button. */
+        .save-btn-idle { background: #e2e8f0; color: #94a3b8; box-shadow: none; cursor: default; }
+        .dark .save-btn-idle { background: #334155; color: #64748b; }
+        .save-btn-dirty { background: #059669; color: #fff; box-shadow: 0 10px 15px -3px rgba(16,185,129,0.2), 0 4px 6px -4px rgba(16,185,129,0.2); }
+        .save-btn-dirty:hover { background: #10b981; }
+
         /* Play/Pause toggle button */
         .toggle-btn-active {
             background: linear-gradient(135deg, #10b981, #059669);
@@ -208,7 +221,7 @@
                 <!-- Engine -->
                 <div>
                     <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider" data-i18n="engine_label">Motor de Traducción</label>
-                    <select id="engine-select" onchange="autoSaveEngine()" class="w-full p-2.5 rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-sm font-medium cursor-pointer appearance-none">
+                    <select id="engine-select" onchange="onEngineChange()" class="w-full p-2.5 rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-sm font-medium cursor-pointer appearance-none">
                         <!-- GRATUITOS -->
                         <option value="google-free" data-i18n-engine="engine_google_free">🌐 Google Translate (Gratuito)</option>
                         <option value="bing" data-i18n-engine="engine_bing">🔍 Bing Translator (Gratuito)</option>
@@ -239,12 +252,12 @@
                         <select id="llm-provider-select" onchange="onLlmProviderChange()" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs cursor-pointer"></select>
                         <p id="llm-provider-beta-note" class="hidden text-[9px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="llm_provider_beta_note">Esta API de compatibilidad es beta según la documentación del proveedor — puede cambiar sin aviso.</p>
                     </div>
-                    <input type="password" id="api-key" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono transition-colors duration-200" placeholder="Pega tu Key aquí..." oninput="markUnsaved()">
+                    <input type="password" id="api-key" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono transition-colors duration-200" placeholder="Pega tu Key aquí..." oninput="markUnsaved('sidebar')">
                     <div id="api-key-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
                     <!-- v3.13.58: shown only when the 'custom' provider is selected — the table's own baseUrl is deliberately empty for it, see llm-providers.js. -->
                     <div id="llm-custom-baseurl-row" class="hidden mt-2">
                         <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_base_url_label">URL Base</label>
-                        <input type="text" id="llm-custom-baseurl" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" placeholder="https://mi-gateway.ejemplo.com/v1" oninput="markUnsaved()">
+                        <input type="text" id="llm-custom-baseurl" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" placeholder="https://mi-gateway.ejemplo.com/v1" oninput="markUnsaved('sidebar')">
                     </div>
                     <!-- v3.13.58: free text (not a &lt;select&gt;, the model landscape
                          moves faster than Tuhua releases), populated per-provider by
@@ -263,7 +276,7 @@
                          below. -->
                     <div id="llm-model-row" class="hidden mt-2 relative">
                         <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_model_label">Modelo</label>
-                        <input type="text" id="llm-model" autocomplete="off" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" oninput="markUnsaved(); filterModelSuggestions()" onfocus="showModelSuggestions()">
+                        <input type="text" id="llm-model" autocomplete="off" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono" oninput="markUnsaved('sidebar'); filterModelSuggestions()" onfocus="showModelSuggestions()">
                         <div id="llm-model-suggestions" class="hidden absolute left-0 right-0 z-50 mt-1 max-h-40 overflow-y-auto rounded-md border border-amber-200 dark:border-amber-800 bg-white dark:bg-dark-900 shadow-lg scrollbar-thin"></div>
                     </div>
                     <!-- v3.11.23: DeepL Formality -->
@@ -314,8 +327,8 @@
                         <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1" data-i18n="llm_local_preset_label">Servidor Local</label>
                         <select id="local-endpoint-preset" onchange="onLocalEndpointPresetChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs cursor-pointer"></select>
                     </div>
-                    <input type="text" id="local-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:1234/v1" oninput="markUnsaved()">
-                    <input type="text" id="local-model" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Model name (e.g. llama3)" oninput="markUnsaved()">
+                    <input type="text" id="local-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:1234/v1" oninput="markUnsaved('sidebar')">
+                    <input type="text" id="local-model" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Model name (e.g. llama3)" oninput="markUnsaved('sidebar')">
                     <div id="local-endpoint-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
                 </div>
 
@@ -328,7 +341,7 @@
                             <span data-i18n="validate_btn">Validar</span>
                         </button>
                     </div>
-                    <input type="text" id="libretranslate-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:5000" oninput="markUnsaved()">
+                    <input type="text" id="libretranslate-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:5000" oninput="markUnsaved('sidebar')">
                     <div id="libretranslate-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
                 </div>
 
@@ -341,24 +354,35 @@
                             <span data-i18n="validate_btn">Validar</span>
                         </button>
                     </div>
-                    <input type="text" id="custom-mt-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="https://api.example.com/translate" oninput="markUnsaved()">
-                    <div class="grid grid-cols-2 gap-2">
-                        <div>
-                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_method">HTTP Method</label>
-                            <select id="custom-mt-method" onchange="markUnsaved()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
-                                <option value="POST">POST</option>
-                                <option value="GET">GET</option>
-                            </select>
+                    <input type="text" id="custom-mt-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="https://api.example.com/translate" oninput="markUnsaved('sidebar')">
+                    <!-- v3.13.8x (settings UX audit): the 4 fine-grained
+                         request-format fields collapsed behind a disclosure
+                         widget — method/response-path/body/auth-header are
+                         set once per custom endpoint and rarely touched
+                         again, the endpoint itself is the field that
+                         matters day to day. -->
+                    <details>
+                        <summary class="cursor-pointer text-[10px] font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 select-none" data-i18n="custom_mt_advanced_label">Formato de la petición</summary>
+                        <div class="mt-2 space-y-2">
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_method">HTTP Method</label>
+                                    <select id="custom-mt-method" onchange="markUnsaved('sidebar')" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                        <option value="POST">POST</option>
+                                        <option value="GET">GET</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_response">Response Path</label>
+                                    <input type="text" id="custom-mt-response" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="data.translations.0.text" oninput="markUnsaved('sidebar')">
+                                </div>
+                            </div>
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_body">Request Body Template</label>
+                            <textarea id="custom-mt-body" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[10px] font-mono resize-none" placeholder='{"text":"{{text}}","source":"{{source}}","target":"{{target}}"}'  oninput="markUnsaved('sidebar')"></textarea>
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_auth">Auth Header</label>
+                            <input type="text" id="custom-mt-auth" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" data-i18n-placeholder="custom_mt_auth_placeholder" placeholder="Authorization: Bearer tu-clave-aqui" oninput="markUnsaved('sidebar')">
                         </div>
-                        <div>
-                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_response">Response Path</label>
-                            <input type="text" id="custom-mt-response" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="data.translations.0.text" oninput="markUnsaved()">
-                        </div>
-                    </div>
-                    <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_body">Request Body Template</label>
-                    <textarea id="custom-mt-body" rows="2" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[10px] font-mono resize-none" placeholder='{"text":"{{text}}","source":"{{source}}","target":"{{target}}"}'  oninput="markUnsaved()"></textarea>
-                    <label class="block text-[10px] text-gray-400 mb-1" data-i18n="custom_mt_auth">Auth Header</label>
-                    <input type="text" id="custom-mt-auth" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Authorization: Bearer {{apiKey}}" oninput="markUnsaved()">
+                    </details>
                     <div id="custom-mt-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
                 </div>
 
@@ -367,7 +391,7 @@
                     <div class="grid grid-cols-2 gap-3">
                         <div>
                             <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1.5" data-i18n="source_lang">Idioma Origen</label>
-                            <select id="source-lang" onchange="autoSaveLanguage()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                            <select id="source-lang" onchange="onLanguageChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
                                 <option id="source-lang-auto" value="auto" selected data-i18n-lang="auto">🌐 Auto-detectar</option>
                                 <option value="ja" data-i18n-lang="ja">🇯🇵 日本語</option>
                                 <option value="en" data-i18n-lang="en">🇺🇸 English</option>
@@ -393,7 +417,7 @@
                         </div>
                         <div>
                             <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1.5" data-i18n="target_lang">Idioma Destino</label>
-                            <select id="target-lang" onchange="autoSaveLanguage()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                            <select id="target-lang" onchange="onLanguageChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
                                 <option value="es" selected data-i18n-lang="es">🇪🇸 Español</option>
                                 <option value="en" data-i18n-lang="en">🇺🇸 English</option>
                                 <option value="ja" data-i18n-lang="ja">🇯🇵 日本語</option>
@@ -458,10 +482,14 @@
                             <button id="xuat-toggle-btn" onclick="toggleXuatServer()" class="px-3 py-1.5 text-[10px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded-md transition">Iniciar</button>
                         </div>
                     </div>
-                    <!-- Port Config + URL Display -->
+                    <!-- v3.13.8x (settings UX audit): the port number input
+                         itself moved to the gear modal's Avanzado category
+                         (#xuat-port keeps its id, still read from here by
+                         copyXuatUrl()/testXuatEndpoint()/etc. — same
+                         precedent as textractorPort leaving the sidebar in
+                         v3.13.38) — this is a rarely-touched, non-default
+                         value, and the URL below already shows it baked in. -->
                     <div class="flex items-center gap-2">
-                        <span class="text-[10px] text-gray-500 dark:text-gray-400" data-i18n="xuat_port">Puerto</span>
-                        <input type="number" id="xuat-port" value="8419" min="1024" max="65535" class="w-20 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs text-center" onchange="markUnsaved()">
                         <button onclick="copyXuatUrl()" class="px-2 py-1.5 text-[10px] bg-gray-200 dark:bg-dark-700 hover:bg-gray-300 dark:hover:bg-dark-600 rounded-md transition" data-i18n="xuat_copy_url">Copiar URL</button>
                     </div>
                     <div class="p-2 rounded-md bg-gray-100 dark:bg-dark-800 border border-gray-200 dark:border-dark-600">
@@ -511,7 +539,14 @@
                 </div>
 
                 <!-- Textractor Configuration -->
-                <div id="textractor-port-section" class="border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4 space-y-3">
+                <!-- v3.13.8x (settings UX audit): now `hidden` by default,
+                     matching #ocr-settings-section/#xuat-settings-section
+                     below — setInputMethod() toggles the same `hidden`
+                     class on all three now (was inline style.display just
+                     for this one), see its own doc comment. Fixes this
+                     section flashing visible on first paint whenever the
+                     saved inputMethod isn't 'textractor'. -->
+                <div id="textractor-port-section" class="hidden border-t border-emerald-800/30 dark:border-emerald-500/30 pt-4 space-y-3">
 
                     <!-- TextractorCLI Path -->
                     <div>
@@ -597,14 +632,13 @@
                         <p class="text-[9px] text-emerald-600 dark:text-emerald-400/60" data-i18n="hook_selector_help">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
                     </div>
 
-                    <!-- v3.13.38: Manual Mode, moved out of the removed Advanced
-                         Settings/TCP-port container — still the fallback for
-                         running Textractor GUI manually instead of the CLI. -->
-                    <div class="flex items-center gap-2">
-                        <label class="text-[10px] text-gray-400" data-i18n="manual_mode_label">Modo Manual (sin CLI)</label>
-                        <input type="checkbox" id="manual-textractor-mode" onchange="toggleManualMode(this.checked)" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
-                    </div>
-                    <p class="text-[9px] text-gray-400" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
+                    <!-- v3.13.8x (settings UX audit): Manual Mode moved to
+                         the gear modal's Avanzado category (#manual-
+                         textractor-mode keeps its id, still read/toggled
+                         from there) — rarely touched, and the guide modal's
+                         own text already pointed at "Configuración
+                         Avanzada" for it (a stale reference from before
+                         v3.13.38 that's accurate again now). -->
                 </div>
             </div>
 
@@ -704,9 +738,17 @@
             </div>
 
             <!-- Save Button -->
+            <!-- v3.13.8x (settings UX audit): starts idle/gray (save-btn-idle,
+                 see the inline <style> block) — markUnsaved()/markSaved() swap
+                 it to the emerald "there's something to save" look and back.
+                 See markUnsaved()'s doc comment for why this only tracks
+                 Tier B changes now. -->
             <div class="p-4 border-t border-gray-200 dark:border-dark-700">
-                <button id="save-btn" onclick="saveConfig()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-lg shadow-lg shadow-emerald-500/20 transition transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                <button id="save-btn" onclick="saveConfig()" class="save-btn-idle w-full font-bold py-2.5 rounded-lg transition transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
+                    <!-- v3.13.8x: hidden until a save actually completes —
+                         see flashSaved() — so it reads as "just saved",
+                         not as permanent button chrome. -->
+                    <svg id="save-btn-check" class="hidden w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
                     <span id="save-btn-text" data-i18n="save_btn">Aplicar y Guardar</span>
                 </button>
             </div>
@@ -824,7 +866,7 @@
                         <!-- Font Family -->
                         <div id="font-family-section">
                             <label class="block text-[10px] text-gray-400 mb-1" data-i18n="overlay_font">Tipo de Letra</label>
-                            <select id="overlay-font" onchange="onFontFamilyChange(); markUnsaved()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                            <select id="overlay-font" data-immediate="true" onchange="onFontFamilyChange(); saveOverlayImmediate()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
                                 <optgroup label="Japonés">
                                     <option value="'Meiryo', 'MS Gothic', sans-serif">Meiryo (Recomendado JP)</option>
                                     <option value="'MS PGothic', 'MS Gothic', sans-serif">MS PGothic (VN Classic)</option>
@@ -851,7 +893,7 @@
                                 </optgroup>
                                 <option value="custom" data-i18n-font="custom_font">✏️ Personalizado...</option>
                             </select>
-                            <input type="text" id="custom-font-input" class="hidden w-full p-1.5 mt-1 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Ej: 'MS Gothic', 'Noto Sans JP', sans-serif" oninput="onFontFamilyChange(); markUnsaved()">
+                            <input type="text" id="custom-font-input" data-immediate="true" class="hidden w-full p-1.5 mt-1 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Ej: 'MS Gothic', 'Noto Sans JP', sans-serif" onchange="saveOverlayImmediate()">
                         </div>
                         <!-- Font Size -->
                         <div>
@@ -859,13 +901,13 @@
                                 <span class="text-[10px] text-gray-400" data-i18n="font_size">Tamaño de Letra</span>
                                 <span id="font-size-val" class="text-[10px] font-mono text-emerald-500">24px</span>
                             </div>
-                            <input type="range" id="font-size-range" min="14" max="48" value="24" class="w-full" oninput="document.getElementById('font-size-val').innerText=this.value+'px'; markUnsaved()">
+                            <input type="range" id="font-size-range" min="14" max="48" value="24" class="w-full" data-immediate="true" oninput="document.getElementById('font-size-val').innerText=this.value+'px'; saveOverlayImmediateDebounced()" onchange="saveOverlayImmediate()">
                         </div>
                         <!-- Theme + Opacity -->
                         <div class="grid grid-cols-2 gap-2">
                             <div>
                                 <label class="block text-[10px] text-gray-400 mb-1" data-i18n="output_theme">Tema</label>
-                                <select id="output-theme" onchange="markUnsaved()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <select id="output-theme" data-immediate="true" onchange="saveOverlayImmediate()" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
                                     <option value="dark" data-i18n="theme_dark_box">Negro (Letra Blanca)</option>
                                     <option value="light" data-i18n="theme_light_box">Blanco (Letra Negra)</option>
                                 </select>
@@ -875,7 +917,7 @@
                                     <span class="text-[10px] text-gray-400" data-i18n="opacity_label">Opacidad</span>
                                     <span id="opacity-val" class="text-[10px] font-mono text-emerald-500">85%</span>
                                 </div>
-                                <input type="range" id="opacity-range" min="20" max="100" value="85" class="w-full" oninput="document.getElementById('opacity-val').innerText=this.value+'%'; markUnsaved()">
+                                <input type="range" id="opacity-range" min="20" max="100" value="85" class="w-full" data-immediate="true" oninput="document.getElementById('opacity-val').innerText=this.value+'%'; saveOverlayImmediateDebounced()" onchange="saveOverlayImmediate()">
                             </div>
                         </div>
                         <!-- Click-Through Mode -->
@@ -885,7 +927,7 @@
                                 <p class="text-[9px] text-gray-400" data-i18n="click_through_desc">El ratón atraviesa el overlay. Ctrl+Shift+M</p>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="click-through-toggle" class="sr-only peer" onchange="toggleClickThrough(this.checked)">
+                                <input type="checkbox" id="click-through-toggle" class="sr-only peer" data-immediate="true" onchange="toggleClickThrough(this.checked)">
                                 <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-emerald-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                             </label>
                         </div>
@@ -908,7 +950,7 @@
                                 <span class="text-[10px] text-gray-400" data-i18n="debounce_label">Retardo de Traducción</span>
                                 <span id="debounce-val" class="text-[10px] font-mono text-emerald-500">300ms</span>
                             </div>
-                            <input type="range" id="debounce-range" min="100" max="2000" step="50" value="300" class="w-full" oninput="document.getElementById('debounce-val').innerText=this.value+'ms'; markUnsaved()">
+                            <input type="range" id="debounce-range" min="100" max="2000" step="50" value="300" class="w-full" oninput="document.getElementById('debounce-val').innerText=this.value+'ms'; markUnsaved('modal')">
                             <p class="text-[9px] text-gray-400" data-i18n="debounce_desc">Wait time before translating new text.</p>
                         </div>
                         <!-- v3.13.59 (LLM engine overhaul, Fase 4): replaces the old bare
@@ -930,7 +972,7 @@
                                  doc comment in llm-base.js for why this used to be silently
                                  tied to whether the prompt was customized. -->
                             <label class="flex items-center gap-1.5 text-[9px] text-gray-500 cursor-pointer">
-                                <input type="checkbox" id="llm-fewshot-enabled" checked onchange="markUnsaved()">
+                                <input type="checkbox" id="llm-fewshot-enabled" checked onchange="markUnsaved('modal')">
                                 <span data-i18n="prompt_fewshot_toggle">Usar ejemplos de muestra (few-shot)</span>
                             </label>
                             <details>
@@ -947,18 +989,18 @@
                             <div class="grid grid-cols-3 gap-2">
                                 <div>
                                     <span class="text-[9px] text-gray-400" data-i18n="llm_temperature_label">Temperatura</span>
-                                    <input type="number" id="llm-temperature" min="0" max="2" step="0.1" value="0.3" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" oninput="markUnsaved()">
+                                    <input type="number" id="llm-temperature" min="0" max="2" step="0.1" value="0.3" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" oninput="markUnsaved('modal')">
                                 </div>
                                 <div>
                                     <span class="text-[9px] text-gray-400" data-i18n="llm_max_tokens_label">Máx. Tokens</span>
-                                    <input type="number" id="llm-max-tokens" min="50" max="8000" step="50" value="1500" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" oninput="markUnsaved()">
+                                    <input type="number" id="llm-max-tokens" min="50" max="8000" step="50" value="1500" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" oninput="markUnsaved('modal')">
                                 </div>
                                 <div>
                                     <div class="flex items-center gap-1">
-                                        <input type="checkbox" id="llm-top-p-enabled" onchange="document.getElementById('llm-top-p').disabled = !this.checked; markUnsaved()">
+                                        <input type="checkbox" id="llm-top-p-enabled" onchange="document.getElementById('llm-top-p').disabled = !this.checked; markUnsaved('modal')">
                                         <span class="text-[9px] text-gray-400" data-i18n="llm_top_p_label">Top P</span>
                                     </div>
-                                    <input type="number" id="llm-top-p" min="0" max="1" step="0.05" value="0.9" disabled class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs disabled:opacity-50" oninput="markUnsaved()">
+                                    <input type="number" id="llm-top-p" min="0" max="1" step="0.05" value="0.9" disabled class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs disabled:opacity-50" oninput="markUnsaved('modal')">
                                 </div>
                             </div>
                         </div>
@@ -968,7 +1010,7 @@
                                 <span class="text-[10px] text-gray-400" data-i18n="context_history">Context History</span>
                                 <span id="context-val" class="text-[10px] font-mono text-emerald-500">5</span>
                             </div>
-                            <input type="range" id="context-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('context-val').innerText=this.value; markUnsaved()">
+                            <input type="range" id="context-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('context-val').innerText=this.value; markUnsaved('modal')">
                             <p id="context-unsupported-note" class="hidden text-[9px] text-amber-500 mt-1" data-i18n="context_unsupported_note">This engine translates each line independently — context has no effect here.</p>
                             <div class="flex items-center justify-between mt-1">
                                 <p class="text-[9px] text-gray-500" data-i18n="context_history_desc">Previous lines sent as context for LLM engines.</p>
@@ -981,7 +1023,7 @@
                                 <span class="text-[10px] text-gray-400" data-i18n="history_limit">Límite de Historial por Perfil</span>
                                 <span id="history-limit-val" class="text-[10px] font-mono text-emerald-500">5</span>
                             </div>
-                            <input type="range" id="history-limit-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('history-limit-val').innerText=this.value; markUnsaved()">
+                            <input type="range" id="history-limit-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('history-limit-val').innerText=this.value; markUnsaved('modal')">
                             <p class="text-[9px] text-gray-500" data-i18n="history_limit_desc">Máx. traducciones guardadas por perfil. 0 = desactivado.</p>
                         </div>
                     </div>
@@ -1014,7 +1056,7 @@
                                 <p class="text-[9px] text-gray-400" data-i18n="regex_filter_desc">Filtra el texto del juego antes de traducir. Elimina códigos, etiquetas y basura automáticamente.</p>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="enable-regex-filter" onchange="stageRegexFilterToggle()" class="sr-only peer" checked>
+                                <input type="checkbox" id="enable-regex-filter" data-immediate="true" onchange="toggleRegexFilterMaster()" class="sr-only peer" checked>
                                 <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                             </label>
                         </div>
@@ -1054,12 +1096,12 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_chars_desc">Colapsa un carácter repetido 3+ veces (恵恵恵→恵).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-collapse-repeated-chars" onchange="toggleHookCleanStep('collapse-repeated-chars', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-collapse-repeated-chars" data-immediate="true" onchange="toggleHookCleanStep('collapse-repeated-chars', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
                                     <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
-                                        <input type="checkbox" id="hook-clean-cjk-collapse-repeated-chars" onchange="toggleHookCleanCjkOnly('collapse-repeated-chars', this.checked)" class="w-3 h-3" checked>
+                                        <input type="checkbox" id="hook-clean-cjk-collapse-repeated-chars" data-immediate="true" onchange="toggleHookCleanCjkOnly('collapse-repeated-chars', this.checked)" class="w-3 h-3" checked>
                                         <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
                                     </label>
                                 </div>
@@ -1070,12 +1112,12 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_line_desc">Colapsa una oración completa repetida (ABCDABCD→ABCD).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-collapse-repeated-line" onchange="toggleHookCleanStep('collapse-repeated-line', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-collapse-repeated-line" data-immediate="true" onchange="toggleHookCleanStep('collapse-repeated-line', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
                                     <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
-                                        <input type="checkbox" id="hook-clean-cjk-collapse-repeated-line" onchange="toggleHookCleanCjkOnly('collapse-repeated-line', this.checked)" class="w-3 h-3" checked>
+                                        <input type="checkbox" id="hook-clean-cjk-collapse-repeated-line" data-immediate="true" onchange="toggleHookCleanCjkOnly('collapse-repeated-line', this.checked)" class="w-3 h-3" checked>
                                         <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
                                     </label>
                                 </div>
@@ -1086,12 +1128,12 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_variable_refresh_desc">Colapsa dos oraciones distintas repetidas cada una su propia cantidad de veces (S1S1S1S2S2S2→S1S2).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-detect-variable-refresh" onchange="toggleHookCleanStep('detect-variable-refresh', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-detect-variable-refresh" data-immediate="true" onchange="toggleHookCleanStep('detect-variable-refresh', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
                                     <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
-                                        <input type="checkbox" id="hook-clean-cjk-detect-variable-refresh" onchange="toggleHookCleanCjkOnly('detect-variable-refresh', this.checked)" class="w-3 h-3" checked>
+                                        <input type="checkbox" id="hook-clean-cjk-detect-variable-refresh" data-immediate="true" onchange="toggleHookCleanCjkOnly('detect-variable-refresh', this.checked)" class="w-3 h-3" checked>
                                         <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
                                     </label>
                                 </div>
@@ -1102,12 +1144,12 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_separated_desc">Colapsa una frase emitida dos veces, unida por un solo espacio (A A→A).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-detect-separated-duplicate" onchange="toggleHookCleanStep('detect-separated-duplicate', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-detect-separated-duplicate" data-immediate="true" onchange="toggleHookCleanStep('detect-separated-duplicate', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
                                     <label class="flex items-center gap-1.5 mt-1.5 cursor-pointer">
-                                        <input type="checkbox" id="hook-clean-cjk-detect-separated-duplicate" onchange="toggleHookCleanCjkOnly('detect-separated-duplicate', this.checked)" class="w-3 h-3" checked>
+                                        <input type="checkbox" id="hook-clean-cjk-detect-separated-duplicate" data-immediate="true" onchange="toggleHookCleanCjkOnly('detect-separated-duplicate', this.checked)" class="w-3 h-3" checked>
                                         <span class="text-[8px] text-gray-500" data-i18n="hook_clean_cjk_only_label">Solo CJK (recomendado)</span>
                                     </label>
                                 </div>
@@ -1118,7 +1160,7 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_shrinking_desc">Detecta llamadas con parámetro decreciente (ABCD+BCD+CD+D→ABCD).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-detect-shrinking-suffix" onchange="toggleHookCleanStep('detect-shrinking-suffix', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-detect-shrinking-suffix" data-immediate="true" onchange="toggleHookCleanStep('detect-shrinking-suffix', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
@@ -1130,7 +1172,7 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_doubled_desc">Corrige texto donde cada carácter aparece dos veces (NNooww→Now).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-undouble-text" onchange="toggleHookCleanStep('undouble-text', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-undouble-text" data-immediate="true" onchange="toggleHookCleanStep('undouble-text', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
@@ -1142,7 +1184,7 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_segments_desc">Elimina delimitadores basura y segmentos duplicados (0texto0texto0→texto).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-deduplicate-segments" onchange="toggleHookCleanStep('deduplicate-segments', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-deduplicate-segments" data-immediate="true" onchange="toggleHookCleanStep('deduplicate-segments', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
@@ -1154,7 +1196,7 @@
                                             <p class="text-[8px] text-gray-400" data-i18n="hook_clean_step_growing_desc">Detecta redibujado carácter por carácter (A+AB+ABC→ABC).</p>
                                         </div>
                                         <label class="relative inline-flex items-center cursor-pointer shrink-0">
-                                            <input type="checkbox" id="hook-clean-detect-growing-prefix" onchange="toggleHookCleanStep('detect-growing-prefix', this.checked)" class="sr-only peer" checked>
+                                            <input type="checkbox" id="hook-clean-detect-growing-prefix" data-immediate="true" onchange="toggleHookCleanStep('detect-growing-prefix', this.checked)" class="sr-only peer" checked>
                                             <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-amber-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
                                         </label>
                                     </div>
@@ -1163,12 +1205,91 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- ===== Avanzado Category (collapsible, v3.13.8x settings UX audit) =====
+                     Collapsed by default (see toggleSettingsModal()) — knobs
+                     that ARE real (each has its own live wiring, not a
+                     ghost setting) but aren't things most people need to
+                     touch: DeepL's quality/speed tradeoff, how the
+                     glossary gets applied to LLM engines, translation
+                     memory reuse, OCR's scan interval, plus Manual Mode and
+                     the XUAT port relocated here from the sidebar. -->
+                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
+                    <button onclick="toggleSettingsCategory('advanced')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
+                        <div class="flex items-center gap-2">
+                            <div class="w-1 h-5 bg-gray-500 rounded-full"></div>
+                            <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider" data-i18n="settings_cat_advanced">Avanzado</h3>
+                        </div>
+                        <svg id="cat-advanced-chevron" class="w-4 h-4 text-gray-400 transition-transform -rotate-90" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
+                    </button>
+                    <div id="cat-advanced-content" class="px-4 pb-4 pt-3 space-y-3" style="display:none">
+                        <!-- DeepL model type -->
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="deepl_model_type_label">Modelo de DeepL</label>
+                            <select id="deepl-model-type" onchange="markUnsaved('modal')" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <option value="prefer_quality_optimized" data-i18n="deepl_model_type_quality">Calidad</option>
+                                <option value="prefer_latency_optimized" data-i18n="deepl_model_type_speed">Velocidad</option>
+                            </select>
+                            <p class="text-[9px] text-gray-500 mt-1" data-i18n="deepl_model_type_desc">Solo afecta al motor DeepL. "Calidad" usa el modelo de nueva generación cuando el par de idiomas lo soporta.</p>
+                        </div>
+                        <!-- Glossary mode -->
+                        <div>
+                            <label class="block text-[10px] text-gray-400 mb-1" data-i18n="glossary_mode">Modo de Coincidencia</label>
+                            <select id="advanced-glossary-mode" onchange="markUnsaved('modal')" class="w-full p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
+                                <option value="hybrid" data-i18n="glossary_mode_hybrid">Automático (recomendado)</option>
+                                <option value="prompt" data-i18n="glossary_mode_prompt">Solo instrucción al modelo</option>
+                                <option value="literal" data-i18n="glossary_mode_literal">Solo reemplazo literal</option>
+                            </select>
+                            <p class="text-[9px] text-gray-500 mt-1" data-i18n="glossary_mode_desc">Cómo se aplica el glosario en motores LLM. Solo afecta a OpenAI/Local LLM — el resto siempre usa reemplazo literal.</p>
+                        </div>
+                        <!-- Translation memory -->
+                        <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
+                            <div>
+                                <span class="text-xs font-medium" data-i18n="translation_memory">Translation Memory</span>
+                                <p class="text-[9px] text-gray-400" data-i18n="tm_desc">Reutiliza traducciones previas para diálogos repetidos. Ahorra llamadas API y reduce latencia.</p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="enable-translation-memory" onchange="markUnsaved('modal')" class="sr-only peer" checked>
+                                <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-emerald-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                            </label>
+                        </div>
+                        <!-- OCR capture interval -->
+                        <div>
+                            <div class="flex justify-between mb-1">
+                                <span class="text-[10px] text-gray-400" data-i18n="ocr_interval">Intervalo de Captura</span>
+                                <span id="ocr-interval-val" class="text-[10px] font-mono text-emerald-500">3500ms</span>
+                            </div>
+                            <input type="range" id="ocr-interval-range" min="1500" max="8000" step="250" value="3500" class="w-full" oninput="document.getElementById('ocr-interval-val').innerText=this.value+'ms'; markUnsaved('modal')">
+                            <p class="text-[9px] text-gray-500" data-i18n="ocr_interval_desc">Cada cuánto se captura la pantalla automáticamente en modo OCR.</p>
+                        </div>
+                        <div class="border-t border-gray-200 dark:border-dark-600 pt-3 space-y-3">
+                            <!-- Manual Textractor mode — relocated from the
+                                 sidebar, id unchanged. Tier A/immediate,
+                                 same as before the move (toggleManualMode()
+                                 already calls api.saveSettings() itself). -->
+                            <div class="flex items-center justify-between">
+                                <label class="text-[10px] text-gray-400" data-i18n="manual_mode_label">Modo Manual (sin CLI)</label>
+                                <input type="checkbox" id="manual-textractor-mode" data-immediate="true" onchange="toggleManualMode(this.checked)" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                            </div>
+                            <p class="text-[9px] text-gray-400 -mt-2" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
+                            <!-- XUAT port — relocated from the sidebar, id
+                                 unchanged (still read by copyXuatUrl() etc). -->
+                            <div class="flex items-center gap-2">
+                                <span class="text-[10px] text-gray-400" data-i18n="xuat_port">Puerto</span>
+                                <input type="number" id="xuat-port" value="8419" min="1024" max="65535" class="w-20 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs text-center" onchange="markUnsaved('modal')">
+                                <span class="text-[9px] text-gray-500">XUAT</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Footer: Apply + Reset buttons (always visible) -->
             <div class="flex gap-2 px-6 py-3 border-t border-gray-200 dark:border-dark-600 bg-white dark:bg-dark-800">
-                <button onclick="applySettingsModal()" id="settings-apply-btn" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded-lg shadow-lg shadow-emerald-500/20 transition transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+                <button onclick="applySettingsModal()" id="settings-apply-btn" class="save-btn-idle flex-1 font-bold py-2 rounded-lg transition transform active:scale-[0.98] flex items-center justify-center gap-2 text-sm">
+                    <!-- v3.13.8x: same as #save-btn-check — hidden until a
+                         save actually completes, see flashSaved(). -->
+                    <svg id="settings-apply-check" class="hidden w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
                     <span id="settings-apply-text" data-i18n="save_btn">Aplicar</span>
                 </button>
                 <button onclick="resetSettingsToDefaults()" class="px-4 py-2 bg-gray-200 dark:bg-dark-600 hover:bg-gray-300 dark:hover:bg-dark-500 text-gray-600 dark:text-gray-300 font-medium rounded-lg transition text-sm flex items-center gap-1.5" data-i18n="reset_defaults_btn">Restablecer</button>

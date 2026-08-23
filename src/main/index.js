@@ -85,10 +85,13 @@ app.whenReady().then(() => {
       enableTranslationMemory: true,
       deeplFormality: 'prefer_more',
       deeplCustomInstructions: [],
-      deeplStyleId: '',
-      deeplTranslationMemoryId: '',
-      deeplTranslationMemoryThreshold: 75,
-      deeplLanguageFeatures: null,
+      // v3.13.8x (settings UX audit): deeplStyleId/deeplTranslationMemoryId/
+      // deeplTranslationMemoryThreshold/deeplLanguageFeatures removed —
+      // dead defaults with no UI, no real writer, and (the first three) no
+      // reader either once pipeline.js's 'deepl' case stopped passing them
+      // in this same audit. See profile-migrations.js's DEAD_SETTING_KEYS_V2
+      // comment for the full reasoning; an existing install's config.json
+      // gets these stripped by ProfileStore#migrate()'s v3->v4 step.
       // v3.13.6x (LLM engine overhaul, Fase 6): global user preference (a
       // cost/latency-vs-quality tradeoff), not per-game — same reasoning as
       // llmTemperature. 'prefer_quality_optimized' matches what the app was
@@ -163,7 +166,11 @@ app.whenReady().then(() => {
       // v3.11.30: Regex text filter
       enableRegexFilter: true,
       // v3.13.01: OCR engine selection ('tesseract' or 'paddle')
-      ocrEngine: 'tesseract'
+      ocrEngine: 'tesseract',
+      // v3.13.8x (settings UX audit): exposed in the modal's Avanzado
+      // category. Matches the 3500ms default _startOcrAutoCapture() has
+      // used since v3.9.9 — see ipc-handlers.js.
+      ocrCaptureIntervalMs: 3500
     }
   });
 

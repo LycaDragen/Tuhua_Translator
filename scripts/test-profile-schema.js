@@ -230,7 +230,9 @@ check('round-trip-identity-over-scoped-subset', () => {
   return { pass, actual: roundTripped, expected: original };
 });
 
-check('schema-version-is-3', () => ({ pass: PROFILE_SCHEMA_VERSION === 3 }));
+// v3.13.8x (settings UX audit): bumped 3 -> 4 for stripGhostSettingsV2() —
+// see profile-migrations.js's DEAD_SETTING_KEYS_V2 comment.
+check('schema-version-is-4', () => ({ pass: PROFILE_SCHEMA_VERSION === 4 }));
 
 // ─── v3.13.58 (Fase 3): llmProvider* fields ─────────────────────────────
 check('llm-provider-keys-is-promoted-to-global-not-scoped', () => {

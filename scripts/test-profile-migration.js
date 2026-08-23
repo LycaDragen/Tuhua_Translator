@@ -17,7 +17,7 @@
  *   node scripts/test-profile-migration.js --quiet
  */
 const path = require('path');
-const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions, seedDeeplFormality } =
+const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions, seedDeeplFormality, stripGhostSettingsV2 } =
   require(path.join('..', 'src', 'services', 'profiles', 'profile-migrations.js'));
 const ProfileStore = require(path.join('..', 'src', 'services', 'profiles', 'profile-store.js'));
 const { PROFILE_SCHEMA_VERSION, PROMOTED_TO_GLOBAL_KEYS } =
@@ -34,6 +34,7 @@ function parseArgs(argv) {
 function createFakeStore(initialData = {}) {
   let data = JSON.parse(JSON.stringify(initialData));
   let setCalls = 0;
+  let deleteCalls = 0;
   return {
     get(key, def) {
       if (key === undefined) return JSON.parse(JSON.stringify(data));
@@ -47,8 +48,23 @@ function createFakeStore(initialData = {}) {
         data[keyOrObj] = value;
       }
     },
+    // v3.13.8x: real electron-store's set(object) only merges — it never
+    // clears a key absent from the object (see profile-store.js's migrate()
+    // for where that distinction bit the v3->v4 ghost-settings step). This
+    // fake needs its own .delete() to match, or that class of bug is
+    // invisible against this fake even though it's real against the actual
+    // store. Tracked separately from setCalls — the "one write" invariant
+    // this file's header comment describes is specifically about the
+    // profiles/settings set() call, not about ghost-key deletes, which are
+    // an intentionally separate, idempotent side-channel (see
+    // profile-store.js's migrate()).
+    delete(key) {
+      deleteCalls += 1;
+      delete data[key];
+    },
     _raw: () => JSON.parse(JSON.stringify(data)),
-    _setCallCount: () => setCalls
+    _setCallCount: () => setCalls,
+    _deleteCallCount: () => deleteCalls
   };
 }
 
@@ -416,6 +432,61 @@ check('dead-settings-are-stripped', () => {
   const stillPresent = ['perProfileGlossary', 'enableGlossary', 'enableCache', 'autoApplyGlossary', 'showSourceTextInOverlay'].filter((k) => Object.prototype.hasOwnProperty.call(result.settings, k));
   return { pass: stillPresent.length === 0, actual: stillPresent };
 }, 'showSourceTextInOverlay added in step 8 (v3.13.44) — looked legitimate (translated label across 8 locales) but had zero actual wiring, same dead-setting class as the original four.');
+
+// ─── Ghost settings V2 stripped (settings UX audit, v3->v4) ────────────
+check('strip-ghost-settings-v2-removes-all-six-keys', () => {
+  const settings = {
+    deeplStyleId: 'style-123', deeplTranslationMemoryId: 'tm-456', deeplTranslationMemoryThreshold: 90,
+    deeplLanguageFeatures: { en: {} }, apiKey: 'legacy-key', profilesBackupV0: { profiles: [] },
+    deeplKey: 'keep-me', targetLang: 'es'
+  };
+  const result = stripGhostSettingsV2(settings);
+  const ghostKeys = ['deeplStyleId', 'deeplTranslationMemoryId', 'deeplTranslationMemoryThreshold', 'deeplLanguageFeatures', 'apiKey', 'profilesBackupV0'];
+  const stillPresent = ghostKeys.filter((k) => Object.prototype.hasOwnProperty.call(result.settings, k));
+  const pass = result.changed === true && stillPresent.length === 0
+    && result.settings.deeplKey === 'keep-me' && result.settings.targetLang === 'es';
+  return { pass, actual: { stillPresent, settings: result.settings } };
+}, 'All six DEAD_SETTING_KEYS_V2 removed in one pass; unrelated real settings (deeplKey, targetLang) untouched.');
+
+check('strip-ghost-settings-v2-is-a-no-op-when-nothing-to-strip', () => {
+  const settings = { deeplKey: 'x', targetLang: 'es' };
+  const result = stripGhostSettingsV2(settings);
+  const pass = result.changed === false && JSON.stringify(result.settings) === JSON.stringify(settings);
+  return { pass, actual: result };
+}, 'Idempotent: a store already past this step (or that never had these keys) reports changed:false.');
+
+check('profile-store-migrate-from-v3-strips-ghost-settings-and-keeps-existing-backup-gone', () => {
+  // Simulates Lyca's real install: already fully migrated to v3 (the
+  // v0->v1 step's own backup/promotion logic never runs again — see the
+  // class doc comment on why re-running it against grown data would be a
+  // regression), but still carrying the six now-dead keys from earlier
+  // releases, including its own historical profilesBackupV0.
+  const store = createFakeStore({
+    profilesSchemaVersion: 3,
+    profiles: [v0Profile({ name: 'Default', isDefault: true, deeplFormality: 'default', deeplCustomInstructions: [] })],
+    activeProfile: 'Default',
+    deeplKey: 'k1',
+    deeplStyleId: 'style-123', deeplTranslationMemoryId: 'tm-456', deeplTranslationMemoryThreshold: 90,
+    deeplLanguageFeatures: { en: {} }, apiKey: 'legacy-key', profilesBackupV0: { profiles: [] }
+  });
+  const ps = new ProfileStore(store);
+  const setCallsBefore = store._setCallCount();
+  const result = ps.migrate([]);
+  const setCallsAfter = store._setCallCount();
+  const raw = store._raw();
+  const ghostKeys = ['deeplStyleId', 'deeplTranslationMemoryId', 'deeplTranslationMemoryThreshold', 'deeplLanguageFeatures', 'apiKey', 'profilesBackupV0'];
+  const stillPresent = ghostKeys.filter((k) => Object.prototype.hasOwnProperty.call(raw, k));
+  const pass = result.ran === true
+    // The profiles/settings write stays a single set() call — the six
+    // ghost-key deletes are separate, tracked store.delete() calls (see
+    // createFakeStore()'s own comment on why they're counted apart).
+    && (setCallsAfter - setCallsBefore) === 1
+    && store._deleteCallCount() === ghostKeys.length
+    && raw.profilesSchemaVersion === PROFILE_SCHEMA_VERSION
+    && stillPresent.length === 0
+    && raw.deeplKey === 'k1';
+  return { pass, actual: { stillPresent, raw, deleteCalls: store._deleteCallCount() } };
+}, 'Starting from v3 (already through v0->v1/v1->v2/v2->v3), only the new v3->v4 step runs — the six ghost keys, including a STALE historical backup that has already proven itself, are gone via real store.delete() calls (not just omitted from the merge-set); a real setting (deeplKey) survives.');
 
 // ─── ProfileStore#migrate() wrapper: version gate + one write ─────────
 check('profile-store-migrate-runs-once-and-gates-by-version', () => {

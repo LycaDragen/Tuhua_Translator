@@ -327,13 +327,19 @@ class TranslationPipeline extends EventEmitter {
         this.engines[engineName] = new BingEngine();
         break;
       case 'deepl':
-        this.engines[engineName] = new DeepLEngine(s.deeplKey, s.deeplUsePro, {
+        // v3.13.8x (settings UX audit): usePro is no longer a settings key —
+        // DeepLEngine derives it from the key's ':fx' suffix itself now (see
+        // deepl.js's header comment). styleId/translationMemoryId/
+        // translationMemoryThreshold dropped too: all three were Pro-plan
+        // DeepL features with no UI to set them and no default — always
+        // sent as their fallback (unset/75), i.e. dead weight, not a working
+        // feature waiting for a UI. See [[plan-deepl-mail-review]], which
+        // already concluded DeepL's server-side translation memory adds
+        // nothing over Tuhua's own Context Memory.
+        this.engines[engineName] = new DeepLEngine(s.deeplKey, {
           formality: s.deeplFormality || 'prefer_more',
           // v3.11.28: New DeepL features
           customInstructions: s.deeplCustomInstructions || [],
-          styleId: s.deeplStyleId || '',
-          translationMemoryId: s.deeplTranslationMemoryId || '',
-          translationMemoryThreshold: s.deeplTranslationMemoryThreshold || 75,
           // v3.13.6x (Fase 6): global user preference (cost/latency vs.
           // quality tradeoff), not per-game — same reasoning as llmTemperature.
           modelType: s.deeplModelType || 'prefer_quality_optimized'
@@ -437,20 +443,27 @@ class TranslationPipeline extends EventEmitter {
         break;
       }
       case 'libretranslate':
+        // v3.13.8x (settings UX audit): dropped `apiKey: s.libretranslateKey`
+        // — no default, no UI field, no writer anywhere; always undefined.
+        // LibreTranslate's self-hosted/localhost mode (Tuhua's supported
+        // path) doesn't need one. Re-add if the public libretranslate.com
+        // API (which does require a key) is ever wired up with a real field.
         this.engines[engineName] = new LibreTranslateEngine({
-          endpoint: s.libretranslateEndpoint || 'http://localhost:5000',
-          apiKey: s.libretranslateKey || ''
+          endpoint: s.libretranslateEndpoint || 'http://localhost:5000'
         });
         break;
       case 'custom-mt':
+        // v3.13.8x (settings UX audit): dropped `headers: s.customMTHeaders`
+        // and `apiKey: s.customMTApiKey` — same reasoning, always undefined.
+        // The Auth Header field's `{{apiKey}}` placeholder promised a value
+        // that could never resolve to anything; it's now a plain text field
+        // where the key is typed in literally (see index.html).
         this.engines[engineName] = new CustomMTEngine({
           endpoint: s.customMTEndpoint || '',
           method: s.customMTMethod || 'POST',
-          headers: s.customMTHeaders || {},
           bodyTemplate: s.customMTBody || '{"text":"{{text}}","source":"{{source}}","target":"{{target}}"}',
           responsePath: s.customMTResponsePath || 'data.translations.0.translatedText',
-          authHeader: s.customMTAuthHeader || '',
-          apiKey: s.customMTApiKey || ''
+          authHeader: s.customMTAuthHeader || ''
         });
         break;
       default:
@@ -1272,6 +1285,18 @@ class TranslationPipeline extends EventEmitter {
     // not fall back to a default (see the constructor's comment for why).
     if (newSettings.maxContextHistory !== undefined) {
       this.contextMemory.resize(parseInt(newSettings.maxContextHistory));
+    }
+    // v3.13.8x (settings UX audit): enableTranslationMemory used to be
+    // read ONLY in the constructor (`enabled: settings.enableTranslationMemory
+    // !== false`), so there was no UI for it AND no way to change it
+    // without restarting the app even if there had been one. Now exposed
+    // in the modal's Avanzado category — this is what makes toggling it
+    // actually take effect: save-settings already calls updateSettings()
+    // on every save, and TranslationMemory#get() checks `this.enabled` on
+    // every lookup, so this applies starting with the very next
+    // translation (a request already in flight keeps using the old value).
+    if (newSettings.enableTranslationMemory !== undefined) {
+      this.translationMemory.setEnabled(newSettings.enableTranslationMemory !== false);
     }
   }
 

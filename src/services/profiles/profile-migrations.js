@@ -39,6 +39,36 @@ const { normalizeProfile, PROMOTED_TO_GLOBAL_KEYS } = require('./profile-schema'
 const PROMOTABLE_CREDENTIAL_KEYS = ['deeplKey', 'openaiKey', 'apiKey'];
 const DEAD_SETTING_KEYS = ['perProfileGlossary', 'enableGlossary', 'enableCache', 'autoApplyGlossary', 'showSourceTextInOverlay'];
 
+// v3.13.8x (settings UX audit): second round of dead-key cleanup, same
+// shape as DEAD_SETTING_KEYS above but wired as its OWN migration step
+// (see stripGhostSettingsV2() + profile-store.js's migrate(), v3->v4) —
+// DEAD_SETTING_KEYS only runs for a genuinely-v0 install, so an install
+// already at v1+ (everyone since v3.13.40) would never have these
+// stripped if they were just added to that array instead.
+//   - deeplStyleId/deeplTranslationMemoryId/deeplTranslationMemoryThreshold:
+//     Pro-plan DeepL features with no UI field and no default consumer
+//     beyond their own always-empty fallback — see deepl.js's
+//     constructor (options.styleId etc.) and pipeline.js's 'deepl' case,
+//     which stopped passing them in this same audit.
+//   - deeplLanguageFeatures: declared as a default, never read or written
+//     anywhere — the renderer's similarly-named in-memory cache
+//     (deeplLanguageFeaturesCache) is a local variable fed by a separate
+//     IPC call, unrelated to this store key.
+//   - apiKey: the legacy global credential slot PROMOTABLE_CREDENTIAL_KEYS
+//     (below) promotes an old per-profile value INTO — nothing has ever
+//     read it back out as a global setting (deeplKey/llmProviderKeys are
+//     what every engine actually reads). Left in PROMOTABLE_CREDENTIAL_KEYS
+//     unchanged, since that array's job (rescue a legacy per-profile value
+//     during the v0->v1 step) is independent of whether the promoted
+//     value then sits around forever — this step deletes it right after.
+//   - profilesBackupV0: the one-time safety snapshot the v0->v1 step
+//     itself writes (see migrateProfiles()'s `backup` below) — a pure
+//     insurance policy, never read back by any code path. By the time an
+//     install reaches v3 (this step's precondition), v0->v1 has clearly
+//     already succeeded (profiles have loaded correctly ever since), so
+//     the backup's job is done.
+const DEAD_SETTING_KEYS_V2 = ['deeplStyleId', 'deeplTranslationMemoryId', 'deeplTranslationMemoryThreshold', 'deeplLanguageFeatures', 'apiKey', 'profilesBackupV0'];
+
 function maskSecret(value) {
   const str = String(value);
   if (str.length <= 4) return '*'.repeat(str.length);
@@ -266,14 +296,35 @@ function seedDeeplFormality(profiles, globalFormality) {
   return { profiles: seeded, changed };
 }
 
+/**
+ * Migration 3 -> 4 — pure, settings-only (profiles untouched). Strips
+ * DEAD_SETTING_KEYS_V2 from the global settings object; see that
+ * constant's own comment for what each key was and why it's dead.
+ * Idempotent: deleting an already-absent key is a no-op, so re-running
+ * this against a store that's already been through it changes nothing.
+ */
+function stripGhostSettingsV2(settings) {
+  const next = { ...settings };
+  let changed = false;
+  for (const key of DEAD_SETTING_KEYS_V2) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) {
+      delete next[key];
+      changed = true;
+    }
+  }
+  return { settings: next, changed };
+}
+
 module.exports = {
   PROMOTABLE_CREDENTIAL_KEYS,
   DEAD_SETTING_KEYS,
+  DEAD_SETTING_KEYS_V2,
   resolvePromotedValue,
   splitGlossaryLayer,
   glossaryEntryKey,
   maskSecret,
   migrateProfiles,
   seedDeeplCustomInstructions,
-  seedDeeplFormality
+  seedDeeplFormality,
+  stripGhostSettingsV2
 };

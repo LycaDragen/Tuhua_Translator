@@ -24,6 +24,17 @@
  *           tag_handling_version v2 support was added in v3.11.28 — grep
  *           confirms tag_handling was never actually sent; Tuhua doesn't
  *           translate XML/HTML-tagged content.
+ * v3.13.8x (settings UX audit): removed the constructor's `usePro` parameter.
+ *           It was fed by `settings.deeplUsePro`, a key with no default and
+ *           no writer anywhere in the app (found while auditing the settings
+ *           panel) — always `undefined`, so a real Pro key (no `:fx` suffix)
+ *           was silently sent to the Free endpoint and every call failed.
+ *           `usePro` is now derived from the key's `:fx` suffix alone, in
+ *           both directions, wherever the key is set (constructor and
+ *           `setApiKey()`) — no `:fx` now correctly means Pro instead of
+ *           defaulting to Free. `setUsePro()` is removed with it: keeping a
+ *           way to override the endpoint independently of the key would just
+ *           reopen the same "which one wins" ambiguity that caused the bug.
  */
 const axios = require('axios');
 const log = require('electron-log');
@@ -67,16 +78,15 @@ const DEFAULT_INSTRUCTIONS = [
 ];
 
 class DeepLEngine {
-  constructor(apiKey, usePro = false, options = {}) {
+  constructor(apiKey, options = {}) {
     this.name = 'deepl';
     this.displayName = 'DeepL API';
     this.requiresKey = true;
     this.apiKey = apiKey;
-    this.usePro = usePro || false;
-    // v3.11.27: Auto-detect Free key by :fx suffix
-    if (this.apiKey && this.apiKey.endsWith(':fx')) {
-      this.usePro = false;
-    }
+    // v3.13.8x: usePro is derived from the key itself, not a separate
+    // setting — see this file's header comment for why. DeepL's own
+    // convention: Free keys end in ':fx', Pro keys don't.
+    this.usePro = !!(this.apiKey && !this.apiKey.endsWith(':fx'));
     this.baseUrl = this.usePro
       ? 'https://api.deepl.com/v2'
       : 'https://api-free.deepl.com/v2';
@@ -456,20 +466,14 @@ class DeepLEngine {
 
   setApiKey(key) {
     this.apiKey = key;
-    if (key && key.endsWith(':fx')) {
-      this.usePro = false;
-      this.baseUrl = 'https://api-free.deepl.com/v2';
-    }
-    // Clear language features cache when key changes
-    this._languageFeatures = null;
-  }
-
-  setUsePro(usePro) {
-    this.usePro = usePro;
-    this.baseUrl = usePro
+    // v3.13.8x: derive usePro from the new key in both directions (was
+    // Free-only before — switching TO a Pro key never flipped the
+    // endpoint back). See this file's header comment.
+    this.usePro = !!(key && !key.endsWith(':fx'));
+    this.baseUrl = this.usePro
       ? 'https://api.deepl.com/v2'
       : 'https://api-free.deepl.com/v2';
-    // Clear language features cache when endpoint changes
+    // Clear language features cache when key changes
     this._languageFeatures = null;
   }
 

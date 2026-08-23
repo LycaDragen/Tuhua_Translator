@@ -11,7 +11,7 @@
  */
 
 const { createProfile, normalizeProfile, PROFILE_SCHEMA_VERSION } = require('./profile-schema');
-const { migrateProfiles, seedDeeplCustomInstructions, seedDeeplFormality } = require('./profile-migrations');
+const { migrateProfiles, seedDeeplCustomInstructions, seedDeeplFormality, stripGhostSettingsV2, DEAD_SETTING_KEYS_V2 } = require('./profile-migrations');
 
 const DEFAULT_PROFILE_NAME = 'Por Defecto';
 
@@ -226,6 +226,34 @@ class ProfileStore {
       profiles = result.profiles;
       changed = changed || result.changed;
       currentVersion = 3;
+    }
+
+    let ghostKeysToDelete = [];
+    if (currentVersion < 4) {
+      const result = stripGhostSettingsV2(settings);
+      // v3.13.8x: store.set(object) only MERGES — verified against the real
+      // electron-store package that it never clears a key the object
+      // doesn't mention (that's exactly why this class's docstring above
+      // says "leaves every other setting alone"). Deleting a key from this
+      // in-memory `settings` copy and then spreading it into `toWrite`
+      // below is therefore NOT enough to actually remove it from the
+      // persisted store — the pre-existing value would just survive
+      // untouched. Caught by a real test (see test-profile-migration.js)
+      // that checked the store's raw state after migrate(), not just this
+      // function's return value. The keys present get deleted explicitly,
+      // BEFORE the main set() below, not after — so a crash mid-migration
+      // leaves profilesSchemaVersion still < 4 and this step simply
+      // re-runs (store.delete() on an already-gone key is a no-op); doing
+      // it in the other order could bump the version while leaving a
+      // ghost key stranded forever, since v4+ never re-checks this step.
+      ghostKeysToDelete = DEAD_SETTING_KEYS_V2.filter((k) => Object.prototype.hasOwnProperty.call(settings, k));
+      settings = result.settings;
+      changed = changed || result.changed;
+      currentVersion = 4;
+    }
+
+    for (const key of ghostKeysToDelete) {
+      this.store.delete(key);
     }
 
     const toWrite = {

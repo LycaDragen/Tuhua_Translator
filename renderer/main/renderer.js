@@ -28,9 +28,10 @@
         // only in the main process — fetched once via loadPromptPresets().
         let promptPresetsCatalog = { presets: [], defaultTemplate: '' };
         // v3.10.8: Staged changes — settings changes are held in the UI
-        // until the user clicks "Aplicar y Guardar". Only operational
-        // controls (play/pause, theme, language UI, Textractor) auto-save.
-        let hasUnsavedChanges = false;
+        // until the user clicks "Aplicar y Guardar"/"Aplicar". Only Tier A
+        // controls (see markUnsaved()'s doc comment) auto-save.
+        // sidebarDirty/modalDirty/glossaryDirty are declared right next to
+        // markUnsaved()/markSaved(), which are their only readers/writers.
         // Staged glossary changes — entries added/deleted before save
         let stagedGlossaryAdds = [];    // entries to add on save
         let stagedGlossaryDeletes = []; // entry IDs to delete on save
@@ -376,9 +377,11 @@
             if (settings.overlayOpacity) { document.getElementById('opacity-range').value = settings.overlayOpacity; document.getElementById('opacity-val').innerText = settings.overlayOpacity + '%'; }
             if (settings.textractorCliPath) document.getElementById('textractor-cli-path').value = settings.textractorCliPath;
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
-            // v3.13.37: persisted so auto-launch has a PID to work with
-            // right after Tuhua restarts, without the user re-typing it.
-            if (settings.gamePid) document.getElementById('game-pid').value = settings.gamePid;
+            // v3.13.8x (settings UX audit): stopped restoring a persisted
+            // gamePid — a PID from a previous session is never valid for
+            // this one (every process gets a new PID on launch), so it was
+            // being shown as if it were current when it was always stale.
+            // See gatherConfig()'s matching removal for the write side.
             if (settings.debounceMs) { document.getElementById('debounce-range').value = settings.debounceMs; document.getElementById('debounce-val').innerText = settings.debounceMs + 'ms'; }
             // v3.13.59 (Fase 4): `settings.systemPrompt` is no longer read here
             // at all — the one-time migration (src/main/index.js) already
@@ -394,6 +397,15 @@
             document.getElementById('llm-fewshot-enabled').checked = settings.llmFewShot !== false;
             if (settings.maxContextHistory !== undefined) { document.getElementById('context-range').value = settings.maxContextHistory; document.getElementById('context-val').innerText = settings.maxContextHistory; }
             if (settings.historyLimit) { document.getElementById('history-limit-range').value = settings.historyLimit; document.getElementById('history-limit-val').innerText = settings.historyLimit; }
+
+            // v3.13.8x (settings UX audit): "Avanzado" category restores.
+            document.getElementById('deepl-model-type').value = settings.deeplModelType || 'prefer_quality_optimized';
+            document.getElementById('advanced-glossary-mode').value = settings.glossaryMode || 'hybrid';
+            document.getElementById('enable-translation-memory').checked = settings.enableTranslationMemory !== false;
+            if (settings.ocrCaptureIntervalMs) {
+                document.getElementById('ocr-interval-range').value = settings.ocrCaptureIntervalMs;
+                document.getElementById('ocr-interval-val').innerText = settings.ocrCaptureIntervalMs + 'ms';
+            }
 
             // Click-through toggle - restore from saved settings
             if (settings.clickThrough !== undefined) {
@@ -470,35 +482,106 @@
 
         // ===== UNSAVED CHANGES TRACKER =====
         // v3.10.8: Mark that settings have been changed but not yet saved.
-        // The "Aplicar y Guardar" button shows a visual indicator.
-        function markUnsaved() {
-            hasUnsavedChanges = true;
-            const btn = document.getElementById('save-btn');
-            if (btn) btn.classList.add('ring-2', 'ring-amber-400', 'ring-offset-1');
-            const text = document.getElementById('save-btn-text');
-            if (text) {
-                const t = translations[currentLang] || translations['en'];
-                text.innerText = t.unsaved_changes || 'Guardar Cambios *';
+        // The "Aplicar y Guardar"/"Aplicar" buttons show a visual indicator.
+        // v3.13.8x (settings UX audit, second pass): #save-btn (sidebar)
+        // and #settings-apply-btn (gear modal) each gather a DISJOINT set
+        // of Tier B fields (enforced by
+        // scripts/test-settings-tier-invariant.js) — but until this pass
+        // they shared ONE dirty flag, so editing a field that lives only
+        // in the modal (say, the OCR interval slider) also lit up the
+        // SIDEBAR's button, and clicking that sidebar button would show
+        // "✓ ¡Guardado!" without having saved the modal field at all
+        // (gatherConfig() doesn't read it). Real bug Lyca hit from the
+        // other direction: close the gear modal without clicking Aplicar,
+        // reopen it, the button was still green because nothing had ever
+        // cleared modalDirty for a change that was never actually
+        // committed (see toggleSettingsModal()'s close branch, which now
+        // discards the modal's own pending edits instead of leaving that
+        // state stuck). Three independent flags now:
+        //   - sidebarDirty: gatherConfig()'s fields (engine, API key,
+        //     endpoints, languages, Textractor path...)
+        //   - modalDirty: applySettingsModal()'s fields (prompt/LLM
+        //     params, context/history/debounce, Avanzado)
+        //   - glossaryDirty: stagedGlossaryAdds/-Deletes — genuinely
+        //     shared, both saveConfig() and applySettingsModal() flush it,
+        //     so it lights up (and clears from) BOTH buttons honestly,
+        //     unlike the old blanket sharing.
+        // "Tier A" controls (overlay appearance, HOOK cleaning steps,
+        // regex filter toggles, theme, UI language, input method, OCR
+        // engine, play/pause, DeepL formality/instructions) apply
+        // immediately via their own api.saveSettings()/dedicated-IPC call
+        // and never call markUnsaved() at all — so a gray button really
+        // does mean "nothing pending," not "nothing changed."
+        let sidebarDirty = false;
+        let modalDirty = false;
+        let glossaryDirty = false;
+
+        function _renderSaveButton(btnId, textId, dirty) {
+            const t = translations[currentLang] || translations['en'];
+            const btn = document.getElementById(btnId);
+            const text = document.getElementById(textId);
+            if (btn) {
+                btn.classList.toggle('save-btn-dirty', dirty);
+                btn.classList.toggle('save-btn-idle', !dirty);
             }
+            if (text) text.innerText = dirty ? (t.unsaved_changes || 'Guardar Cambios *') : (t.save_btn || 'Aplicar y Guardar');
         }
 
-        function markSaved() {
-            hasUnsavedChanges = false;
+        function _updateSaveButtonVisuals() {
+            _renderSaveButton('save-btn', 'save-btn-text', sidebarDirty || glossaryDirty);
+            _renderSaveButton('settings-apply-btn', 'settings-apply-text', modalDirty || glossaryDirty);
+        }
+
+        // scope: 'sidebar' | 'modal' | 'glossary' — required, no default,
+        // so every call site states which button it's actually claiming
+        // will save it (grep for markUnsaved( to audit).
+        function markUnsaved(scope) {
+            if (scope === 'modal') modalDirty = true;
+            else if (scope === 'glossary') glossaryDirty = true;
+            else if (scope === 'sidebar') sidebarDirty = true;
+            else { console.warn('[Tuhua] markUnsaved() called without a valid scope:', scope); sidebarDirty = true; }
+            _updateSaveButtonVisuals();
+        }
+
+        // scope: 'sidebar' | 'modal' — the button that was actually
+        // clicked. Glossary staging is cleared unconditionally: both
+        // saveConfig() and applySettingsModal() flush stagedGlossaryAdds/
+        // -Deletes before calling this, so by the time either one calls
+        // markSaved(), there is truly nothing glossary-related left
+        // pending for the OTHER button either.
+        function markSaved(scope) {
             stagedGlossaryAdds = [];
             stagedGlossaryDeletes = [];
-            // v3.11.33: Clear staged regex filter changes
-            stagedRegexToggles = {};
-            stagedRegexAdds = [];
-            stagedRegexDeletes = [];
-            stagedRegexEdits = {};
-            stagedEnableRegexFilter = null;
-            const btn = document.getElementById('save-btn');
-            if (btn) btn.classList.remove('ring-2', 'ring-amber-400', 'ring-offset-1');
-            const text = document.getElementById('save-btn-text');
-            if (text) {
-                const t = translations[currentLang] || translations['en'];
-                text.innerText = t.save_btn || 'Aplicar y Guardar';
-            }
+            glossaryDirty = false;
+            if (scope === 'modal') modalDirty = false;
+            else sidebarDirty = false;
+            _updateSaveButtonVisuals();
+        }
+
+        // v3.13.8x (settings UX audit): the checkmark icon on save-btn/
+        // settings-apply-btn used to be permanent button chrome, always
+        // visible even at rest — Lyca's feedback was that it should read
+        // as "this just saved," not decoration. Shown only for this flash
+        // window (2.5s), then hidden again — matches the ✓ text swap that
+        // was already there, just extends it to the icon too. Guarded
+        // against a newer change landing mid-flash: if the button already
+        // went back to dirty (save-btn-dirty) by the time the timeout
+        // fires, don't clobber that with the stale "saved" label.
+        function flashSaved(textId, checkId) {
+            const t = translations[currentLang] || translations['en'];
+            const text = document.getElementById(textId);
+            const check = document.getElementById(checkId);
+            const btn = check ? check.closest('button') : null;
+            if (check) check.classList.remove('hidden');
+            if (text) text.innerText = '✓ ' + (t.saved_confirm || '¡Guardado!');
+            setTimeout(() => {
+                if (btn && !btn.classList.contains('save-btn-idle')) return;
+                if (check) check.classList.add('hidden');
+                if (text) {
+                    const t2 = translations[currentLang] || translations['en'];
+                    text.innerText = t2.save_btn || 'Aplicar y Guardar';
+                }
+            }, 2500);
         }
 
         // ===== LANGUAGE =====
@@ -605,12 +688,20 @@
         }
 
         // ===== TABS =====
-        // v3.10.10: Discard all unsaved changes when switching tabs.
-        // This ensures a clean state — only "Aplicar y Guardar" commits.
+        // v3.13.8x (settings UX audit): used to call discardUnsavedChanges()
+        // here — v3.10.10 made switching tabs silently wipe any staged
+        // edit (a typed-but-unsaved API key, a staged glossary add, a
+        // toggled regex filter) with no warning at all, on the theory that
+        // "only Aplicar y Guardar commits" meant anything else was fair
+        // game to discard. That's real data loss with zero feedback: click
+        // Glosario to check something, click back, the API key you were
+        // mid-typing is gone. Tabs are just a view now — staged state
+        // (stagedGlossaryAdds/stagedGlossaryDeletes/hasUnsavedChanges/the
+        // DOM fields themselves) lives independently of which tab is
+        // visible, and only the Save button's own click discards anything.
+        // discardUnsavedChanges() had no other caller, so it's removed with
+        // this rather than left as dead code.
         function switchTab(name) {
-            // Discard any unsaved changes before switching
-            discardUnsavedChanges();
-
             document.querySelectorAll('[id^="tab-"]').forEach(el => {
                 if (el.id.startsWith('tab-btn-')) return;
                 el.classList.add('hidden');
@@ -620,47 +711,22 @@
             document.getElementById(`tab-btn-${name}`).classList.add('active');
 
             if (name === 'history') loadHistory();
+            // v3.13.8x: loadGlossary() re-applies stagedGlossaryAdds/
+            // stagedGlossaryDeletes on top of what it fetches now (see its
+            // own doc comment) — safe to call here even with staged,
+            // unsaved glossary edits pending.
             if (name === 'glossary') loadGlossary();
             if (name === 'profiles') loadProfiles();
         }
 
-        // Discard all staged/unsaved changes and reload from backend
-        async function discardUnsavedChanges() {
-            if (!hasUnsavedChanges) return;
-
-            // Clear staged glossary changes
-            stagedGlossaryAdds = [];
-            stagedGlossaryDeletes = [];
-
-            // v3.11.33: Clear staged regex filter changes
-            stagedRegexToggles = {};
-            stagedEnableRegexFilter = null;
-
-            // Reload glossary from backend (removes locally-added entries)
-            await loadGlossary();
-
-            // v3.13.40: profile changes are immediate now (no staging), so
-            // this just re-syncs the list — nothing to "restore".
-            await loadProfiles();
-
-            // v3.11.33: Reload regex filters from backend (restores toggled states)
-            await loadRegexFilters();
-
-            // Restore settings UI from last saved state
-            if (window._lastSettings) {
-                const s = window._lastSettings;
-                if (s.engine) { document.getElementById('engine-select').value = s.engine; toggleInputFields(); }
-                if (s.sourceLang) document.getElementById('source-lang').value = s.sourceLang;
-                if (s.targetLang) document.getElementById('target-lang').value = s.targetLang;
-                updateTargetLangDisplay(s.targetLang || 'es');
-            }
-
-            markSaved();
-        }
-
         // ===== SETTINGS MODAL =====
         // Collapsible category state
-        const _settingsCatState = { overlay: true, translation: true, glossary: true, textfilter: true };
+        // v3.13.8x (settings UX audit): 'advanced' starts collapsed
+        // (false) — everything else in this object defaults open. Matches
+        // the HTML's own `style="display:none"` on #cat-advanced-content,
+        // which this state must agree with on first paint (see
+        // toggleSettingsCategory()'s chevron/display sync just below).
+        const _settingsCatState = { overlay: true, translation: true, glossary: true, textfilter: true, advanced: false };
 
         function toggleSettingsModal() {
             const modal = document.getElementById('settings-modal');
@@ -672,8 +738,64 @@
                     restoreSettingsModalValues();
                     // Load regex filters for the Text Filter category
                     loadRegexFilters();
+                } else if (modalDirty) {
+                    // v3.13.8x (settings UX audit): Lyca's real report —
+                    // change something in the modal (e.g. the OCR interval
+                    // slider), close via the × or the backdrop without
+                    // clicking "Aplicar", reopen: the button was still
+                    // green, because nothing had ever cleared modalDirty
+                    // for an edit that was never actually saved. Closing
+                    // the modal is a clear enough "never mind" signal —
+                    // unlike switchTab() (see its own doc comment for why
+                    // THAT silently discarding was the wrong call): a
+                    // modal is something you explicitly open and close,
+                    // not a view you're glancing at mid-edit. Discard the
+                    // modal's own staged field values back to what's
+                    // actually persisted, and clear its dirty flag —
+                    // sidebarDirty/glossaryDirty are untouched, so a
+                    // pending sidebar edit survives opening/closing the
+                    // gear icon to peek at something.
+                    discardModalChanges();
+                    markSaved('modal');
                 }
             }
+        }
+
+        // v3.13.8x (settings UX audit): reverts every Tier B field that
+        // lives in the gear modal (applySettingsModal()'s gather — prompt/
+        // LLM params, context/history/debounce, Avanzado) back to
+        // window._lastSettings, the last value actually persisted. Mirrors
+        // the equivalent restore lines in init(), duplicated rather than
+        // shared because init() also does unrelated setup (OCR status,
+        // provider catalogs) this close-without-save path has no business
+        // re-running — same reasoning restoreSettingsModalValues() already
+        // duplicates its own two fields instead of calling into init().
+        function discardModalChanges() {
+            const settings = window._lastSettings || {};
+            document.getElementById('debounce-range').value = settings.debounceMs || 300;
+            document.getElementById('debounce-val').innerText = (settings.debounceMs || 300) + 'ms';
+            const promptTemplateText = settings.promptTemplate || (promptPresetsCatalog && promptPresetsCatalog.defaultTemplate) || '';
+            document.getElementById('prompt-template').value = promptTemplateText;
+            const matchedPresetId = matchPromptPresetId(settings.promptTemplate || '');
+            document.getElementById('prompt-preset-select').value = matchedPresetId;
+            updatePromptPresetDesc(matchedPresetId);
+            document.getElementById('llm-fewshot-enabled').checked = settings.llmFewShot !== false;
+            document.getElementById('context-range').value = settings.maxContextHistory ?? 5;
+            document.getElementById('context-val').innerText = settings.maxContextHistory ?? 5;
+            document.getElementById('history-limit-range').value = settings.historyLimit ?? 5;
+            document.getElementById('history-limit-val').innerText = settings.historyLimit ?? 5;
+            document.getElementById('llm-temperature').value = settings.llmTemperature ?? 0.3;
+            document.getElementById('llm-max-tokens').value = settings.llmMaxTokens ?? 1500;
+            const topPEnabled = settings.llmTopP !== null && settings.llmTopP !== undefined;
+            document.getElementById('llm-top-p-enabled').checked = topPEnabled;
+            document.getElementById('llm-top-p').value = topPEnabled ? settings.llmTopP : 0.9;
+            document.getElementById('llm-top-p').disabled = !topPEnabled;
+            document.getElementById('deepl-model-type').value = settings.deeplModelType || 'prefer_quality_optimized';
+            document.getElementById('advanced-glossary-mode').value = settings.glossaryMode || 'hybrid';
+            document.getElementById('enable-translation-memory').checked = settings.enableTranslationMemory !== false;
+            document.getElementById('ocr-interval-range').value = settings.ocrCaptureIntervalMs || 3500;
+            document.getElementById('ocr-interval-val').innerText = (settings.ocrCaptureIntervalMs || 3500) + 'ms';
+            document.getElementById('xuat-port').value = settings.xuatPort || 8419;
         }
 
         function toggleSettingsCategory(cat) {
@@ -708,28 +830,42 @@
         }
 
         // Reset System Prompt to default
-        // Apply settings from modal (saves everything)
+        // Apply settings from modal (saves the "Traducción" category — the
+        // "Overlay" category above it is Tier A now, applied immediately by
+        // saveOverlayImmediate()/toggleClickThrough() as each control
+        // changes, so none of it belongs in this gather. See
+        // markUnsaved()'s doc comment for the Tier A/B split.)
         async function applySettingsModal() {
             const config = {
-                outputFontSize: parseInt(document.getElementById('font-size-range').value),
-                outputTheme: document.getElementById('output-theme').value,
-                overlayFontFamily: getEffectiveFontFamily(),
-                overlayFontMode: document.getElementById('overlay-font').value,
-                customFontValue: document.getElementById('custom-font-input').value,
-                overlayOpacity: parseInt(document.getElementById('opacity-range').value),
-                clickThrough: document.getElementById('click-through-toggle').checked,
                 debounceMs: parseInt(document.getElementById('debounce-range').value),
                 // v3.13.59 (Fase 4): renamed from systemPrompt
                 promptTemplate: document.getElementById('prompt-template').value,
                 llmFewShot: document.getElementById('llm-fewshot-enabled').checked,
                 maxContextHistory: parseInt(document.getElementById('context-range').value),
-                historyLimit: parseInt(document.getElementById('history-limit-range').value)
+                historyLimit: parseInt(document.getElementById('history-limit-range').value),
+                // v3.13.8x (settings UX audit): these three live inside this
+                // same modal (#llm-params-section) but were never actually
+                // saved by its own Apply button — only gatherConfig() (the
+                // SIDEBAR's save) picked them up. Editing them here and
+                // clicking "Aplicar" silently did nothing; the sidebar's
+                // "Aplicar y Guardar" had to be clicked too. Real bug, not a
+                // layout choice — every field this modal shows belongs in
+                // its own save.
+                llmTemperature: parseFloat(document.getElementById('llm-temperature').value),
+                llmMaxTokens: parseInt(document.getElementById('llm-max-tokens').value),
+                llmTopP: document.getElementById('llm-top-p-enabled').checked ? parseFloat(document.getElementById('llm-top-p').value) : null,
+                // v3.13.8x (settings UX audit): "Avanzado" category — new
+                // controls for previously-ghost settings (deeplModelType/
+                // glossaryMode/enableTranslationMemory had no UI at all
+                // before this) plus Manual Mode + xuatPort relocated from
+                // the sidebar. Manual Mode is Tier A (data-immediate, saves
+                // itself via toggleManualMode()) so it's NOT gathered here.
+                deeplModelType: document.getElementById('deepl-model-type').value,
+                glossaryMode: document.getElementById('advanced-glossary-mode').value,
+                enableTranslationMemory: document.getElementById('enable-translation-memory').checked,
+                ocrCaptureIntervalMs: parseInt(document.getElementById('ocr-interval-range').value),
+                xuatPort: parseInt(document.getElementById('xuat-port').value) || 8419
             };
-
-            // v3.11.33: Include staged regex filter toggle
-            if (stagedEnableRegexFilter !== null) {
-                config.enableRegexFilter = stagedEnableRegexFilter;
-            }
 
             await api.saveSettings(config);
 
@@ -739,6 +875,10 @@
             // staged record carries its own scope (v3.13.40, two-layer
             // glossary) — a term staged under "Este perfil" while add-form
             // was in that mode must be saved to the profile layer, not global.
+            // v3.13.8x: regex filter toggles (master + per-row) are no
+            // longer staged here at all — they're Tier A now, applied
+            // immediately by toggleRegexFilterMaster()/toggleRegexFilterEntry()
+            // themselves. See markUnsaved()'s doc comment.
             for (const entry of stagedGlossaryAdds) {
                 await api.saveGlossaryEntry({ source: entry.source, target: entry.target, mode: entry.mode }, entry.scope);
             }
@@ -746,35 +886,37 @@
                 await api.deleteGlossaryEntry(item.id, item.scope);
             }
 
-            // v3.11.33: Apply staged regex filter toggle changes
-            for (const [filterId, enabled] of Object.entries(stagedRegexToggles)) {
-                await api.toggleRegexFilter(filterId, enabled);
-            }
-
             // Update active profile with new data
             if (activeProfileId) await api.saveProfile(activeProfileId);
             loadProfiles();
             await loadGlossary();
-            // Reload regex filters to reflect staged toggle changes
-            await loadRegexFilters();
 
-            markSaved();
-
-            const t = translations[currentLang] || translations['en'];
-            const btnText = document.getElementById('settings-apply-text');
-            const orig = btnText.innerText;
-            btnText.innerText = '✓ ' + (t.saved_confirm || '¡Guardado!');
-            setTimeout(() => btnText.innerText = orig, 1500);
+            markSaved('modal');
+            flashSaved('settings-apply-text', 'settings-apply-check');
         }
 
         // Reset all settings to defaults
         async function resetSettingsToDefaults() {
+            const t = translations[currentLang] || translations['en'];
+            // v3.13.8x (settings UX audit): this button has no confirmation
+            // and used to include `textractorPort: 9251` in what it writes —
+            // exactly the bug `gatherConfig()` was hardened against in
+            // v3.13.38 (a real install can run on a non-default port; a
+            // hardcoded reset here silently broke it). See showConfirm()'s
+            // own doc comment for why this is an in-page modal, not
+            // window.confirm().
+            const confirmed = await showConfirm(
+                t.settings_reset_confirm || 'Reset these settings to their defaults? Your engine, API key, and Textractor path are not affected.',
+                t.dialog_confirm || 'Confirm',
+                t.dialog_cancel || 'Cancel'
+            );
+            if (!confirmed) return;
+
             const defaults = {
                 engine: 'google-free',
                 sourceLang: 'auto',
                 targetLang: 'es',
                 inputMethod: 'textractor',
-                textractorPort: 9251,
                 outputFontSize: 24,
                 outputTheme: 'dark',
                 overlayOpacity: 85,
@@ -789,7 +931,22 @@
                 promptTemplate: '',
                 llmFewShot: true,
                 clickThrough: false,
-                enableRegexFilter: true
+                enableRegexFilter: true,
+                // v3.13.8x: added alongside the applySettingsModal() fix —
+                // these three live in the same modal this button's footer
+                // belongs to, so "reset" should cover them too.
+                llmTemperature: 0.3,
+                llmMaxTokens: 1500,
+                llmTopP: null,
+                // v3.13.8x: Avanzado category defaults. manualTextractorMode
+                // intentionally NOT included — it's Tier A, set by its own
+                // toggleManualMode() call, not something this bulk reset
+                // should silently flip (same reasoning textractorPort was
+                // removed for, just above).
+                deeplModelType: 'prefer_quality_optimized',
+                glossaryMode: 'hybrid',
+                enableTranslationMemory: true,
+                ocrCaptureIntervalMs: 3500
             };
 
             await api.saveSettings(defaults);
@@ -797,7 +954,6 @@
             // Re-initialize UI with defaults
             await init();
 
-            const t = translations[currentLang] || translations['en'];
             showToast(t.settings_reset || 'Configuración restablecida');
         }
 
@@ -832,7 +988,15 @@
             xBtn.className = method === 'xuat' ? activeClass : inactiveClass;
 
             // Show/hide sections based on input method
-            portSection.style.display = method === 'textractor' ? '' : 'none';
+            // v3.13.8x (settings UX audit): switched from portSection's own
+            // inline style.display to classList.toggle('hidden', ...),
+            // matching ocrSettingsSection/xuatSettingsSection right below —
+            // needed so index.html can ship this section `hidden` by
+            // default (it used to have no hidden class at all, so it
+            // flashed visible on first paint for anyone whose saved
+            // inputMethod isn't textractor, until this function ran and
+            // hid it via the OLD inline-style mechanism a moment later).
+            portSection.classList.toggle('hidden', method !== 'textractor');
             ocrSettingsSection.classList.toggle('hidden', method !== 'ocr');
             xuatSettingsSection.classList.toggle('hidden', method !== 'xuat');
             ocrDesc.classList.toggle('hidden', method !== 'ocr');
@@ -1001,7 +1165,7 @@
                 const modelInput = document.getElementById('llm-model');
                 modelInput.value = option.dataset.model;
                 document.getElementById('llm-model-suggestions').classList.add('hidden');
-                markUnsaved();
+                markUnsaved('sidebar');
                 return;
             }
             // Click anywhere outside the field+list closes it.
@@ -1022,7 +1186,7 @@
             document.getElementById('api-key').value = engineApiKeys.llm[newProviderId] || '';
 
             updateLlmProviderUI(newProviderId);
-            markUnsaved();
+            markUnsaved('sidebar');
         }
 
         // v3.13.58: fills AND LOCKS the endpoint field for a real preset (Ollama/
@@ -1040,7 +1204,7 @@
                 endpointInput.disabled = true;
                 endpointInput.classList.add('opacity-60');
             }
-            markUnsaved();
+            markUnsaved('sidebar');
         }
 
         // ===== PROMPT TEMPLATE (v3.13.59, Fase 4) =====
@@ -1095,7 +1259,7 @@
             // 'custom' selected directly (rather than reached by editing):
             // leave the textarea as whatever it already had — nothing to fill in.
             updatePromptPresetDesc(presetId);
-            markUnsaved();
+            markUnsaved('modal');
         }
 
         // Keeps the preset <select> in sync while the user hand-edits the
@@ -1106,7 +1270,7 @@
             const matchedId = matchPromptPresetId(text);
             document.getElementById('prompt-preset-select').value = matchedId;
             updatePromptPresetDesc(matchedId);
-            markUnsaved();
+            markUnsaved('modal');
         }
 
         function resetPromptTemplate() {
@@ -1431,9 +1595,16 @@
         }
 
         // ===== CLICK THROUGH =====
+        // v3.13.8x (settings UX audit): Tier A now — was `markUnsaved()`
+        // only, so toggling this checkbox and closing the modal without
+        // hitting the sidebar's separate "Aplicar y Guardar" silently did
+        // nothing at all (save-settings is what actually calls
+        // windowManager.toggleClickThrough(), see ipc-handlers.js). Applies
+        // and persists in the same call now, like the Ctrl+Shift+M
+        // shortcut handler right below always has.
         function toggleClickThrough(enabled) {
-            // v3.10.8: Don't auto-save — mark as unsaved until "Aplicar y Guardar"
-            markUnsaved();
+            api.saveSettings({ clickThrough: enabled });
+            window._lastSettings = { ...(window._lastSettings || {}), clickThrough: enabled };
         }
 
         function handleShortcut(data) {
@@ -1488,8 +1659,6 @@
             } else {
                 customInput.classList.add('hidden');
             }
-
-            // Note: settings are saved when the user clicks "Apply" in the modal
         }
 
         // Get the effective font family value
@@ -1502,8 +1671,48 @@
             return select.value;
         }
 
-        // ===== AUTO-SAVE LANGUAGE =====
-        function autoSaveLanguage() {
+        // v3.13.8x (settings UX audit): the whole "Overlay" category (font,
+        // size, theme, opacity) is Tier A — see markUnsaved()'s doc comment
+        // for why. save-settings already pushes an `update-style` to the
+        // live output overlay whenever these fields are present
+        // (ipc-handlers.js), so there's nothing else to wire for the change
+        // to actually show up — this is only about WHEN it's sent, not a
+        // new code path.
+        async function saveOverlayImmediate() {
+            const partial = {
+                outputFontSize: parseInt(document.getElementById('font-size-range').value),
+                outputTheme: document.getElementById('output-theme').value,
+                overlayFontFamily: getEffectiveFontFamily(),
+                overlayFontMode: document.getElementById('overlay-font').value,
+                customFontValue: document.getElementById('custom-font-input').value,
+                overlayOpacity: parseInt(document.getElementById('opacity-range').value)
+            };
+            await api.saveSettings(partial);
+            window._lastSettings = { ...(window._lastSettings || {}), ...partial };
+        }
+
+        // v3.13.8x: live preview while dragging font-size-range/
+        // opacity-range — Lyca asked for the overlay to visibly update
+        // WHILE dragging, not only on release. Debounced (~80ms) rather
+        // than called on every 'input' tick: each call is a real
+        // electron-store write (synchronous disk I/O), and a slider fires
+        // input events much faster than that during a drag. `change`
+        // (drag-release) still calls saveOverlayImmediate() directly and
+        // un-debounced, so the final position is never left waiting on a
+        // pending timer.
+        let _overlayLiveDebounceTimer = null;
+        function saveOverlayImmediateDebounced() {
+            clearTimeout(_overlayLiveDebounceTimer);
+            _overlayLiveDebounceTimer = setTimeout(saveOverlayImmediate, 80);
+        }
+
+        // ===== LANGUAGE CHANGE =====
+        // v3.13.8x (settings UX audit): renamed from autoSaveLanguage() —
+        // for the common (non-XUAT) case this only calls markUnsaved(), it
+        // never saved anything itself. The name was actively misleading:
+        // it read as Tier A (immediate) when the real behavior was Tier B
+        // (staged, needs the Save button). See markUnsaved()'s doc comment.
+        function onLanguageChange() {
             const sourceLang = document.getElementById('source-lang').value;
             const targetLang = document.getElementById('target-lang').value;
 
@@ -1539,7 +1748,7 @@
                 fetchDeepLLanguageFeatures(engineApiKeys.deepl, targetLang);
             }
 
-            markUnsaved();
+            markUnsaved('sidebar');
         }
 
         // Update engine description based on current engine and language
@@ -1725,7 +1934,10 @@
             setValidationStatus(statusEl, inputEl, null, result);
         }
 
-        function autoSaveEngine() {
+        // v3.13.8x (settings UX audit): renamed from autoSaveEngine() — it
+        // never saved the engine itself, only marked unsaved (v3.10.8). See
+        // onLanguageChange()'s doc comment for the same fix on its sibling.
+        function onEngineChange() {
             // Save the current API key to the previous engine before switching
             const prevEngine = document.getElementById('engine-select').dataset.prevEngine;
             const currentApiKey = document.getElementById('api-key').value;
@@ -1737,15 +1949,13 @@
             }
 
             toggleInputFields(); // Still toggle visibility of engine-specific fields
-            // v3.10.8: Don't auto-save engine — mark as unsaved until "Aplicar y Guardar"
-            markUnsaved();
+            markUnsaved('sidebar');
         }
 
         // v3.11.23: Auto-save DeepL formality setting
         function autoSaveDeepLFormality() {
             const formality = document.getElementById('deepl-formality').value;
             api.saveSettings({ deeplFormality: formality });
-            markUnsaved();
         }
 
         // v3.11.29: Auto-save DeepL custom instructions
@@ -1759,7 +1969,6 @@
             api.saveSettings({ deeplCustomInstructions: instructions });
             updateDeepLInstructionsCount();
             updateDeepLInstructionsUI();
-            markUnsaved();
         }
 
         // v3.11.29: Reset custom instructions to defaults (clear the field)
@@ -1906,6 +2115,26 @@
                 // compile — see glossary.js getCompileErrors(). Keyed by id so
                 // renderGlossary() can look each row up in O(1).
                 glossaryCompileErrorIds = new Set((result.compileErrors || []).map(e => e.id));
+                // v3.13.8x (settings UX audit): re-apply staged-but-unsaved
+                // adds/deletes on top of the fresh backend data. This
+                // function runs every time the Glosario tab opens
+                // (switchTab()), which no longer discards staged edits first
+                // (see switchTab()'s doc comment) — without this, opening
+                // the tab would silently wipe a staged glossary add/delete
+                // that hasn't been saved yet, since the backend never heard
+                // about it. A no-op once saveConfig()/applySettingsModal()
+                // clear the staged arrays before calling this.
+                for (const staged of stagedGlossaryAdds) {
+                    const list = staged.scope === 'profile' ? profileGlossaryEntries : glossaryEntries;
+                    if (!list.some(e => e.id === staged.id)) list.push({ ...staged });
+                }
+                for (const del of stagedGlossaryDeletes) {
+                    if (del.scope === 'profile') {
+                        profileGlossaryEntries = profileGlossaryEntries.filter(e => e.id !== del.id);
+                    } else {
+                        glossaryEntries = glossaryEntries.filter(e => e.id !== del.id);
+                    }
+                }
                 renderGlossary();
             } catch (e) { console.error('Failed to load glossary:', e); }
         }
@@ -1991,7 +2220,7 @@
             }
             document.getElementById('glossary-source').value = '';
             document.getElementById('glossary-target').value = '';
-            markUnsaved();
+            markUnsaved('glossary');
         }
 
         async function deleteGlossaryEntry(id) {
@@ -2012,7 +2241,7 @@
                 glossaryEntries = glossaryEntries.filter(e => e.id !== id);
             }
             renderGlossary();
-            markUnsaved();
+            markUnsaved('glossary');
         }
 
         async function importGlossary() {
@@ -2625,7 +2854,11 @@
                     // (init() re-reads from backend, so staged changes are discarded)
                     stagedGlossaryAdds = [];
                     stagedGlossaryDeletes = [];
-                    markSaved();
+                    // v3.13.8x: profile switch discards pending edits on
+                    // BOTH surfaces (init() below re-hydrates every field
+                    // from the newly-active profile), not just one.
+                    markSaved('sidebar');
+                    markSaved('modal');
                     // Re-apply settings to UI and refresh all tabs
                     await init();
                     loadGlossary();
@@ -2728,18 +2961,22 @@
         }
 
         // ===== GATHER CONFIG =====
+        // v3.13.8x (settings UX audit): no longer reads the "Overlay" or
+        // "Traducción" categories' fields — those live physically in the
+        // gear modal, and applySettingsModal() is their one gather now
+        // (Overlay went further and became Tier A/immediate, see
+        // saveOverlayImmediate()). Both used to ALSO be read here, so the
+        // sidebar's Save button silently re-sent values for fields it
+        // doesn't even display — harmless (same current value either way,
+        // save-settings merges rather than replaces) but exactly the
+        // double-coverage scripts/test-settings-tier-invariant.js exists to
+        // catch. Confirmed by that bank, not just this comment.
         function gatherConfig() {
             return {
                 engine: document.getElementById('engine-select').value,
                 apiKey: document.getElementById('api-key').value,
                 sourceLang: document.getElementById('source-lang').value,
                 targetLang: document.getElementById('target-lang').value,
-                outputFontSize: parseInt(document.getElementById('font-size-range').value),
-                outputTheme: document.getElementById('output-theme').value,
-                overlayFontFamily: getEffectiveFontFamily(),
-                overlayFontMode: document.getElementById('overlay-font').value,
-                customFontValue: document.getElementById('custom-font-input').value,
-                overlayOpacity: parseInt(document.getElementById('opacity-range').value),
                 localEndpoint: document.getElementById('local-endpoint').value,
                 localModel: document.getElementById('local-model').value,
                 // v3.13.58 (LLM engine overhaul, Fase 3)
@@ -2747,9 +2984,6 @@
                 llmModel: document.getElementById('llm-model').value,
                 llmCustomBaseUrl: document.getElementById('llm-custom-baseurl').value,
                 localLlmEndpointPreset: document.getElementById('local-endpoint-preset').value,
-                llmTemperature: parseFloat(document.getElementById('llm-temperature').value),
-                llmMaxTokens: parseInt(document.getElementById('llm-max-tokens').value),
-                llmTopP: document.getElementById('llm-top-p-enabled').checked ? parseFloat(document.getElementById('llm-top-p').value) : null,
                 // v3.13.38: textractorPort deliberately OMITTED — the input
                 // and the Advanced Settings section it lived in were removed.
                 // save-settings merges ({...currentSettings, ...data}) and
@@ -2759,24 +2993,35 @@
                 // sending a hardcoded default here would have silently
                 // overwritten it on the next Save).
                 textractorCliPath: document.getElementById('textractor-cli-path').value.trim(),
-                manualTextractorMode: document.getElementById('manual-textractor-mode').checked,
-                gamePid: parseInt(document.getElementById('game-pid').value) || 0,
+                // v3.13.8x (settings UX audit): manualTextractorMode
+                // deliberately OMITTED — Tier A now (data-immediate,
+                // toggleManualMode() saves itself), same reasoning as
+                // clickThrough/xuatPort below.
+                // gamePid deliberately OMITTED
+                // — same reasoning as textractorPort just above, but for a
+                // different symptom. It used to be persisted purely so
+                // init() could re-fill this same input on the next launch,
+                // but a PID from a past session is never valid for a new
+                // one; sending it here just kept a dead value alive in
+                // config.json for no purpose. The launch path already reads
+                // the live DOM value directly (see doLaunchTextractor()).
                 inputMethod: currentInputMethod,
-                debounceMs: parseInt(document.getElementById('debounce-range').value),
-                // v3.13.59 (Fase 4): renamed from systemPrompt
-                promptTemplate: document.getElementById('prompt-template').value,
-                llmFewShot: document.getElementById('llm-fewshot-enabled').checked,
-                maxContextHistory: parseInt(document.getElementById('context-range').value),
-                historyLimit: parseInt(document.getElementById('history-limit-range').value),
+                // debounceMs/promptTemplate/llmFewShot/maxContextHistory/
+                // historyLimit deliberately OMITTED — see this function's
+                // header comment; applySettingsModal() is their one owner.
                 libretranslateEndpoint: document.getElementById('libretranslate-endpoint').value,
                 customMTEndpoint: document.getElementById('custom-mt-endpoint').value,
                 customMTMethod: document.getElementById('custom-mt-method').value,
                 customMTBody: document.getElementById('custom-mt-body').value,
                 customMTResponsePath: document.getElementById('custom-mt-response').value,
                 customMTAuthHeader: document.getElementById('custom-mt-auth').value,
-                clickThrough: document.getElementById('click-through-toggle').checked,
-                uiLanguage: currentLang,
-                xuatPort: parseInt(document.getElementById('xuat-port').value) || 8419
+                uiLanguage: currentLang
+                // v3.13.8x (settings UX audit): clickThrough and xuatPort
+                // deliberately OMITTED here now — clickThrough is Tier A
+                // (toggleClickThrough() saves itself immediately); xuatPort
+                // moved to the gear modal's Avanzado category and is
+                // gathered by applySettingsModal() instead. Neither belongs
+                // in two places at once. See markUnsaved()'s doc comment.
             };
         }
 
@@ -2830,7 +3075,7 @@
             await loadGlossary();
 
             // 5. Mark as saved (remove visual indicator)
-            markSaved();
+            markSaved('sidebar');
 
             // v3.13.37: Save is a "real trigger" for Textractor auto-launch —
             // covers both a fresh path/PID entry and retrying after a Kill
@@ -2841,11 +3086,7 @@
             // Update cached settings
             window._lastSettings = await api.getSettings();
 
-            const btnText = document.getElementById('save-btn-text');
-            const t = translations[currentLang] || translations['en'];
-            const orig = btnText.innerText;
-            btnText.innerText = `✓ ${t.saved_confirm || '¡Guardado!'}`;
-            setTimeout(() => btnText.innerText = orig, 1500);
+            flashSaved('save-btn-text', 'save-btn-check');
         }
 
         // ===== TRANSLATION TOGGLE =====
@@ -3937,13 +4178,17 @@
         }
 
         // ===== REGEX TEXT FILTER (v3.11.30, fixed v3.11.33) =====
+        // v3.13.8x (settings UX audit): the v3.11.33 staging arrays this
+        // section used to declare here (stagedRegexToggles/-Adds/-Deletes/
+        // -Edits, stagedEnableRegexFilter) are gone. Toggles are Tier A now
+        // (see toggleRegexFilterMaster()/toggleRegexFilterEntry()); add/
+        // edit/delete were already immediate elsewhere in this file
+        // (saveNewRegexFilter()/saveEditedRegexFilter()/
+        // deleteRegexFilterEntry()) and never actually populated
+        // stagedRegexAdds/-Deletes/-Edits — those three were declared and
+        // cleared on every save but written to nowhere, dead since before
+        // this cleanup.
         let regexFilterEntries = [];
-        // v3.11.33: Staged regex filter changes — toggle/add/delete deferred until "Aplicar y Guardar"
-        let stagedRegexToggles = {};      // { filterId: enabled } — toggles to apply on save
-        let stagedRegexAdds = [];          // entries to add on save
-        let stagedRegexDeletes = [];       // filter IDs to delete on save
-        let stagedRegexEdits = {};         // { filterId: updates } — edits to apply on save
-        let stagedEnableRegexFilter = null; // null = no change, true/false = new value
 
         /**
          * v3.11.32: Simple i18n translate helper.
@@ -4041,7 +4286,7 @@
                     const exampleHtml = entry.example ? `<span class="regex-tip" data-tooltip="${escapeHtml(entry.example)}"><span class="text-amber-400">ℹ️</span><span class="regex-tip-text">${escapeHtml(entry.example)}</span></span>` : (entry.isBuiltIn ? '<span class="text-[9px] text-amber-500/70 flex-shrink-0">⭐</span>' : '');
                     row.innerHTML = `
                         <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
-                            <input type="checkbox" ${entry.enabled ? 'checked' : ''} onchange="toggleRegexFilterEntry('${entry.id}', this.checked)" class="sr-only peer">
+                            <input type="checkbox" data-immediate="true" ${entry.enabled ? 'checked' : ''} onchange="toggleRegexFilterEntry('${entry.id}', this.checked)" class="sr-only peer">
                             <div class="w-5 h-3 bg-gray-300 dark:bg-dark-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[1px] after:left-[1px] after:bg-white after:rounded-full after:h-2 after:w-2 after:transition-all peer-checked:bg-amber-500"></div>
                         </label>
                         <span class="flex-1 truncate ${entry.isBuiltIn ? 'text-amber-700 dark:text-amber-400 font-medium' : 'text-gray-700 dark:text-gray-300'}" title="${escapeHtml(entry.pattern)}">${escapeHtml(displayName)}</span>
@@ -4107,10 +4352,12 @@
             if (tooltip) tooltip.style.display = 'none';
         }
 
+        // v3.13.8x (settings UX audit): Tier A now — applies immediately via
+        // the same api.toggleRegexFilter() IPC the flush loop used to call
+        // on Save. Used to stage into stagedRegexToggles (v3.11.33); see
+        // this section's header comment for why that's gone.
         async function toggleRegexFilterEntry(id, enabled) {
-            // v3.11.33: Defer save until "Aplicar y Guardar"
-            stagedRegexToggles[id] = enabled;
-            markUnsaved();
+            await api.toggleRegexFilter(id, enabled);
             // Update local state immediately for visual feedback
             const entry = regexFilterEntries.find(e => e.id === id);
             if (entry) entry.enabled = enabled;
@@ -4297,10 +4544,13 @@
             await loadRegexFilters();
         }
 
-        function stageRegexFilterToggle() {
-            // v3.11.33: Defer save until "Aplicar y Guardar"
-            stagedEnableRegexFilter = document.getElementById('enable-regex-filter').checked;
-            markUnsaved();
+        // v3.13.8x (settings UX audit): Tier A now, like the per-row
+        // toggles in toggleRegexFilterEntry() — this master switch and its
+        // rows are tuned by watching the live text stream while playing,
+        // not something to stage behind a Save click. Used to defer via
+        // stagedEnableRegexFilter (v3.11.33); that staging variable is gone.
+        function toggleRegexFilterMaster() {
+            api.saveSettings({ enableRegexFilter: document.getElementById('enable-regex-filter').checked });
         }
 
         function testRegexFilter() {

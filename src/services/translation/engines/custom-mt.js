@@ -19,9 +19,13 @@ class CustomMTEngine {
       bodyTemplate: config.bodyTemplate || '{"text":"{{text}}","source":"{{source}}","target":"{{target}}"}',
       // Response path - dot notation to extract translation from response JSON
       responsePath: config.responsePath || 'data.translations.0.translatedText',
-      // Authentication
-      authHeader: config.authHeader || '',   // e.g. "Authorization: Bearer {{apiKey}}"
-      apiKey: config.apiKey || '',
+      // Authentication — the key is typed directly into authHeader as
+      // literal text (e.g. "Authorization: Bearer sk-..."), not templated.
+      // v3.13.8x: dropped the `{{apiKey}}`/config.apiKey indirection — no
+      // settings field ever fed it, so the template placeholder always
+      // resolved to an empty string in practice. See pipeline.js's 'custom-mt'
+      // case for the full reasoning.
+      authHeader: config.authHeader || '',
       timeout: config.timeout || 15000,
       ...config
     };
@@ -62,8 +66,7 @@ class CustomMTEngine {
       // name rather than a code — pipeline.js already resolves and passes
       // these to every engine, custom-mt just wasn't reading them.
       sourceName: sourceLangName,
-      targetName: targetLangName,
-      apiKey: this.config.apiKey
+      targetName: targetLangName
     };
 
     const headers = { ...this.config.headers };

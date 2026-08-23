@@ -27,7 +27,11 @@ const crypto = require('crypto');
 // migrate(), which steps through versions instead of gating on a single
 // all-or-nothing check, so an already-migrated store doesn't re-run earlier
 // steps a second time.
-const PROFILE_SCHEMA_VERSION = 3;
+// v3.13.8x (settings UX audit): bumped 3 -> 4 for stripGhostSettingsV2() —
+// see profile-migrations.js's DEAD_SETTING_KEYS_V2 comment for what it
+// removes and why it needed its own step rather than joining
+// DEAD_SETTING_KEYS (which only fires for a genuinely-v0 install).
+const PROFILE_SCHEMA_VERSION = 4;
 
 // The only fields copied INTO global settings when a profile activates,
 // and copied OUT of global settings when a profile is saved. Both
@@ -60,9 +64,17 @@ const PROFILE_SCOPED_SETTING_KEYS = [
   'customMTMethod',
   'customMTBody',
   'customMTResponsePath',
-  // Template string, e.g. "Authorization: Bearer {{apiKey}}" — the actual
-  // secret is customMTApiKey, which is global and NOT in this list. Do not
-  // "fix" this by moving a credential in here.
+  // v3.13.8x (settings UX audit): plain text, e.g. "Authorization: Bearer
+  // sk-...". Used to templatize this via a separate `customMTApiKey` global
+  // setting and a `{{apiKey}}` placeholder — removed because that setting
+  // had no default, no writer, and no UI field, so the placeholder always
+  // resolved to an empty string (see pipeline.js's 'custom-mt' case and
+  // custom-mt.js). The key is now typed directly into this field, which
+  // means it DOES hold a real secret and IS profile-scoped — duplicating a
+  // profile copies it. Custom MT has no dedicated credential UI (unlike
+  // deeplKey/llmProviderKeys), so this is the accepted tradeoff for now; if
+  // Custom MT gets real usage, promote a `customMTApiKey` to
+  // PROMOTED_TO_GLOBAL_KEYS instead of reviving the template indirection.
   'customMTAuthHeader',
   'manualTextractorMode',
   // v3.13.6x (LLM engine overhaul, Fase 6): DeepL's native `glossary_id` is
