@@ -69,8 +69,21 @@ function parseArgs(argv) {
 
 const FAKE_EXE_PATH = path.resolve('/fake/TextractorCLI.exe');
 
+// v3.13.8x: per-path synthetic file bytes for the arch pre-flight tests —
+// detectExeArch() (pe-arch.js) reads via openSync/readSync/closeSync, not
+// readFileSync, so those need their own fake alongside the existing ones
+// below. Populated per-test with buildSyntheticPe() (see the arch
+// pre-flight test section further down) and cleared between tests so one
+// test's fake game exe can't leak into the next.
+const fakeFileBytes = new Map();
+function setFakeFileBytes(p, buffer) { fakeFileBytes.set(path.resolve(p), buffer); }
+function clearFakeFileBytes() { fakeFileBytes.clear(); }
+
 function installFakeFs() {
-  const orig = { existsSync: fs.existsSync, statSync: fs.statSync, readdirSync: fs.readdirSync, readFileSync: fs.readFileSync };
+  const orig = {
+    existsSync: fs.existsSync, statSync: fs.statSync, readdirSync: fs.readdirSync, readFileSync: fs.readFileSync,
+    openSync: fs.openSync, readSync: fs.readSync, closeSync: fs.closeSync
+  };
   // IMPORTANT: only intercept calls for FAKE_EXE_PATH (or a path under it,
   // for the arch-fallback sibling test) — Node's own module loader uses
   // fs.readFileSync/statSync internally to read .js source files
@@ -92,6 +105,22 @@ function installFakeFs() {
   // rather than needing a real PE file. Every other path (source files)
   // goes through the real implementation.
   fs.readFileSync = (p, ...rest) => (isFakePath(p) ? Buffer.from([0x4D, 0x5A]) : orig.readFileSync(p, ...rest));
+  // openSync/readSync/closeSync back pe-arch.js's detectExeArch() — the
+  // fd is just the resolved path itself (there's no real descriptor to
+  // manage for a fake path), and readSync serves whatever buffer
+  // setFakeFileBytes() registered for it, defaulting to the same 2-byte
+  // 'MZ'-only stub readFileSync uses above (too short to resolve a PE
+  // offset — detectExeArch degrades to null on that, same as
+  // validatePath's arch-detection guard always has).
+  fs.openSync = (p, ...restArgs) => (isFakePath(p) ? path.resolve(p) : orig.openSync(p, ...restArgs));
+  fs.readSync = (fd, buffer, offset, length, position) => {
+    if (typeof fd !== 'string' || !isFakePath(fd)) return orig.readSync(fd, buffer, offset, length, position);
+    const data = fakeFileBytes.get(fd) || Buffer.from([0x4D, 0x5A]);
+    const n = Math.max(0, Math.min(length, data.length - position));
+    if (n > 0) data.copy(buffer, offset, position, position + n);
+    return n;
+  };
+  fs.closeSync = (fd) => { if (typeof fd !== 'string' || !isFakePath(fd)) orig.closeSync(fd); };
   return () => Object.assign(fs, orig);
 }
 
@@ -837,6 +866,307 @@ function testArchPreferenceNotCrossingInstalls() {
 
   const pass = spawnCalls.length === 3 && spawnCalls[2] === otherInstallPath; // used as-is, no swap
   return { id: 'arch-preference-not-crossing-installs', pass, spawnCalls: [...spawnCalls] };
+}
+
+// ─── Tests: arch pre-flight (v3.13.8x) — replaces the 60s guess-and-wait
+// fallback with a decision made before spawn, when the game's own exe
+// bitness is knowable. Two levels, tested separately:
+//
+//   Level 1 (_preflightArchSwap, called from inside launch() before
+//   spawn): fires when gameExePath is already known at launch time (the
+//   "🎮 Elegir…" picker resolves it for free). Driven here through REAL
+//   launch() calls with a synthetic PE buffer registered via
+//   setFakeFileBytes(), so detectExeArch() (pe-arch.js) reads it through
+//   the SAME openSync/readSync/closeSync fakes installFakeFs() installs —
+//   not a stubbed-out shortcut.
+//
+//   Level 2 (_checkArchAgainstGame, called from _detectAndEmitGameEngine's
+//   PowerShell callback in production): the in-flight correction for when
+//   Level 1 had no exe path to work with. That production callback goes
+//   through a REAL async child_process.exec('powershell ...') call this
+//   bench doesn't fake (no existing test here does either — confirmed
+//   zero coverage of _resolveExePathFromPid itself). Rather than build
+//   exec-faking infrastructure this feature doesn't otherwise need, these
+//   tests call _checkArchAgainstGame(pid, gameExePath) directly — exactly
+//   simulating "the callback fired" — the same style already used
+//   elsewhere in this bench for _processHookLine (fed real captured
+//   stdout lines directly rather than through a real event loop).
+
+const MACHINE_I386 = 0x14c;
+const MACHINE_AMD64 = 0x8664;
+
+function buildSyntheticPe(machine) {
+  const buf = Buffer.alloc(0x200);
+  buf.write('MZ', 0, 'ascii');
+  buf.writeUInt32LE(0x80, 0x3c);
+  buf.write('PE', 0x80, 'ascii');
+  buf.writeUInt16LE(machine, 0x84);
+  return buf;
+}
+
+function testArchPreflightLevel1() {
+  const results = [];
+  const { x64Path, x86Path } = archSiblingPaths();
+
+  // 1. A 32-bit game + Textractor configured at x64 + the x86 sibling
+  //    present on disk -> swap happens BEFORE spawn, exactly one process
+  //    is ever spawned (x86), no 60s fallback window at all.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const gameExe = '/fake/games/kirikiri32.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path, gameExePath: gameExe }));
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = ok && spawnCalls.length === 1 && spawnCalls[0] === x86Path;
+    results.push({ id: 'preflight-32bit-game-swaps-to-x86-before-spawn', pass, spawnCalls: [...spawnCalls] });
+  }
+
+  // 2. Architectures already match -> no swap, spawns the configured path
+  //    unchanged. This is the 4-of-7-real-sessions fast path and must
+  //    stay exactly as cheap as it is today (one PE read, no behavior
+  //    change downstream of it).
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const gameExe = '/fake/games/kirikiri64.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_AMD64));
+    const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path, gameExePath: gameExe }));
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = ok && spawnCalls.length === 1 && spawnCalls[0] === x64Path;
+    results.push({ id: 'preflight-matching-arch-no-swap', pass, spawnCalls: [...spawnCalls] });
+  }
+
+  // 3. Mismatch detected, but the sibling architecture folder doesn't
+  //    exist on disk -> _getArchFallbackPath itself returns null, no
+  //    swap, spawns the configured path as given (same as today; the 60s
+  //    fallback would ALSO find no sibling and give up the same way).
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const gameExe = '/fake/games/kirikiri32-nosibling.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    const origExistsSync = fs.existsSync;
+    fs.existsSync = (p) => (path.resolve(p) === x86Path ? false : origExistsSync(p));
+    const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path, gameExePath: gameExe }));
+    fs.existsSync = origExistsSync;
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = ok && spawnCalls.length === 1 && spawnCalls[0] === x64Path;
+    results.push({ id: 'preflight-sibling-missing-no-swap', pass, spawnCalls: [...spawnCalls] });
+  }
+
+  // 4a. No gameExePath hint at all (PID typed by hand, no picker used) ->
+  //     behaves exactly as before this feature existed.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+    clock.restore();
+    const pass = ok && spawnCalls.length === 1 && spawnCalls[0] === x64Path;
+    results.push({ id: 'preflight-no-game-exe-path-hint-unchanged', pass, spawnCalls: [...spawnCalls] });
+  }
+
+  // 4b. gameExePath given but unreadable (no bytes registered — defaults
+  //     to the same 2-byte 'MZ'-only stub as the rest of this fake fs,
+  //     too short to resolve a PE offset) -> detectExeArch degrades to
+  //     null, exactly the "elevated game process" case in production ->
+  //     no swap, no crash.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path, gameExePath: '/fake/games/unreadable.exe' }));
+    clock.restore();
+    const pass = ok && spawnCalls.length === 1 && spawnCalls[0] === x64Path;
+    results.push({ id: 'preflight-unreadable-game-exe-degrades-silently', pass, spawnCalls: [...spawnCalls] });
+  }
+
+  // 5. A Level-1 swap must NOT touch the 60s fallback's own bookkeeping —
+  //    it isn't a fallback attempt, it runs before spawn, so the safety
+  //    net must stay fully armed for whatever this couldn't resolve.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const gameExe = '/fake/games/kirikiri32.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path, gameExePath: gameExe }));
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = launcher._archFallbackAttempted === false && launcher._archAttemptMemory.size === 0;
+    results.push({ id: 'preflight-swap-does-not-touch-fallback-guards', pass, archFallbackAttempted: launcher._archFallbackAttempted, memorySize: launcher._archAttemptMemory.size });
+  }
+
+  // 6. An internal fallback retry (_isArchFallbackRetry) already carries
+  //    the exact path _attemptArchFallback computed — the pre-flight must
+  //    never second-guess it, even with a mismatched gameExePath hint
+  //    still lying around from the original attempt.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    const gameExe = '/fake/games/kirikiri32.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    const ok = withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path, gameExePath: gameExe, _isArchFallbackRetry: true }));
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = ok && spawnCalls.length === 1 && spawnCalls[0] === x64Path;
+    results.push({ id: 'preflight-skipped-on-fallback-retry', pass, spawnCalls: [...spawnCalls] });
+  }
+
+  return results;
+}
+
+function testArchPreflightLevel2() {
+  const results = [];
+  const { x64Path, x86Path } = archSiblingPaths();
+
+  // NOTE on the checks below: after launch(), the fake clock ALSO holds
+  // the pre-existing 10s-60s diagnostic chain's own pending timers — a
+  // completely separate mechanism (runArchFallbackCheck) that can ALSO
+  // end up calling _attemptArchFallback for its own unrelated reasons
+  // (e.g. content-degraded UTF-16 garbage) if a test drains far enough.
+  // Draining until "spawnCalls reaches N" alone would silently pass even
+  // if _checkArchAgainstGame's OWN logic were broken, as long as the old
+  // diagnostic eventually produced the same spawn count some other way —
+  // confirmed the hard way while writing these (temporarily gutting
+  // _hasRealHookWithText()'s isSystemHook filter left test 9 passing
+  // anyway, because the diagnostic's content-degraded path fired at the
+  // 15s mark regardless). So every case here checks _archFallbackAttempted
+  // / _archRelaunchTimer immediately after the direct
+  // _checkArchAgainstGame() call, BEFORE any draining — that state can
+  // only have been set by _checkArchAgainstGame -> _attemptArchFallback
+  // synchronously, and pins the assertion to the function actually under
+  // test rather than to whatever the clock produces later.
+
+  // 7. In-flight mismatch (no gameExePath at launch, so Level 1 never
+  //    fired) triggers exactly one relaunch onto the sibling arch — not a
+  //    loop, and not a second relaunch on top of it.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+    const gameExe = '/fake/games/kirikiri32.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    withSilencedConsole(() => launcher._checkArchAgainstGame(12345, gameExe));
+    const attemptedImmediately = launcher._archFallbackAttempted === true;
+    const scheduledImmediately = launcher._archRelaunchTimer !== null;
+    drainUntil(clock, () => spawnCalls.length >= 2, 15);
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = attemptedImmediately && scheduledImmediately
+      && spawnCalls.length === 2 && spawnCalls[0] === x64Path && spawnCalls[1] === x86Path;
+    results.push({ id: 'level2-mismatch-triggers-exactly-one-relaunch', pass, attemptedImmediately, scheduledImmediately, spawnCalls: [...spawnCalls] });
+  }
+
+  // 8. A real (non-system) hook has ALREADY produced text — even garbage
+  //    text still proves this architecture can inject and receive text —
+  //    so the in-flight check must not relaunch at all, regardless of
+  //    what the game exe's own bitness says. Uses _hasRealHookWithText(),
+  //    the exact same helper the 60s diagnostic itself consults, so this
+  //    also stands as the anti-divergence guarantee between the two paths.
+  //    Clock is deliberately never drained here — nothing legitimate
+  //    should have been scheduled by _checkArchAgainstGame to drain.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+    const proc = lastFakeProcess;
+    const hookLine = '[6:12345:AAAA:BBBB:0::HQ8@0:nekopara.exe] hola mundo\n';
+    withSilencedConsole(() => proc.stdout.emit('data', Buffer.from(hookLine, 'utf16le')));
+    const gameExe = '/fake/games/kirikiri32.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    withSilencedConsole(() => launcher._checkArchAgainstGame(12345, gameExe));
+    const notAttempted = launcher._archFallbackAttempted === false;
+    const notScheduled = launcher._archRelaunchTimer === null;
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = notAttempted && notScheduled && spawnCalls.length === 1 && spawnCalls[0] === x64Path;
+    results.push({ id: 'level2-no-relaunch-when-real-hook-already-has-text', pass, notAttempted, notScheduled, spawnCalls: [...spawnCalls] });
+  }
+
+  // 9. A SYSTEM hook (Console/Clipboard, pid field all-zero) producing
+  //    text must NOT count as evidence — the mismatch check still fires
+  //    the relaunch exactly as if nothing had appeared at all. This is
+  //    the other half of the anti-divergence guarantee: _hasRealHookWithText()
+  //    excludes system hooks, same as the 60s diagnostic's realHooks
+  //    filter. The immediate attempted/scheduled check is what makes this
+  //    case actually discriminating — see the NOTE above.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    spawnCalls.length = 0;
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+    const proc = lastFakeProcess;
+    const systemHookLine = '[1:0:0:FFFFFFFFFFFFFFFF:FFFFFFFFFFFFFFFF:Portapapeles:HB0@0] system text\n';
+    withSilencedConsole(() => proc.stdout.emit('data', Buffer.from(systemHookLine, 'utf16le')));
+    const gameExe = '/fake/games/kirikiri32.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_I386));
+    withSilencedConsole(() => launcher._checkArchAgainstGame(12345, gameExe));
+    const attemptedImmediately = launcher._archFallbackAttempted === true;
+    const scheduledImmediately = launcher._archRelaunchTimer !== null;
+    drainUntil(clock, () => spawnCalls.length >= 2, 15);
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = attemptedImmediately && scheduledImmediately
+      && spawnCalls.length === 2 && spawnCalls[1] === x86Path;
+    results.push({ id: 'level2-system-hook-text-does-not-count-as-evidence', pass, attemptedImmediately, scheduledImmediately, spawnCalls: [...spawnCalls] });
+  }
+
+  // 10. Once a (PID, install) pair is already marked exhausted (both
+  //     architectures burned their full 60s window with zero real hooks —
+  //     driven here via the SAME driveOnePidToExhaustion helper the
+  //     v3.13.32 anti-loop tests use), the in-flight check must respect
+  //     that suppression exactly like _attemptArchFallback's own callers
+  //     do — no third spawn, no matter what the game exe says. Checked
+  //     immediately (no further draining) since driveOnePidToExhaustion
+  //     already fully drained both 60s windows itself — anything left
+  //     pending in the clock at this point is from window bookkeeping
+  //     already resolved, not a fresh signal to wait on.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    const fallbackEvents = [];
+    const errorEvents = [];
+    launcher.on('arch-fallback', (e) => fallbackEvents.push(e));
+    launcher.on('error', (e) => errorEvents.push(e));
+    spawnCalls.length = 0;
+    driveOnePidToExhaustion(launcher, clock, x64Path, fallbackEvents, errorEvents);
+    const spawnCountAfterExhaustion = spawnCalls.length; // 2: x64, then x86
+    // _lastResolvedPath is x86 now — register a MISMATCHED (64-bit) fake
+    // game so _checkArchAgainstGame has a real reason to call
+    // _attemptArchFallback, and this asserts that call is what gets
+    // suppressed, not a false pass from architectures happening to match.
+    const gameExe = '/fake/games/some-64bit-game.exe';
+    setFakeFileBytes(gameExe, buildSyntheticPe(MACHINE_AMD64));
+    withSilencedConsole(() => launcher._checkArchAgainstGame(12345, gameExe));
+    const notScheduled = launcher._archRelaunchTimer === null;
+    clock.restore();
+    clearFakeFileBytes();
+    const pass = spawnCountAfterExhaustion === 2 && notScheduled && spawnCalls.length === 2;
+    results.push({ id: 'level2-suppressed-when-already-exhausted', pass, spawnCountAfterExhaustion, notScheduled, spawnCallsFinal: [...spawnCalls] });
+  }
+
+  return results;
 }
 
 // ─── Test 3: arch-fallback diagnostic tick count, three scenarios ───────
@@ -1657,6 +1987,8 @@ function run() {
   if (!args.only || 'known-good-hooks-only-on-generic'.includes(args.only)) all.push(testKnownGoodHooksOnlyOnGeneric());
   if (!args.only || 'arch-preference-reused'.includes(args.only)) all.push(testArchPreferenceReused());
   if (!args.only || 'arch-preference-not-crossing-installs'.includes(args.only)) all.push(testArchPreferenceNotCrossingInstalls());
+  if (!args.only || 'preflight'.includes(args.only)) all.push(...testArchPreflightLevel1());
+  if (!args.only || 'preflight'.includes(args.only) || 'level2'.includes(args.only)) all.push(...testArchPreflightLevel2());
   if (!args.only || 'diagnostic'.includes(args.only) || 'tick'.includes(args.only)) all.push(...testDiagnosticScenarios());
   if (!args.only || 'hysteresis'.includes(args.only) || 'stale'.includes(args.only)) all.push(...testHysteresisAgeDiscount());
   if (!args.only || 'parse'.includes(args.only)) all.push(...testHookLineParsing());

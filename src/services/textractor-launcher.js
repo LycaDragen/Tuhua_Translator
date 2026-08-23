@@ -33,6 +33,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const textCleaning = require('./text-cleaning');
 const { detectGameEngine } = require('./game-engine-detect');
+const { detectExeArch } = require('./pe-arch');
 
 /**
  * Interpret Windows exit codes into human-readable messages.
@@ -531,6 +532,21 @@ class TextractorLauncher extends EventEmitter {
    *   9. <dir>/TextractorCLI.exe       (flat layout)
    *  10. <dir>/Textractor.exe
    *
+   * v3.13.8x: this x64-first order is a real cost for a 32-bit game — it's
+   * the whole reason auto-detected installs used to guarantee the 60s
+   * arch-fallback wait on the FIRST launch of e.g. a KiriKiriZ VN (see
+   * textractor-path-detect.js's runAutoDetectAndPersist, which resolves
+   * through this same function). Deliberately left as-is rather than
+   * flipped: _preflightArchSwap (see launch()) now decides the correct
+   * architecture from the GAME's own PE header before spawn whenever it
+   * can, which makes this function's default order irrelevant in the
+   * common case — flipping it would just move the same 60s penalty onto
+   * 64-bit games instead of fixing anything. For the one case pre-flight
+   * genuinely can't resolve (game exe unreadable — an elevated process is
+   * the common real-world cause), _markArchSuccess's persisted
+   * arch-resolved path already fixes future launches after the first one
+   * that actually completes a 60s fallback.
+   *
    * Returns the resolved path, or the original path if nothing found.
    */
   _resolveExePath(inputPath) {
@@ -591,6 +607,58 @@ class TextractorLauncher extends EventEmitter {
    * because there simply isn't a sibling arch build available, and either
    * way there's nothing safe to retry.
    */
+  /**
+   * v3.13.8x: pre-flight architecture check, called from launch() before
+   * spawn — see the call site's doc for ordering vs. _archPreference.
+   *
+   * A 32-bit Textractor cannot inject into a 64-bit game process and vice
+   * versa — a hard OS constraint, not a heuristic. When gameExePath is
+   * known (the "🎮 Elegir…" process picker in the renderer already
+   * resolves it for free when the user picks the game that way — see
+   * doLaunchTextractor's gameExePathHint in renderer.js), this decides the
+   * correct architecture BEFORE spawning instead of discovering the
+   * mismatch after up to ARCH_FALLBACK_CHECK_MAX_MS (60s) of silence.
+   *
+   * Measured against a real user's session logs (7 real Textractor
+   * launches): 4 already had the right architecture (4.4-11.3s to first
+   * dialogue); the other 3 paid the full ~60-76s fallback. This is what
+   * collapses that 60s to effectively zero for the case this can resolve.
+   *
+   * Deliberately does NOT touch _archFallbackAttempted or
+   * _archAttemptMemory — this runs before spawn, so it isn't a fallback
+   * attempt at all, and the 60s safety net must stay fully armed for
+   * whatever this can't resolve (see the degrade cases below — a wrapper
+   * exe with a different architecture than the actual game process is a
+   * real one: Textractor attaches to the PID given, so matching against
+   * THAT PID's exe is correct by construction, but if the user picked a
+   * launcher process rather than the game itself, this can be wrong and
+   * the fallback needs to still be available to recover).
+   *
+   * Degrades to null (no swap) — silently, exactly today's behavior —
+   * whenever: no gameExePath was given (PID typed by hand, no picker
+   * used); the Textractor path's own arch can't be told from its folder
+   * name (_detectArch); the game exe can't be read (elevated process —
+   * the common real-world case, see _resolveExePathFromPid's doc —
+   * deleted, corrupt, or just not a PE); the architectures already match;
+   * or the sibling architecture folder doesn't exist on disk
+   * (_getArchFallbackPath already checks that last one).
+   *
+   * @param {string} resolvedPath - the Textractor exe about to be spawned
+   * @param {string|undefined} gameExePath
+   * @returns {string|null} the swapped resolvedPath, or null if no swap
+   */
+  _preflightArchSwap(resolvedPath, gameExePath) {
+    if (!gameExePath) return null;
+    const textractorArch = this._detectArch(resolvedPath);
+    if (!textractorArch) return null;
+    const gameArch = detectExeArch(gameExePath);
+    if (!gameArch || gameArch === textractorArch) return null;
+    const fallback = this._getArchFallbackPath(resolvedPath);
+    if (!fallback) return null;
+    console.log(`[TextractorLauncher] Pre-flight arch check: game exe is ${gameArch}, configured Textractor is ${fallback.from} — switching to ${fallback.to} before spawn (would have needed the ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s fallback otherwise): "${resolvedPath}" -> "${fallback.path}"`);
+    return fallback.path;
+  }
+
   _getArchFallbackPath(resolvedPath) {
     if (!resolvedPath) return null;
     const pairs = [['x64', 'x86'], ['X64', 'X86'], ['x86', 'x64'], ['X86', 'X64']];
@@ -778,7 +846,7 @@ class TextractorLauncher extends EventEmitter {
     }
 
     this._archFallbackAttempted = true;
-    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s', 'no-clean-hook': 'hooks encontrados pero todos con ruido', 'no-real-hook': `nunca apareció un hook real tras ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s (solo hooks de sistema)` }[reason] || reason;
+    const reasonLabel = { 'spawn-error': 'no se pudo iniciar', 'quick-exit': 'salió inmediatamente', 'no-hooks': 'sin hooks tras 10s', 'no-clean-hook': 'hooks encontrados pero todos con ruido', 'no-real-hook': `nunca apareció un hook real tras ${Math.round(ARCH_FALLBACK_CHECK_MAX_MS / 1000)}s (solo hooks de sistema)`, 'arch-mismatch': 'el .exe del juego no coincide con la arquitectura configurada (detectado por PE header)' }[reason] || reason;
     console.warn(`[TextractorLauncher] ${fallback.from}: ${reasonLabel} -> probando ${fallback.to}...`);
     this.emit('arch-fallback', { from: fallback.from, to: fallback.to, reason });
 
@@ -960,7 +1028,52 @@ class TextractorLauncher extends EventEmitter {
         // actionable should reach the UI as soon as it's known.
         this._emitHookDiscovery();
       }
+      // v3.13.8x: Level 2 of the arch pre-flight feature — piggybacks on
+      // this exact PowerShell resolution rather than issuing a second one.
+      // Level 1 (_preflightArchSwap, in launch()) only fires when the exe
+      // path was already known before spawn (the process picker). When
+      // the PID was typed by hand instead, this is the SAME resolution
+      // _detectAndEmitGameEngine already pays for the engine advisory —
+      // reusing it here costs nothing extra, and still corrects the
+      // architecture in ~1-2s instead of the full 60s fallback wait.
+      this._checkArchAgainstGame(pid, exePath);
     });
+  }
+
+  /**
+   * v3.13.8x: Level 2 of the arch pre-flight feature — see
+   * _preflightArchSwap (Level 1, pre-spawn) for the full design note and
+   * for why PE evidence overrides _archPreference / the persisted
+   * arch-resolved path. This is the in-flight correction for when Level 1
+   * had no exe path to work with (PID typed by hand, no picker used).
+   *
+   * Called from _detectAndEmitGameEngine's callback, ~1-2s after spawn —
+   * reuses that exact PowerShell resolution rather than paying for a
+   * second one. Guarded identically: `this._gamePid !== pid` covers a
+   * relaunch/fallback racing this async callback, same as the engine
+   * advisory right above it.
+   *
+   * Deliberately gated on `!this._hasRealHookWithText()` — the same
+   * helper the 60s diagnostic uses (see its own doc) — so this can never
+   * fire a redundant relaunch once the architecture has already proven
+   * itself with real (even low-quality) text. `_attemptArchFallback`
+   * itself is what actually consumes _archFallbackAttempted /
+   * _archAttemptMemory, so this inherits the full v3.13.32 anti-loop
+   * protection (one swap per launch() cycle; suppressed once a (PID,
+   * install) pair is already marked exhausted) without needing to
+   * duplicate any of it here.
+   *
+   * @param {number} pid
+   * @param {string} gameExePath
+   */
+  _checkArchAgainstGame(pid, gameExePath) {
+    if (this._gamePid !== pid) return;
+    if (this._hasRealHookWithText()) return;
+    const textractorArch = this._detectArch(this._lastResolvedPath);
+    if (!textractorArch) return;
+    const gameArch = detectExeArch(gameExePath);
+    if (!gameArch || gameArch === textractorArch) return;
+    this._attemptArchFallback('arch-mismatch');
   }
 
   validatePath(cliPath) {
@@ -1039,26 +1152,18 @@ class TextractorLauncher extends EventEmitter {
       const missingDlls = requiredDlls.filter(dll => !dirFiles.includes(dll));
       // Note: DLLs might be in System32, so this is just a soft check
 
-      // Check architecture consistency
+      // Check architecture consistency.
+      // v3.13.8x: delegated to pe-arch.js's detectExeArch — same PE-header
+      // logic as before (see that module's doc), but reads a small fixed
+      // window instead of the whole file via readFileSync. Harmless for
+      // TextractorCLI.exe itself (~1MB), but this codepath's logic is
+      // reused for the arch-mismatch pre-flight check against a GAME exe,
+      // which can be hundreds of MB — readFileSync-ing that on every
+      // launch would be a real regression.
+      const detectedArch = detectExeArch(resolved);
       let archWarning = '';
-      try {
-        const exeBuffer = fs.readFileSync(resolved);
-        // PE header: MZ at offset 0, PE offset at 0x3C
-        if (exeBuffer[0] === 0x4D && exeBuffer[1] === 0x5A) {
-          const peOffset = exeBuffer.readUInt32LE(0x3C);
-          if (peOffset + 6 <= exeBuffer.length) {
-            const machine = exeBuffer.readUInt16LE(peOffset + 4);
-            // 0x14C = i386 (32-bit), 0x8664 = AMD64 (64-bit)
-            if (machine === 0x14C) {
-              archWarning = ' (32-bit)';
-            } else if (machine === 0x8664) {
-              archWarning = ' (64-bit)';
-            }
-          }
-        }
-      } catch (e) {
-        // Ignore PE parse errors
-      }
+      if (detectedArch === 'x86') archWarning = ' (32-bit)';
+      else if (detectedArch === 'x64') archWarning = ' (64-bit)';
 
       let message = 'Valid TextractorCLI executable' + archWarning;
       let messageKey = 'val_valid_exe';
@@ -1672,6 +1777,30 @@ class TextractorLauncher extends EventEmitter {
       if (TextractorLauncher.hookCodeType(hook.hookCode) !== 'byte') return false;
     }
     return hasRealHook;
+  }
+
+  /**
+   * v3.13.8x: "has this architecture already proven itself" — extracted
+   * out of the 60s arch-fallback diagnostic (runArchFallbackCheck, inside
+   * launch()) so the pre-flight arch-mismatch correction (Level 2 of the
+   * arch pre-flight feature — see _preflightArchSwap for Level 1) uses the
+   * EXACT same criterion, not a lookalike. Two independent code paths
+   * deciding "is the architecture already working" on slightly different
+   * definitions is exactly the kind of divergence that goes unnoticed
+   * until a real session hits the gap between them — this makes that
+   * structurally impossible instead of relying on both being kept in sync
+   * by hand.
+   *
+   * `textCount > 0` on a non-system hook is the bar, deliberately not hook
+   * QUALITY — garbage text still proves the architecture can inject and
+   * receive text at all; whether the hook is a good one is a separate
+   * question the scoring/degradation checks already own.
+   */
+  _hasRealHookWithText() {
+    for (const hook of this._hooks.values()) {
+      if (!hook.isSystemHook && hook.textCount > 0) return true;
+    }
+    return false;
   }
 
   /**
@@ -2837,6 +2966,22 @@ class TextractorLauncher extends EventEmitter {
         resolvedPath = preferred;
       }
     }
+
+    // v3.13.8x: pre-flight arch check — see _preflightArchSwap's own doc.
+    // Runs AFTER the _archPreference swap above on purpose: PE evidence
+    // about THIS process overrides both _archPreference and the persisted
+    // arch-resolved path in src/main/index.js, because those are proof
+    // about a past session and this is proof about this one. Skipped on a
+    // fallback retry for the same reason the preference swap above is —
+    // that call already carries the exact path _attemptArchFallback
+    // computed. Deliberately does not touch _archFallbackAttempted or
+    // _archAttemptMemory: this isn't a fallback, it runs before spawn, so
+    // the 60s safety net stays fully armed for whatever this can't
+    // resolve (see the method doc for every silent-degrade case).
+    if (!options._isArchFallbackRetry) {
+      const preflightPath = this._preflightArchSwap(resolvedPath, options.gameExePath);
+      if (preflightPath) resolvedPath = preflightPath;
+    }
     this._lastResolvedPath = resolvedPath;
     // Deliberately NOT this.configure(resolvedPath) — configure() emits
     // 'status','configured', which _emitStatus has no special case for
@@ -3017,7 +3162,11 @@ class TextractorLauncher extends EventEmitter {
         // fix, stop polling).
         const realHooks = Array.from(this._hooks.values()).filter(h => !h.isSystemHook);
         const realWithText = realHooks.filter(h => h.textCount > 0);
-        const hasRealHookWithText = realWithText.length > 0;
+        // v3.13.8x: routed through _hasRealHookWithText() rather than
+        // `realWithText.length > 0` inline — same value, but this
+        // guarantees the pre-flight arch-mismatch check (Level 2) can
+        // never drift onto a different definition of "already proven".
+        const hasRealHookWithText = this._hasRealHookWithText();
         // v3.13.30: distinct from `_hooks.size === 0` below — see the
         // last-resort branch at the bottom of this function for why this
         // is needed at all.

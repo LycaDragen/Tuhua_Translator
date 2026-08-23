@@ -2722,7 +2722,6 @@
                 const inputMethod = profile.inputMethod || 'textractor';
                 const isActive = profile.id === activeProfileId;
                 const isDefault = profile.isDefault === true;
-                const hasHook = !!(profile.hook && profile.hook.hookCode);
                 const borderClass = isActive ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-dark-600';
                 const bgClass = isActive ? 'bg-emerald-50 dark:bg-emerald-900/10' : 'bg-gray-50 dark:bg-dark-900/50';
                 const id = escapeHtml(profile.id);
@@ -2755,7 +2754,6 @@
                             ${isActive ? '<span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot flex-shrink-0"></span>' : ''}
                             <span class="text-sm font-medium truncate ${isActive ? 'text-emerald-700 dark:text-emerald-300' : ''}" title="${displayName}">${displayName}</span>
                             ${isDefault ? `<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase flex-shrink-0">${escapeHtml(t.profile_default_name || 'Default')}</span>` : ''}
-                            ${hasHook ? '<span class="text-[8px] flex-shrink-0" title="Hook guardado">🎯</span>' : ''}
                         </div>
                         <div class="flex flex-wrap gap-1" onclick="event.stopPropagation()">
                             <button onclick="openVndbImportModal('${id}')" class="px-2 py-1 text-[10px] font-medium text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition" data-i18n="glossary_vndb_import">Importar de VNDB</button>
@@ -3304,6 +3302,16 @@
                     nameEl.textContent = '🎮 ' + option.dataset.name;
                     nameEl.classList.remove('hidden');
                 }
+                // v3.13.8x: the picker already resolved this process's exe
+                // path for free (list-game-processes returns it) — stashed
+                // here so doLaunchTextractor can hand it to the backend for
+                // the pre-flight arch check (Level 1 — see
+                // TextractorLauncher#_preflightArchSwap) without a second
+                // PowerShell round-trip. A PID typed by hand instead of
+                // picked has no such hint; that case is covered by Level 2
+                // (_checkArchAgainstGame), which reuses the resolution the
+                // game-engine advisory already pays for.
+                gameExePathHint = option.dataset.exePath || null;
                 checkGamePidVsAttached();
                 closeModal();
             });
@@ -3333,7 +3341,7 @@
                 const icon = p.iconDataUrl
                     ? `<img src="${p.iconDataUrl}" class="w-5 h-5 rounded shrink-0" alt="">`
                     : `<span class="w-5 h-5 rounded bg-gray-200 dark:bg-dark-700 shrink-0 flex items-center justify-center text-[10px]">🎮</span>`;
-                return `<div class="game-process-option flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-dark-700 cursor-pointer" data-pid="${p.pid}" data-name="${escapeHtml(p.name)}">
+                return `<div class="game-process-option flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-dark-700 cursor-pointer" data-pid="${p.pid}" data-name="${escapeHtml(p.name)}" data-exe-path="${escapeHtml(p.exePath || '')}">
                     ${icon}
                     <div class="min-w-0 flex-1">
                         <p class="text-[10px] font-medium truncate">${escapeHtml(p.windowTitle || p.name)}</p>
@@ -3357,6 +3365,16 @@
         // "🔄 Reconectar" banner accordingly.
         let cliAttachedPid = null;
 
+        // v3.13.8x: the exe path of whatever process the "🎮 Elegir…"
+        // picker's last selection pointed at — see the picker's click
+        // handler for where this is set. Deliberately NOT persisted (same
+        // reasoning as gamePid in gatherConfig()'s own comment): a path
+        // from a past session is never guaranteed valid for a new one, and
+        // it's only ever a same-session optimization (skip a redundant
+        // PowerShell round-trip), never a correctness requirement — Level
+        // 2 of the arch pre-flight check covers the case this is null.
+        let gameExePathHint = null;
+
         function checkGamePidVsAttached() {
             const banner = document.getElementById('game-pid-reconnect-banner');
             if (!banner) return;
@@ -3372,6 +3390,10 @@
         function onGamePidInput() {
             const nameEl = document.getElementById('game-pid-selected-name');
             if (nameEl) nameEl.classList.add('hidden');
+            // A hand-typed PID invalidates whatever exe path the picker
+            // last resolved — it may belong to a completely different
+            // process now.
+            gameExePathHint = null;
             checkGamePidVsAttached();
         }
 
@@ -3487,7 +3509,12 @@
             // v3.13.38: no port input left in the UI (see gatherConfig's
             // comment) — pass undefined and let ipc-handlers.js's existing
             // fallback chain resolve it: requestedPort || store.get('textractorPort') || 9251.
-            const result = await api.textractorLaunch(cliPath, gamePid, undefined);
+            // v3.13.8x: gameExePathHint (4th arg) feeds the pre-flight arch
+            // check's Level 1 — see its own comment at the picker's click
+            // handler for what ties it to this exact gamePid, and null
+            // whenever it doesn't apply (PID typed by hand). The backend
+            // degrades to the existing 60s fallback either way.
+            const result = await api.textractorLaunch(cliPath, gamePid, undefined, gameExePathHint);
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
             status.classList.remove('hidden');

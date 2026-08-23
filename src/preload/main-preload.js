@@ -293,10 +293,17 @@ const api = {
   // v3.13.8x (Fase 5): read-once startup auto-detect result — see the
   // handler's own doc comment in ipc-handlers.js.
   getTextractorAutoDetectResult: () => secureInvoke('get-textractor-auto-detect-result'),
-  textractorLaunch: (cliPath, gamePid, port) => {
+  // v3.13.8x: gameExePath (4th arg) is an optional hint — the "🎮 Elegir…"
+  // picker already resolves it for free (list-game-processes returns
+  // exePath per process), so the renderer forwards it here instead of the
+  // backend paying for a second PowerShell round-trip. Feeds the
+  // pre-flight arch check's Level 1 (TextractorLauncher#_preflightArchSwap)
+  // — null/absent just means Level 2's in-flight correction covers it
+  // instead, same as a PID typed by hand.
+  textractorLaunch: (cliPath, gamePid, port, gameExePath) => {
     if (typeof cliPath !== 'string') throw new Error('Invalid CLI path');
     if (typeof gamePid !== 'number') throw new Error('Invalid PID');
-    return secureInvoke('textractor-launch', { cliPath, gamePid, port: port || undefined });
+    return secureInvoke('textractor-launch', { cliPath, gamePid, port: port || undefined, gameExePath: gameExePath || undefined });
   },
   textractorKill: () => secureInvoke('textractor-kill'),
   textractorCliStatus: () => secureInvoke('textractor-cli-status'),

@@ -204,9 +204,24 @@ function createProfile(overrides = {}) {
     // global glossary the way this field used to work.
     glossary: Array.isArray(overrides.glossary) ? overrides.glossary : [],
     // {hookCode, hookName, processName, hookCodeType, displayName, source,
-    // savedAt} | null — see the hook-persistence design (Phase 1, step 7).
-    // Deliberately NOT a hookKey: hookKey embeds a thread handle, PID, and
-    // absolute addresses, none of which survive a restart.
+    // savedAt} | null — RESERVED, never written. Was Phase 1 Step 7's
+    // shape for persisting the selected Textractor hook per profile
+    // (deliberately a hookCode, not a hookKey — the latter embeds a
+    // thread handle/PID/absolute addresses, none of which survive a
+    // restart). v3.13.8x: evaluated against real session logs and
+    // declined — hook re-discovery already lands in 2.5-11s on a real
+    // machine (v3.13.29/37/38 hysteresis/staleness work already closed
+    // the ~20-28s delay that motivated this), and the degenerate case
+    // that would need it most (x64 TextractorCLI on this user's games) has
+    // ~15 real hooks sharing the identical hookCode `HB0@0`, so a
+    // hookCode-based filter has no selectivity there anyway. The actual
+    // 60s cost lived in architecture guessing, not hook re-discovery — see
+    // _preflightArchSwap in textractor-launcher.js for what replaced it.
+    // Left in the schema (not removed) because normalizeProfile()'s
+    // structural-defaults design makes a null, unread field free to keep
+    // and costs a migration step to remove; do not resurrect the writer
+    // without new evidence the 2.5-11s re-discovery window is a real
+    // problem in practice.
     hook: overrides.hook || null,
     // {url, vnId, vnTitle} | null — set on a successful VNDB glossary
     // import (see vndb-import in ipc-handlers.js), shown as the card's

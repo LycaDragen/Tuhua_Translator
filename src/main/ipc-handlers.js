@@ -627,7 +627,7 @@ class IpcHandlers {
       return { success: true, processes };
     });
 
-    ipcMain.handle('textractor-launch', async (event, { cliPath, gamePid, port: requestedPort }) => {
+    ipcMain.handle('textractor-launch', async (event, { cliPath, gamePid, port: requestedPort, gameExePath }) => {
       if (!cliPath || !gamePid) {
         return { success: false, error: 'CLI path and Game PID are required' };
       }
@@ -650,7 +650,12 @@ class IpcHandlers {
       this.textractorLauncher.kill();
 
       // Launch TextractorCLI
-      const launched = this.textractorLauncher.launch(pid, { cliPath });
+      // v3.13.8x: gameExePath (from the "🎮 Elegir…" picker, if that's how
+      // the PID was chosen — see the renderer/preload comments on this
+      // field) feeds TextractorLauncher's pre-flight arch check. Absent
+      // when the PID was typed by hand; the launcher's Level 2 in-flight
+      // correction covers that case instead, no behavior change here.
+      const launched = this.textractorLauncher.launch(pid, { cliPath, gameExePath: gameExePath || undefined });
       if (!launched) {
         return { success: false, error: 'Failed to launch TextractorCLI' };
       }
