@@ -45,6 +45,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'detect-font-family',
   'textractor-validate-cli',
   'textractor-browse-cli',
+  'list-game-processes',
   'textractor-launch',
   'textractor-kill',
   'textractor-cli-status',
@@ -277,6 +278,9 @@ const api = {
     return secureInvoke('textractor-validate-cli', cliPath);
   },
   textractorBrowseCli: () => secureInvoke('textractor-browse-cli'),
+  // v3.13.8x (settings UX audit, Fase 4): Windows-only game process picker
+  // for the Game PID field — see the handler's own doc comment.
+  listGameProcesses: () => secureInvoke('list-game-processes'),
   textractorLaunch: (cliPath, gamePid, port) => {
     if (typeof cliPath !== 'string') throw new Error('Invalid CLI path');
     if (typeof gamePid !== 'number') throw new Error('Invalid PID');

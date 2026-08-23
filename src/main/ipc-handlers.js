@@ -7,6 +7,8 @@ const { ipcMain, dialog, app, desktopCapturer, Menu } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { exec } = require('child_process');
+const { parseProcessListJson } = require('../services/game-process-list');
 
 const XuatInstaller = require('../services/xuat-installer');
 const VndbService = require('../services/vndb');
@@ -24,6 +26,18 @@ const promptPresets = require('../services/translation/prompt-presets');
 // renderer's own changeLanguage()/data-i18n machinery can't reach since
 // those dialogs are drawn by Electron itself, not the DOM.
 const translations = require('../../renderer/main/i18n.js');
+
+// v3.13.8x (settings UX audit, Fase 4, second pass): Lyca reported the
+// game process picker felt slow to open — real cost, not perception: a
+// PowerShell cold-start (~1-2s) plus a per-process app.getFileIcon() disk
+// read for however many windowed apps are open. The PowerShell call is
+// unavoidable per-open, but an exe's icon does not change mid-session, so
+// caching it here means every open AFTER the first is faster — module-level
+// (not per-handler-instance) since this class is only ever constructed
+// once per app lifetime anyway. Never explicitly cleared: an icon going
+// stale mid-session (an app updating its own binary while running) is a
+// cosmetic non-issue, not worth the complexity of invalidation.
+const _gameProcessIconCache = new Map();
 
 /**
  * Look up a translated string for a main-process-only UI surface (native
@@ -498,6 +512,71 @@ class IpcHandlers {
       // If auto-resolved, return the resolved .exe path so the UI can update
       const returnPath = validation.resolved || selectedPath;
       return { canceled: false, path: returnPath, originalPath: selectedPath, valid: validation.valid, message: validation.message, autoResolved: validation.autoResolved };
+    });
+
+    // v3.13.8x (settings UX audit, Fase 4): replaces "open Task Manager and
+    // type the PID by hand" — the worst control in the settings panel per
+    // Lyca's own words. Windows-only, same guard class as every other
+    // Textractor path in this file (see _resolveExePathFromPid() in
+    // textractor-launcher.js for the sibling pattern this borrows: async
+    // exec + PowerShell, never execSync, so a slow PowerShell cold-start
+    // can't block the main process's event loop).
+    //
+    // `MainWindowTitle -ne ''` is the actual noise filter Lyca asked for —
+    // it's exactly what separates "an app with a window a user would
+    // recognize" from Windows' many background services/helpers, without
+    // a hand-maintained denylist. `-and $_.Path` additionally drops
+    // protected/system processes Tuhua couldn't read the icon/exe for
+    // anyway. Tuhua's own window is excluded by PID so it never lists
+    // itself as a "game" to attach to.
+    ipcMain.handle('list-game-processes', async () => {
+      if (process.platform !== 'win32') {
+        return { success: false, error: 'windows-only' };
+      }
+      const ownPid = process.pid;
+      const psCommand = `Get-Process | Where-Object { $_.MainWindowTitle -ne '' -and $_.Path -and $_.Id -ne ${ownPid} } | Select-Object Id, ProcessName, MainWindowTitle, Path | ConvertTo-Json -Compress`;
+      const raw = await new Promise((resolve) => {
+        exec(
+          `powershell -NoProfile -NonInteractive -Command "${psCommand}"`,
+          { encoding: 'utf8', windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
+          (err, stdout) => {
+            if (err) {
+              console.warn('[Tuhua] list-game-processes: PowerShell call failed:', err.message);
+              return resolve(null);
+            }
+            resolve(stdout);
+          }
+        );
+      });
+      // parseProcessListJson (src/services/game-process-list.js) is the
+      // pure/testable half of this handler — see its own doc comment for
+      // why going through it (not JSON.parse directly) matters even for
+      // the single-process case.
+      const rows = parseProcessListJson(raw);
+
+      // Icons resolved in parallel — app.getFileIcon() is a real per-file
+      // disk read, and there can be a couple dozen matching windows on a
+      // busy desktop. Each is independently guarded: a failure (protected
+      // path, deleted-but-still-running exe) drops just that process's
+      // icon, never the whole list.
+      const processes = await Promise.all(rows.map(async (row) => {
+        if (_gameProcessIconCache.has(row.exePath)) {
+          return { ...row, iconDataUrl: _gameProcessIconCache.get(row.exePath) };
+        }
+        let iconDataUrl = null;
+        try {
+          const icon = await app.getFileIcon(row.exePath, { size: 'normal' });
+          if (icon && !icon.isEmpty()) iconDataUrl = icon.toDataURL();
+        } catch (e) {
+          // Silent — a missing icon just means the picker row falls back
+          // to a generic glyph in the renderer, not worth a console line
+          // per process on every open.
+        }
+        _gameProcessIconCache.set(row.exePath, iconDataUrl);
+        return { ...row, iconDataUrl };
+      }));
+
+      return { success: true, processes };
     });
 
     ipcMain.handle('textractor-launch', async (event, { cliPath, gamePid, port: requestedPort }) => {
@@ -2304,6 +2383,7 @@ class IpcHandlers {
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-status',
       'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-launch',
+      'list-game-processes',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',

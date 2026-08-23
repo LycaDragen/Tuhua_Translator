@@ -1159,6 +1159,11 @@
 
         // Click a suggestion (event delegation — the list is rebuilt on
         // every render, so binding once here beats re-binding per item).
+        // v3.13.8x: the game process picker used to extend this same
+        // listener, but it's a floating overlay now (openGameProcessPicker())
+        // with its own scoped click handler, matching openVndbImportModal() —
+        // an ephemeral element appended/removed from document.body doesn't
+        // need a permanent global listener watching for it.
         document.addEventListener('click', (e) => {
             const option = e.target.closest('#llm-model-suggestions .model-option');
             if (option) {
@@ -3236,6 +3241,139 @@
             if (el) el.classList.add('hidden');
         }
 
+        // v3.13.8x (settings UX audit, Fase 4, second pass): process picker
+        // for the Game PID field, rebuilt as a floating overlay after real
+        // feedback on the first version (an inline disclosure-list) —
+        // opening it shifted the settings panel's layout (so the mouse
+        // ended up over something else) and had no obvious way to close
+        // besides re-clicking the same button. This follows
+        // openVndbImportModal()'s exact pattern (a couple hundred lines up
+        // in this file): a plain div appended to document.body, fixed
+        // position so it can never push anything else around, an explicit
+        // × plus backdrop-click to close. Fetches fresh on every open
+        // rather than caching the process list itself — which games are
+        // running changes constantly and the whole point is picking one
+        // you already launched — but list-game-processes' own icon lookups
+        // ARE cached now (server-side, see _gameProcessIconCache in
+        // ipc-handlers.js), so repeat opens are faster than the first one.
+        async function openGameProcessPicker() {
+            const t = translations[currentLang] || translations['en'];
+
+            const overlay = document.createElement('div');
+            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+            overlay.innerHTML = `
+                <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-[380px] max-h-[70vh] flex flex-col gap-2 shadow-xl border border-gray-200 dark:border-dark-600">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-sm font-bold text-gray-800 dark:text-gray-100">${escapeHtml(t.game_pid_picker_title || 'Elegir proceso')}</h3>
+                        <button data-action="close" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-lg leading-none">&times;</button>
+                    </div>
+                    <div id="game-process-results" class="flex-1 overflow-y-auto scrollbar-thin space-y-1 min-h-[80px]">
+                        <div class="p-3 text-[10px] text-gray-400 text-center">${escapeHtml(t.game_pid_picker_loading || 'Buscando procesos…')}</div>
+                    </div>
+                </div>`;
+            document.body.appendChild(overlay);
+
+            const closeModal = () => overlay.remove();
+            overlay.querySelector('[data-action="close"]').onclick = closeModal;
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+
+            const resultsEl = overlay.querySelector('#game-process-results');
+            resultsEl.addEventListener('click', (e) => {
+                const option = e.target.closest('.game-process-option');
+                if (!option) return;
+                document.getElementById('game-pid').value = option.dataset.pid;
+                const nameEl = document.getElementById('game-pid-selected-name');
+                if (nameEl) {
+                    nameEl.textContent = '🎮 ' + option.dataset.name;
+                    nameEl.classList.remove('hidden');
+                }
+                checkGamePidVsAttached();
+                closeModal();
+            });
+
+            let result;
+            try {
+                result = await api.listGameProcesses();
+            } catch (e) {
+                result = { success: false, error: e.message };
+            }
+            // The modal may already be gone (user closed it before the
+            // fetch resolved) — writing into a detached element is
+            // harmless but pointless.
+            if (!overlay.isConnected) return;
+
+            if (!result || !result.success) {
+                const msgKey = result && result.error === 'windows-only' ? 'game_pid_picker_windows_only' : 'game_pid_picker_error';
+                const fallback = result && result.error === 'windows-only' ? 'Solo disponible en Windows.' : 'No se pudo obtener la lista de procesos.';
+                resultsEl.innerHTML = `<div class="p-3 text-[10px] text-amber-500 text-center">${escapeHtml(t[msgKey] || fallback)}</div>`;
+                return;
+            }
+            if (!result.processes.length) {
+                resultsEl.innerHTML = `<div class="p-3 text-[10px] text-gray-400 text-center">${escapeHtml(t.game_pid_picker_empty || 'No se encontraron ventanas de juegos abiertas.')}</div>`;
+                return;
+            }
+            resultsEl.innerHTML = result.processes.map((p) => {
+                const icon = p.iconDataUrl
+                    ? `<img src="${p.iconDataUrl}" class="w-5 h-5 rounded shrink-0" alt="">`
+                    : `<span class="w-5 h-5 rounded bg-gray-200 dark:bg-dark-700 shrink-0 flex items-center justify-center text-[10px]">🎮</span>`;
+                return `<div class="game-process-option flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-dark-700 cursor-pointer" data-pid="${p.pid}" data-name="${escapeHtml(p.name)}">
+                    ${icon}
+                    <div class="min-w-0 flex-1">
+                        <p class="text-[10px] font-medium truncate">${escapeHtml(p.windowTitle || p.name)}</p>
+                        <p class="text-[9px] text-gray-400 font-mono truncate">${escapeHtml(p.name)} · PID ${p.pid}</p>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        // v3.13.8x, second pass: real gap Lyca hit — gamePid is
+        // deliberately NOT a saved Tier B setting (see gatherConfig()'s own
+        // comment on why: a stale PID from a past session is never valid
+        // for a new one), so the Save button never reacted to it even
+        // before this, and maybeAutoLaunchTextractor() no-ops while
+        // cliRunning is true regardless (see its own doc comment) — so
+        // changing the PID field while Textractor is already attached to a
+        // DIFFERENT one used to give the user no feedback at all that
+        // anything needed to happen. Called on every PID input/pick;
+        // compares against cliAttachedPid (set in doLaunchTextractor(),
+        // cleared in killTextractorCli()) and shows/hides the inline
+        // "🔄 Reconectar" banner accordingly.
+        let cliAttachedPid = null;
+
+        function checkGamePidVsAttached() {
+            const banner = document.getElementById('game-pid-reconnect-banner');
+            if (!banner) return;
+            const currentPid = parseInt(document.getElementById('game-pid').value);
+            const mismatch = cliRunning && cliAttachedPid !== null && Number.isInteger(currentPid) && currentPid > 0 && currentPid !== cliAttachedPid;
+            banner.classList.toggle('hidden', !mismatch);
+        }
+
+        // Typing a PID by hand (the fallback path) makes the "🎮 name"
+        // confirmation from a previous picker selection stale/wrong — hide
+        // it rather than leave a name attached to a PID that no longer
+        // matches it.
+        function onGamePidInput() {
+            const nameEl = document.getElementById('game-pid-selected-name');
+            if (nameEl) nameEl.classList.add('hidden');
+            checkGamePidVsAttached();
+        }
+
+        // The explicit action the reconnect banner offers: kill the CLI
+        // attached to the old PID (if any) and relaunch straight at the
+        // new one. Deliberately bypasses maybeAutoLaunchTextractor()'s own
+        // guards (translationActive, manual mode) — those exist to gate
+        // AUTOMATIC/implicit launches; a user clicking this button is
+        // giving an explicit instruction, not triggering a side effect.
+        async function reconnectWithNewPid() {
+            const cliPath = document.getElementById('textractor-cli-path').value.trim();
+            const newPid = parseInt(document.getElementById('game-pid').value);
+            if (!cliPath || !Number.isInteger(newPid) || newPid <= 0) return;
+            if (cliRunning) await killTextractorCli();
+            await doLaunchTextractor(cliPath, newPid);
+            const banner = document.getElementById('game-pid-reconnect-banner');
+            if (banner) banner.classList.add('hidden');
+        }
+
         async function browseTextractorCli() {
             const result = await api.textractorBrowseCli();
             if (result.canceled) return;
@@ -3300,6 +3438,8 @@
             if (result.success) {
                 const t = translations[currentLang] || translations['en'];
                 cliRunning = true;
+                cliAttachedPid = gamePid;
+                checkGamePidVsAttached();
                 text.innerHTML = '<span class="text-emerald-500">● TextractorCLI: ' + (t.cli_running_status || 'Running') + '</span> (PID: ' + gamePid + ')';
                 document.getElementById('cli-pid-text').innerText = 'CLI PID: ...';
                 recomputeBadge();
@@ -3344,6 +3484,8 @@
         async function killTextractorCli() {
             await api.textractorKill();
             cliRunning = false;
+            cliAttachedPid = null;
+            checkGamePidVsAttached();
             cliEverExtracted = false;
             recomputeBadge();
             document.getElementById('btn-kill-cli').classList.add('hidden');

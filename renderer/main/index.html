@@ -579,8 +579,49 @@
                                 </button>
                             </div>
                         </div>
-                        <input type="number" id="game-pid" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 font-mono font-bold text-center text-emerald-600 dark:text-emerald-400 text-sm" placeholder="1234" min="1">
-                        <p class="text-[9px] text-gray-400 mt-1" data-i18n="game_pid_help">Encuéntralo en el Administrador de Tareas → Detalles → PID del proceso del juego.</p>
+                        <!-- v3.13.8x (settings UX audit, Fase 4): process
+                             picker replaces "open Task Manager and type the
+                             PID by hand" — the number input stays as the
+                             fallback (an elevated game process won't show
+                             up here, same reasoning
+                             _resolveExePathFromPid()'s doc comment gives).
+                             v3.13.8x, second pass: was an inline
+                             disclosure-list like #llm-model-suggestions —
+                             Lyca reported it felt slow to open, shifted the
+                             layout (so the mouse ended up somewhere else),
+                             and had no obvious way to close besides the
+                             same button. Rebuilt as a floating overlay
+                             (openGameProcessPicker() in renderer.js),
+                             matching openVndbImportModal()'s exact pattern
+                             — appended to document.body, fixed position, an
+                             explicit × plus backdrop-click to close, and
+                             (this is what actually fixes "feels slow") the
+                             modal paints with its loading state instantly,
+                             before the PowerShell/icon fetch is even
+                             awaited, instead of everything popping in at
+                             once after the wait. -->
+                        <div class="flex gap-2">
+                            <button type="button" onclick="openGameProcessPicker()" class="shrink-0 px-2.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[10px] font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-dark-700 transition flex items-center gap-1" data-i18n="game_pid_pick_btn">
+                                🎮 Elegir…
+                            </button>
+                            <input type="number" id="game-pid" class="flex-1 min-w-0 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 font-mono font-bold text-center text-emerald-600 dark:text-emerald-400 text-sm" placeholder="1234" min="1" oninput="onGamePidInput()">
+                        </div>
+                        <p id="game-pid-selected-name" class="hidden text-[9px] text-emerald-600 dark:text-emerald-400 mt-1 truncate"></p>
+                        <!-- v3.13.8x, second pass: "PID changed while
+                             Textractor is already attached" real gap Lyca
+                             hit — gamePid deliberately isn't a saved Tier B
+                             setting (see gatherConfig()'s comment), so the
+                             Save button never lit up for it even before
+                             this, and maybeAutoLaunchTextractor() no-ops
+                             while cliRunning is true regardless — nothing
+                             ever told the user they needed to do anything.
+                             Shown/hidden by checkGamePidVsAttached() in
+                             renderer.js. -->
+                        <div id="game-pid-reconnect-banner" class="hidden mt-1.5 p-2 rounded-md bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800 flex items-center justify-between gap-2">
+                            <span class="text-[9px] text-amber-700 dark:text-amber-400" data-i18n="game_pid_reconnect_desc">El PID cambió — Textractor sigue conectado al anterior.</span>
+                            <button type="button" onclick="reconnectWithNewPid()" class="shrink-0 text-[9px] font-bold px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white transition" data-i18n="game_pid_reconnect_btn">🔄 Reconectar</button>
+                        </div>
+                        <p class="text-[9px] text-gray-400 mt-1" data-i18n="game_pid_help">Solo Windows. Si tu juego corre como administrador, puede no aparecer — usá el campo manual con el PID del Administrador de Tareas.</p>
                     </div>
 
                     <!-- CLI Status -->
