@@ -7,6 +7,31 @@
  * the handler itself; that part can only be exercised on real Windows.
  */
 
+// v3.13.88: itch.io's own desktop client is Electron-based and keeps a real
+// window open while browsing the library, so it passes list-game-processes'
+// only filter (MainWindowTitle non-empty + Path present) exactly like the
+// VN it's about to launch — a user who leaves the itch client open (the
+// common case; most VN installs go through it) can end up linking a
+// profile straight to itch.exe instead of the actual game. Confirmed real
+// (2026-08-24, Lyca): a profile's `game.exePath` resolved to
+// `...\itch\app-26.18.0\itch.exe`, which then fed a wrong PID into
+// Textractor's auto-connect AND kept re-triggering a "profile already
+// linked" suggestion on every later scan, for ANY game, as long as the
+// itch client happened to be running in the background.
+//
+// Matched by install-path shape, not bare exeName alone, so a
+// coincidentally-named `itch.exe` living somewhere else is never silently
+// dropped from the picker.
+const ITCH_LAUNCHER_RE = /\\itch\\app-[^\\]+\\itch\.exe$/i;
+
+/**
+ * @param {string} exePath
+ * @returns {boolean}
+ */
+function isKnownLauncherProcess(exePath) {
+  return typeof exePath === 'string' && ITCH_LAUNCHER_RE.test(exePath);
+}
+
 /**
  * `ConvertTo-Json` returns a single JSON OBJECT (not a one-element array)
  * when exactly one process matches the filter — a well-documented
@@ -33,6 +58,7 @@ function parseProcessListJson(raw) {
   const rows = Array.isArray(parsed) ? parsed : [parsed];
   return rows
     .filter((row) => row && typeof row === 'object' && Number.isInteger(row.Id) && typeof row.Path === 'string' && row.Path)
+    .filter((row) => !isKnownLauncherProcess(row.Path))
     .map((row) => ({
       pid: row.Id,
       name: typeof row.ProcessName === 'string' ? row.ProcessName : '',
@@ -41,4 +67,4 @@ function parseProcessListJson(raw) {
     }));
 }
 
-module.exports = { parseProcessListJson };
+module.exports = { parseProcessListJson, isKnownLauncherProcess };

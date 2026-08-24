@@ -11,7 +11,7 @@
  *   node scripts/test-game-process-list.js --quiet
  */
 const path = require('path');
-const { parseProcessListJson } = require(path.join('..', 'src', 'services', 'game-process-list.js'));
+const { parseProcessListJson, isKnownLauncherProcess } = require(path.join('..', 'src', 'services', 'game-process-list.js'));
 
 const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m' };
 
@@ -103,6 +103,33 @@ check('missing-mainwindowtitle-defaults-to-empty-string-not-undefined', () => {
   const raw = JSON.stringify([{ Id: 5005, ProcessName: 'game', MainWindowTitle: null, Path: 'C:\\game.exe' }]);
   const r = parseProcessListJson(raw);
   return { pass: r.length === 1 && r[0].windowTitle === '', actual: r };
+});
+
+check('itch-io-launcher-is-excluded-from-the-process-list', () => {
+  // v3.13.88: real bug (Lyca, 2026-08-24) — the itch.io desktop client
+  // qualifies for the picker's own filter (real window + real path) just
+  // like the VN it launches, so it showed up as a pickable "game" and got
+  // linked by mistake, poisoning both the profile suggestion and
+  // Textractor's PID auto-connect.
+  const raw = JSON.stringify([
+    { Id: 31000, ProcessName: 'itch', MainWindowTitle: 'itch', Path: 'C:\\Users\\sebag\\AppData\\Local\\itch\\app-26.18.0\\itch.exe' },
+    { Id: 35040, ProcessName: 'TemptationsBallad', MainWindowTitle: "Temptation's Ballad", Path: 'D:\\Itch.io\\temptations-ballad\\TemptationsBallad-0.2.8-pc\\TemptationsBallad.exe' }
+  ]);
+  const r = parseProcessListJson(raw);
+  return { pass: r.length === 1 && r[0].pid === 35040, actual: r };
+});
+
+check('isKnownLauncherProcess-matches-itch-install-path-shape', () => {
+  const cases = [
+    ['C:\\Users\\sebag\\AppData\\Local\\itch\\app-26.18.0\\itch.exe', true],
+    ['C:\\Users\\sebag\\AppData\\Local\\itch\\app-1.0.0\\itch.exe', true],
+    ['D:\\Games\\SomeVN\\itch.exe', false],   // bare exeName alone must NOT be enough
+    ['D:\\Itch.io\\temptations-ballad\\TemptationsBallad-0.2.8-pc\\TemptationsBallad.exe', false],
+    [undefined, false],
+    ['', false]
+  ];
+  const pass = cases.every(([exePath, expected]) => isKnownLauncherProcess(exePath) === expected);
+  return { pass, actual: cases.map(([exePath]) => [exePath, isKnownLauncherProcess(exePath)]) };
 });
 
 // ─── Summary ─────────────────────────────────────────────────────────────
