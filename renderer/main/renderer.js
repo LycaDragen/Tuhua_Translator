@@ -268,15 +268,17 @@
             }
             applyTheme(settings.theme || 'dark');
 
-            // v3.13.94: restore a manually-dragged sidebar width, if the
-            // user ever set one — see setupSidebarResize()'s own comment
-            // for why this switches the sidebar out of its default
-            // grows-with-the-window flex-1 behavior.
+            // v3.13.94/v3.13.96: restore a manually-dragged sidebar width,
+            // if the user ever set one — `flex: 1 0 Npx` (grow:1, shrink:0;
+            // NOT `flex: none` + a fixed width), same reasoning as
+            // setupSidebarResize()'s own comment: grow:1 still absorbs
+            // extra window width like the never-dragged default, and
+            // shrink:0 means <main> (not the sidebar) gives up space first
+            // if the window is ever too small for both.
             if (settings.sidebarWidth) {
                 const savedAside = document.getElementById('app-sidebar');
                 if (savedAside) {
-                    savedAside.style.flex = 'none';
-                    savedAside.style.width = settings.sidebarWidth + 'px';
+                    savedAside.style.flex = `1 0 ${settings.sidebarWidth}px`;
                 }
             }
 
@@ -775,12 +777,36 @@
         // wider still — past whatever the window itself provides — and
         // shrink the play-button column down to it, since that column
         // still reads fine narrow (own comment on the shortcuts grid
-        // above). A drag switches #app-sidebar out of its default flex-1
-        // (grows-with-window) mode into a fixed width the user chose;
-        // init() restores that choice from settings.sidebarWidth on
-        // startup the same way it restores theme/uiLanguage. Doesn't fight
-        // the automatic v3.13.93 behavior — that stays the default for
-        // anyone who's never dragged the handle.
+        // above). init() restores the dragged width from
+        // settings.sidebarWidth on startup the same way it restores
+        // theme/uiLanguage.
+        // v3.13.96 (two real bugs, both caught by actually launching the
+        // app — see capability-electron-runs-in-wsl memory — instead of
+        // trusting the diff; v3.13.94's drag had never been exercised):
+        //   1. A drag used to set `flex: none; width: Npx`, pinning the
+        //      sidebar at EXACTLY that pixel width forever. Drag it wide,
+        //      then narrow, and the extra space the window had been
+        //      giving it doesn't go anywhere — dead space at the window's
+        //      right edge, because flex-grow:0 means nothing reclaims it.
+        //   2. `flex: 1 1 Npx` (grow AND shrink) fixed #1 but broke the
+        //      "drag to the max" case instead: with shrink:1, dragging
+        //      past what the window can fit made the sidebar and <main>
+        //      split the deficit between them, so <main> stopped short of
+        //      its own min-w-[280px] floor (confirmed live: dragging to
+        //      the computed ceiling left <main> at ~453px, not 280) — the
+        //      shortcuts grid's @container collapse (see its own comment)
+        //      never triggered because <main> never actually got narrow
+        //      enough.
+        // `flex: 1 0 Npx` (grow:1, shrink:0) is what's actually needed:
+        // grow:1 still reclaims spare window width same as the
+        // never-dragged default (fixes #1), while shrink:0 means the
+        // sidebar never gives back ANY of its dragged width under
+        // pressure — <main> (default shrink:1) absorbs the entire deficit
+        // alone, all the way down to its real floor (fixes #2). Confirmed
+        // live via CDP for all three cases: drag-narrow-after-wide (no
+        // gap), drag-to-max (<main> lands exactly on 280px, grid
+        // collapses to 1 column), and the never-dragged default (576/520
+        // split, unchanged).
         function setupSidebarResize() {
             const handle = document.getElementById('sidebar-resize-handle');
             const aside = document.getElementById('app-sidebar');
@@ -805,8 +831,7 @@
                 const maxWidth = Math.min(HARD_MAX_WIDTH, containerRect.width - MAIN_MIN_WIDTH - handle.offsetWidth);
                 const rawWidth = e.clientX - containerRect.left;
                 const newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, rawWidth));
-                aside.style.flex = 'none';
-                aside.style.width = newWidth + 'px';
+                aside.style.flex = `1 0 ${newWidth}px`;
             });
 
             window.addEventListener('mouseup', () => {

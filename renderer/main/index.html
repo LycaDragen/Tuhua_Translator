@@ -938,8 +938,21 @@
              v3.13.94: min-width shrunk from 420 to 280 — the shortcuts card
              now stacks 1-column (see its own comment below) instead of a
              2x2 grid, so it no longer needs the wider floor to stay
-             readable when the sidebar is dragged wide. -->
-        <main class="min-w-[280px] bg-gray-50 dark:bg-dark-950 flex items-center justify-center relative overflow-hidden">
+             readable when the sidebar is dragged wide.
+             v3.13.96: REAL BUG, found by actually launching the app (CDP,
+             see capability-electron-runs-in-wsl memory) instead of trusting
+             the diff — flex-basis:auto (the implicit default main was
+             relying on) does NOT resolve to main's content-based preferred
+             width here; verified live that it collapses main to its
+             min-width floor unconditionally, handing #app-sidebar's
+             flex-1 the entire rest of the window even with nothing ever
+             dragged. basis-[576px] (max-w-lg's 512px + p-8's 64px of
+             padding, main's actual natural width) gives flex-basis a
+             concrete value instead of 'auto', which fixes it — confirmed
+             live both at rest (576/520 main/aside split on a 1100px
+             window) and dragged (#app-sidebar forced to 820px still
+             leaves main at exactly its 280px floor, not less). -->
+        <main class="min-w-[280px] basis-[576px] bg-gray-50 dark:bg-dark-950 flex items-center justify-center relative overflow-hidden">
             <!-- Subtle background pattern -->
             <div class="absolute inset-0 opacity-[0.02] pointer-events-none" style="background-image: radial-gradient(#10b981 1px, transparent 1px); background-size: 24px 24px;"></div>
 
