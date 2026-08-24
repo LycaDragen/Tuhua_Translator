@@ -272,7 +272,7 @@
                          just picked a different process" (picker). Never
                          written without this explicit click either way. -->
                     <div id="game-link-confirm" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800 space-y-1.5">
-                        <p id="game-link-confirm-desc" class="text-[10px] text-amber-700 dark:text-amber-400 whitespace-pre-line leading-relaxed"></p>
+                        <p id="game-link-confirm-desc" class="text-xs text-amber-700 dark:text-amber-400 whitespace-pre-line leading-relaxed"></p>
                         <div class="flex gap-2">
                             <button type="button" onclick="confirmGameLinkChange()" class="flex-1 text-[9px] font-bold px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white transition" data-i18n="game_path_confirm_btn">Actualizar y conectar</button>
                             <button type="button" onclick="dismissGameLinkChange()" class="flex-1 text-[9px] font-medium px-2 py-1 rounded border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition" data-i18n="game_path_confirm_dismiss">No, ignorar</button>
@@ -282,7 +282,7 @@
                     <!-- B.3: the detected game belongs to a DIFFERENT
                          profile — sugerencia con banner, nunca auto-switch. -->
                     <div id="game-profile-suggestion" class="hidden p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 space-y-1.5">
-                        <p id="game-profile-suggestion-desc" class="text-[10px] text-blue-700 dark:text-blue-400 leading-relaxed"></p>
+                        <p id="game-profile-suggestion-desc" class="text-xs text-blue-700 dark:text-blue-400 leading-relaxed"></p>
                         <div class="flex gap-2">
                             <button type="button" onclick="acceptGameProfileSuggestion()" class="flex-1 text-[9px] font-bold px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition" data-i18n="game_profile_suggestion_btn">Cambiar de perfil</button>
                             <button type="button" onclick="dismissGameProfileSuggestion()" class="flex-1 text-[9px] font-medium px-2 py-1 rounded border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition" data-i18n="game_profile_suggestion_dismiss">Ignorar</button>
@@ -299,7 +299,7 @@
                          runtime {engine}/{method} substitution a static
                          translation swap would clobber. -->
                     <div id="engine-advice" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800">
-                        <p id="engine-advice-text" class="text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed"></p>
+                        <p id="engine-advice-text" class="text-xs text-amber-700 dark:text-amber-400 leading-relaxed"></p>
                         <button id="engine-advice-action" type="button" onclick="applyEngineAdvice()" class="hidden mt-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 underline hover:no-underline"></button>
                     </div>
                 </div>
@@ -325,8 +325,8 @@
                             <span data-i18n="method_xuat" class="block text-[10px] leading-tight break-words">XUAT</span>
                         </button>
                     </div>
-                    <p id="ocr-desc" class="hidden text-[10px] text-purple-500 dark:text-purple-400 mt-1.5 italic" data-i18n="method_ocr_desc">Captura región de pantalla y detecta texto por OCR.</p>
-                    <p id="xuat-desc" class="hidden text-[10px] text-purple-500 dark:text-purple-400 mt-1.5 italic" data-i18n="method_xuat_desc">XUAT traduce juegos Unity reemplazando el texto directamente dentro del juego. No necesita overlay — el texto traducido aparece en la ventana del juego.</p>
+                    <p id="ocr-desc" class="hidden text-xs text-purple-500 dark:text-purple-400 mt-1.5 italic" data-i18n="method_ocr_desc">Captura región de pantalla y detecta texto por OCR.</p>
+                    <p id="xuat-desc" class="hidden text-xs text-purple-500 dark:text-purple-400 mt-1.5 italic" data-i18n="method_xuat_desc">XUAT traduce juegos Unity reemplazando el texto directamente dentro del juego. No necesita overlay — el texto traducido aparece en la ventana del juego.</p>
                 </div>
 
                 <!-- Engine -->
@@ -334,7 +334,7 @@
                     <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider" data-i18n="engine_label">Motor de Traducción</label>
                     <select id="engine-select" onchange="onEngineChange()" class="w-full p-2.5 rounded-lg bg-gray-50 dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-sm font-medium cursor-pointer appearance-none">
                         <!-- GRATUITOS -->
-                        <option value="google-free" data-i18n-engine="engine_google_free">🌐 Google Translate (Gratuito)</option>
+                        <option value="google-free" data-i18n-engine="engine_google_free">🌐 Google Traductor (Gratuito)</option>
                         <option value="bing" data-i18n-engine="engine_bing">🔍 Bing Translator (Gratuito)</option>
                         <!-- LOCALES / OFFLINE -->
                         <option value="local-llm" data-i18n-engine="engine_local_llm">🤖 Local LLM (Ollama/LM Studio)</option>
@@ -345,7 +345,7 @@
                         <!-- PERSONALIZADO -->
                         <option value="custom-mt" data-i18n-engine="engine_custom_mt">⚙️ Custom MT Endpoint</option>
                     </select>
-                    <p id="engine-desc" class="text-[11px] text-gray-500 dark:text-gray-400 mt-1.5" data-i18n="desc_google_free">Traducción gratuita usando Google Web.</p>
+                    <p id="engine-desc" class="text-xs text-gray-500 dark:text-gray-400 mt-1.5" data-i18n="desc_google_free">Traducción gratuita usando Google Web.</p>
                 </div>
 
                 <!-- API Key Section -->
@@ -361,7 +361,7 @@
                     <div id="llm-provider-row" class="hidden mb-2">
                         <label class="block text-[10px] font-bold text-amber-700 dark:text-amber-500 uppercase mb-1" data-i18n="llm_provider_label">Proveedor</label>
                         <select id="llm-provider-select" onchange="onLlmProviderChange()" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs cursor-pointer"></select>
-                        <p id="llm-provider-beta-note" class="hidden text-[10px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="llm_provider_beta_note">Esta API de compatibilidad es beta según la documentación del proveedor — puede cambiar sin aviso.</p>
+                        <p id="llm-provider-beta-note" class="hidden text-xs text-amber-600 dark:text-amber-500 mt-1" data-i18n="llm_provider_beta_note">Esta API de compatibilidad es beta según la documentación del proveedor — puede cambiar sin aviso.</p>
                     </div>
                     <input type="password" id="api-key" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs font-mono transition-colors duration-200" placeholder="Pega tu Key aquí..." oninput="markUnsaved('sidebar')">
                     <div id="api-key-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
@@ -398,7 +398,7 @@
                             <option value="prefer_more" data-i18n="formality_prefer_more">Preferir formal</option>
                             <option value="prefer_less" data-i18n="formality_prefer_less">Preferir informal</option>
                         </select>
-                        <p id="deepl-formality-hint" class="text-[10px] text-amber-600 dark:text-amber-500 mt-1" data-i18n="deepl_formality_desc">Controla el nivel de formalidad de la traducción. Útil para japonés (keigo/casual).</p>
+                        <p id="deepl-formality-hint" class="text-xs text-amber-600 dark:text-amber-500 mt-1" data-i18n="deepl_formality_desc">Controla el nivel de formalidad de la traducción. Útil para japonés (keigo/casual).</p>
                     </div>
                     <!-- v3.11.29: DeepL Custom Instructions -->
                     <div id="deepl-custom-instructions-section" class="hidden mt-2">
@@ -412,15 +412,15 @@
                         <textarea id="deepl-custom-instructions" rows="3" class="w-full p-2 rounded-md bg-white dark:bg-dark-900 border border-amber-200 dark:border-amber-800 text-xs resize-none transition-colors duration-200" placeholder="" oninput="autoSaveDeepLCustomInstructions()"></textarea>
                         <div class="flex items-center justify-between mt-1">
                             <div>
-                                <p class="text-[10px] text-amber-600 dark:text-amber-500" data-i18n="deepl_custom_instructions_desc">Directivas en lenguaje natural para guiar la traducción. 1 por línea, máx 300 caracteres cada una.</p>
-                                <p class="text-[10px] text-blue-500 dark:text-blue-400 mt-0.5" data-i18n="deepl_custom_instructions_english_note">Para mejores resultados, escribe las instrucciones en inglés</p>
+                                <p class="text-xs text-amber-600 dark:text-amber-500" data-i18n="deepl_custom_instructions_desc">Directivas en lenguaje natural para guiar la traducción. 1 por línea, máx 300 caracteres cada una.</p>
+                                <p class="text-xs text-blue-500 dark:text-blue-400 mt-0.5" data-i18n="deepl_custom_instructions_english_note">Para mejores resultados, escribe las instrucciones en inglés</p>
                             </div>
                             <span id="deepl-instructions-count" class="text-[9px] text-gray-400 font-mono">0/10</span>
                         </div>
                     </div>
                     <!-- v3.11.29: DeepL Feature Incompatibility Notice -->
                     <div id="deepl-feature-notice" class="hidden mt-2 p-2 rounded-md bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
-                        <p id="deepl-feature-notice-text" class="text-[10px] text-blue-600 dark:text-blue-400"></p>
+                        <p id="deepl-feature-notice-text" class="text-xs text-blue-600 dark:text-blue-400"></p>
                     </div>
                 </div>
 
@@ -558,14 +558,14 @@
                     <!-- OCR Engine Selector -->
                     <div class="flex items-center gap-2">
                         <span class="text-[10px] font-bold text-gray-500 dark:text-gray-400" data-i18n="ocr_engine_label">Motor OCR</span>
-                        <select id="ocr-engine-select" onchange="setOcrEngine(this.value)" class="flex-1 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[10px]">
+                        <select id="ocr-engine-select" onchange="setOcrEngine(this.value)" class="flex-1 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs">
                             <option value="tesseract">Tesseract</option>
                             <option value="paddle" id="ocr-engine-paddle-option">PaddleOCR</option>
                         </select>
                     </div>
-                    <p id="ocr-engine-desc" class="text-[10px] text-gray-400 italic" data-i18n="ocr_engine_tesseract_desc">Motor OCR predeterminado. Funciona con todos los idiomas.</p>
+                    <p id="ocr-engine-desc" class="text-xs text-gray-400 italic" data-i18n="ocr_engine_tesseract_desc">Motor OCR predeterminado. Funciona con todos los idiomas.</p>
                     <!-- v3.13.14: Removed "~15MB model download" warning — models download automatically and silently -->
-                    <p id="ocr-status-text" class="text-[10px] text-gray-400 text-center"></p>
+                    <p id="ocr-status-text" class="text-xs text-gray-400 text-center"></p>
 
                     <!-- v3.13.79 (Fase 3, round-3 plan): proactive suggestion to try
                          PaddleOCR when Tesseract quality has been persistently poor
@@ -575,7 +575,7 @@
                          rendered dynamically by renderOcrEngineAdvice(), no data-i18n
                          on them directly. -->
                     <div id="ocr-engine-advice" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800">
-                        <p id="ocr-engine-advice-text" class="text-[11px] text-amber-700 dark:text-amber-400 leading-relaxed"></p>
+                        <p id="ocr-engine-advice-text" class="text-xs text-amber-700 dark:text-amber-400 leading-relaxed"></p>
                         <button id="ocr-engine-advice-action" type="button" onclick="applyOcrEngineAdvice()" class="mt-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 underline hover:no-underline"></button>
                     </div>
                 </div>
@@ -611,7 +611,7 @@
                         <button onclick="installXuat()" class="w-full px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition flex items-center justify-center gap-2">
                             🎮 <span data-i18n="xuat_install_btn">Instalar XUAT en un Juego</span>
                         </button>
-                        <p class="text-[10px] text-gray-400 text-center" data-i18n="xuat_install_desc">Selecciona el .exe del juego Unity y Tuhua instalará automáticamente todo lo necesario.</p>
+                        <p class="text-xs text-gray-400 text-center" data-i18n="xuat_install_desc">Selecciona el .exe del juego Unity y Tuhua instalará automáticamente todo lo necesario.</p>
                     </div>
                     <!-- Install Progress -->
                     <div id="xuat-install-progress" class="hidden p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30 space-y-1">
@@ -631,7 +631,7 @@
                         <button onclick="clearXuatCache()" class="w-full px-3 py-2 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-md transition flex items-center justify-center gap-2">
                             🗑️ <span data-i18n="xuat_clear_cache">Limpiar Caché de Traducción</span>
                         </button>
-                        <p class="text-[10px] text-gray-400 text-center" data-i18n="xuat_clear_cache_desc">Borra las traducciones en caché del juego. Útil si cambiaste el idioma de destino.</p>
+                        <p class="text-xs text-gray-400 text-center" data-i18n="xuat_clear_cache_desc">Borra las traducciones en caché del juego. Útil si cambiaste el idioma de destino.</p>
                     </div>
                     <!-- Connected Game Status (persistent) -->
                     <div id="xuat-connected-game" class="hidden p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-800/30 space-y-1">
@@ -639,9 +639,9 @@
                             <span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot"></span>
                             <span class="text-[10px] font-bold text-emerald-700 dark:text-emerald-400">Juego Conectado</span>
                         </div>
-                        <p id="xuat-connected-game-name" class="text-[10px] text-emerald-600 dark:text-emerald-400">—</p>
-                        <p id="xuat-game-backend" class="hidden text-[10px] text-blue-500 dark:text-blue-400 font-mono">IL2CPP</p>
-                        <p id="xuat-connected-game-hint" class="text-[10px] text-emerald-500 dark:text-emerald-400/70">Inicia el juego para empezar a traducir.</p>
+                        <p id="xuat-connected-game-name" class="text-xs text-emerald-600 dark:text-emerald-400">—</p>
+                        <p id="xuat-game-backend" class="hidden text-xs text-blue-500 dark:text-blue-400 font-mono">IL2CPP</p>
+                        <p id="xuat-connected-game-hint" class="text-xs text-emerald-500 dark:text-emerald-400/70">Inicia el juego para empezar a traducir.</p>
                         <div id="xuat-translation-counter" class="hidden flex items-center gap-1 mt-1">
                             <span class="text-[9px] text-gray-400">Traducciones:</span>
                             <span id="xuat-translation-count" class="text-[9px] font-bold text-emerald-600 dark:text-emerald-400">0</span>
@@ -683,7 +683,7 @@
                             <input type="text" id="textractor-cli-path" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-[11px] font-mono" data-i18n-placeholder="cli_path_placeholder" placeholder="C:\Textractor (carpeta) o C:\Textractor\x64\Textractor.exe" readonly>
                             <span id="cli-path-status" class="text-xs self-center"></span>
                         </div>
-                        <p class="text-[10px] text-gray-400 mt-1" data-i18n="cli_path_help">Ruta a la carpeta de Textractor o al .exe. Se auto-detecta x64/x86.</p>
+                        <p class="text-xs text-gray-400 mt-1" data-i18n="cli_path_help">Ruta a la carpeta de Textractor o al .exe. Se auto-detecta x64/x86.</p>
                     </div>
 
                     <!-- Game PID + Launch -->
@@ -725,7 +725,7 @@
                             </button>
                             <input type="number" id="game-pid" class="flex-1 min-w-0 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 font-mono font-bold text-center text-emerald-600 dark:text-emerald-400 text-sm" placeholder="1234" min="1" oninput="onGamePidInput()">
                         </div>
-                        <p id="game-pid-selected-name" class="hidden text-[10px] text-emerald-600 dark:text-emerald-400 mt-1 truncate"></p>
+                        <p id="game-pid-selected-name" class="hidden text-xs text-emerald-600 dark:text-emerald-400 mt-1 truncate"></p>
                         <!-- v3.13.8x, second pass: "PID changed while
                              Textractor is already attached" real gap Lyca
                              hit — gamePid deliberately isn't a saved Tier B
@@ -740,7 +740,7 @@
                             <span class="text-[9px] text-amber-700 dark:text-amber-400" data-i18n="game_pid_reconnect_desc">El PID cambió — Textractor sigue conectado al anterior.</span>
                             <button type="button" onclick="reconnectWithNewPid()" class="shrink-0 text-[9px] font-bold px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white transition" data-i18n="game_pid_reconnect_btn">🔄 Reconectar</button>
                         </div>
-                        <p class="text-[10px] text-gray-400 mt-1" data-i18n="game_pid_help">Solo Windows. Si tu juego corre como administrador, puede no aparecer — usá el campo manual con el PID del Administrador de Tareas.</p>
+                        <p class="text-xs text-gray-400 mt-1" data-i18n="game_pid_help">Solo Windows. Si tu juego corre como administrador, puede no aparecer — usá el campo manual con el PID del Administrador de Tareas.</p>
                     </div>
 
                     <!-- CLI Status -->
@@ -751,8 +751,8 @@
                         </div>
                         <!-- v3.8.23: Detailed error panel -->
                         <div id="cli-error-detail" class="hidden mt-2 p-2 rounded bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50">
-                            <p id="cli-error-message" class="text-[11px] text-red-700 dark:text-red-300 font-medium"></p>
-                            <p id="cli-error-hint" class="text-[10px] text-red-600 dark:text-red-400 mt-1"></p>
+                            <p id="cli-error-message" class="text-xs text-red-700 dark:text-red-300 font-medium"></p>
+                            <p id="cli-error-hint" class="text-xs text-red-600 dark:text-red-400 mt-1"></p>
                             <button onclick="maybeAutoLaunchTextractor()" class="text-[9px] text-red-600 dark:text-red-400 font-medium hover:underline mt-1" data-i18n="cli_retry_btn">Reintentar</button>
                             <details class="mt-1.5">
                                 <summary class="text-[8px] text-red-500 dark:text-red-400 cursor-pointer hover:underline">Detalles técnicos</summary>
@@ -772,11 +772,11 @@
                             <option value="">🔄 Auto (seleccionar mejor hook)</option>
                         </select>
                         <div id="hook-preview" class="hidden p-2 rounded bg-white/50 dark:bg-dark-800/50 border border-emerald-200/50 dark:border-emerald-800/50">
-                            <p class="text-[10px] text-gray-400 mb-1">Último texto:</p>
-                            <p id="hook-preview-text" class="text-[11px] text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed"></p>
-                            <p id="hook-preview-score" class="hidden text-[10px] text-gray-400 mt-1.5 pt-1.5 border-t border-emerald-200/50 dark:border-emerald-800/50"></p>
+                            <p class="text-xs text-gray-400 mb-1">Último texto:</p>
+                            <p id="hook-preview-text" class="text-xs text-gray-700 dark:text-gray-300 font-mono break-all leading-relaxed"></p>
+                            <p id="hook-preview-score" class="hidden text-xs text-gray-400 mt-1.5 pt-1.5 border-t border-emerald-200/50 dark:border-emerald-800/50"></p>
                         </div>
-                        <p class="text-[10px] text-emerald-600 dark:text-emerald-400/60" data-i18n="hook_selector_help">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
+                        <p class="text-xs text-emerald-600 dark:text-emerald-400/60" data-i18n="hook_selector_help">Selecciona el hook que contiene el texto del juego. "Auto" elige automáticamente.</p>
                     </div>
 
                     <!-- v3.13.8x (settings UX audit): Manual Mode moved to
@@ -793,7 +793,7 @@
             <div id="tab-glossary" class="hidden flex-1 overflow-y-auto scrollbar-thin p-5 space-y-4 fade-in">
                 <div>
                     <h3 class="text-sm font-bold" data-i18n="glossary_title">Glosario de Traducción</h3>
-                    <p class="text-[11px] text-gray-400 mt-1" data-i18n="glossary_desc">Define traducciones personalizadas para términos.</p>
+                    <p class="text-xs text-gray-400 mt-1" data-i18n="glossary_desc">Define traducciones personalizadas para términos.</p>
                 </div>
                 <!-- Scope switch: Global (shared everywhere) vs. this profile
                      (character/game-specific terms, wins on conflict) -->
@@ -802,7 +802,7 @@
                         <button id="glossary-scope-global" onclick="setGlossaryScope('global')" class="flex-1 py-1.5 text-[10px] font-medium rounded-md transition" data-i18n="glossary_scope_global">Global</button>
                         <button id="glossary-scope-profile" onclick="setGlossaryScope('profile')" class="flex-1 py-1.5 text-[10px] font-medium rounded-md transition" data-i18n="glossary_scope_profile">Este perfil</button>
                     </div>
-                    <p class="text-[10px] text-gray-400 mt-1" data-i18n="glossary_scope_note">Si un término existe en ambos, gana el de este perfil.</p>
+                    <p class="text-xs text-gray-400 mt-1" data-i18n="glossary_scope_note">Si un término existe en ambos, gana el de este perfil.</p>
                 </div>
                 <!-- Add Entry Form -->
                 <div class="p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600 space-y-2">
@@ -852,7 +852,7 @@
             <div id="tab-profiles" class="hidden flex-1 overflow-y-auto scrollbar-thin p-5 space-y-4 fade-in">
                 <div>
                     <h3 class="text-sm font-bold" data-i18n="profiles_title">Perfiles</h3>
-                    <p class="text-[11px] text-gray-400 mt-1" data-i18n="profiles_desc">Guarda configuraciones, glosario e historial para diferentes juegos.</p>
+                    <p class="text-xs text-gray-400 mt-1" data-i18n="profiles_desc">Guarda configuraciones, glosario e historial para diferentes juegos.</p>
                 </div>
                 <!-- Active Profile Indicator -->
                 <div class="flex items-center gap-2 p-2.5 rounded-lg bg-emerald-50 dark:bg-emerald-900/10 border border-emerald-200 dark:border-emerald-800/30">
@@ -866,10 +866,10 @@
                         <input type="text" id="profile-name" oninput="clearProfileNameError()" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="Nombre del perfil...">
                         <button onclick="createNewProfile()" class="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition" data-i18n="profile_create">Crear Nuevo</button>
                     </div>
-                    <p id="profile-name-error" class="hidden text-[10px] text-red-500 mt-1"></p>
+                    <p id="profile-name-error" class="hidden text-xs text-red-500 mt-1"></p>
                 </div>
                 <div class="p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-900/30 space-y-1">
-                    <p class="text-[11px] font-bold text-blue-700 dark:text-blue-400" data-i18n="profile_stores_title">Cada perfil almacena:</p>
+                    <p class="text-xs font-bold text-blue-700 dark:text-blue-400" data-i18n="profile_stores_title">Cada perfil almacena:</p>
                     <ul class="text-[9px] text-blue-600 dark:text-blue-400 space-y-0.5 ml-3 list-disc">
                         <li data-i18n="profile_stores_glossary">Contenido del glosario</li>
                         <li data-i18n="profile_stores_history">Historial de traducciones</li>
@@ -877,7 +877,7 @@
                         <li data-i18n="profile_stores_input">Método de entrada (Textractor/Clipboard/OCR)</li>
                         <li data-i18n="profile_stores_engine">Motor de traducción y su configuración</li>
                     </ul>
-                    <p class="text-[10px] text-gray-400 dark:text-gray-500 pt-1" data-i18n="profile_stores_note">El idioma de destino, las claves de API y la ruta de Textractor son globales — no cambian entre perfiles.</p>
+                    <p class="text-xs text-gray-400 dark:text-gray-500 pt-1" data-i18n="profile_stores_note">El idioma de destino, las claves de API y la ruta de Textractor son globales — no cambian entre perfiles.</p>
                 </div>
                 <div id="profile-list" class="space-y-2">
                     <p class="text-xs text-gray-400 text-center py-4" data-i18n="profile_empty">Sin perfiles guardados.</p>
@@ -916,7 +916,7 @@
                         <svg id="toggle-icon-play" class="w-10 h-10 mb-1 hidden" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                         <span id="toggle-status-text" class="text-xs font-bold uppercase tracking-wider" data-i18n="status_active">Activo</span>
                     </button>
-                    <p class="text-[11px] text-gray-400 mt-2 font-medium" data-i18n="toggle_translation">Traducción</p>
+                    <p class="text-xs text-gray-400 mt-2 font-medium" data-i18n="toggle_translation">Traducción</p>
                 </div>
 
                 <!-- Status Bar -->
@@ -1105,7 +1105,7 @@
                         <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
                             <div>
                                 <span class="text-xs font-medium" data-i18n="click_through">Modo Atravesar Clics</span>
-                                <p class="text-[10px] text-gray-400" data-i18n="click_through_desc">El ratón atraviesa el overlay. Ctrl+Shift+M</p>
+                                <p class="text-xs text-gray-400" data-i18n="click_through_desc">El ratón atraviesa el overlay. Ctrl+Shift+M</p>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="click-through-toggle" class="sr-only peer" data-immediate="true" onchange="toggleClickThrough(this.checked)">
@@ -1132,7 +1132,7 @@
                                 <span id="debounce-val" class="text-[10px] font-mono text-emerald-500">300ms</span>
                             </div>
                             <input type="range" id="debounce-range" min="100" max="2000" step="50" value="300" class="w-full" oninput="document.getElementById('debounce-val').innerText=this.value+'ms'; markUnsaved('modal')">
-                            <p class="text-[10px] text-gray-400" data-i18n="debounce_desc">Wait time before translating new text.</p>
+                            <p class="text-xs text-gray-400" data-i18n="debounce_desc">Wait time before translating new text.</p>
                         </div>
                         <!-- v3.13.59 (LLM engine overhaul, Fase 4): replaces the old bare
                              textarea. That textarea was destructive by design — anything typed
@@ -1148,7 +1148,7 @@
                                 <button onclick="resetPromptTemplate()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition flex items-center gap-1" data-i18n="reset_prompt_btn">Restablecer</button>
                             </div>
                             <select id="prompt-preset-select" onchange="onPromptPresetChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs cursor-pointer"></select>
-                            <p id="prompt-preset-desc" class="text-[10px] text-gray-500"></p>
+                            <p id="prompt-preset-desc" class="text-xs text-gray-500"></p>
                             <!-- v3.13.59: independent of the template — see fewShotEnabled's
                                  doc comment in llm-base.js for why this used to be silently
                                  tied to whether the prompt was customized. -->
@@ -1160,7 +1160,7 @@
                                 <summary class="cursor-pointer text-[10px] font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 select-none" data-i18n="prompt_advanced_label">Avanzado: editar plantilla</summary>
                                 <div class="mt-2 space-y-1">
                                     <textarea id="prompt-template" rows="10" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" oninput="onPromptTemplateEdited()"></textarea>
-                                    <p class="text-[10px] text-gray-500" data-i18n="prompt_variables_hint">Variables: {sentence} {srclang} {tgtlang} {srclangcode} {tgtlangcode} {contextBoth[N]} {contextOriginal[N]} {contextTranslation[N]} {glossary} {game} {vnTitle} {speaker} {inputMethod} {ocrNote}</p>
+                                    <p class="text-xs text-gray-500" data-i18n="prompt_variables_hint">Variables: {sentence} {srclang} {tgtlang} {srclangcode} {tgtlangcode} {contextBoth[N]} {contextOriginal[N]} {contextTranslation[N]} {glossary} {game} {vnTitle} {speaker} {inputMethod} {ocrNote}</p>
                                 </div>
                             </details>
                         </div>
@@ -1192,9 +1192,9 @@
                                 <span id="context-val" class="text-[10px] font-mono text-emerald-500">5</span>
                             </div>
                             <input type="range" id="context-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('context-val').innerText=this.value; markUnsaved('modal')">
-                            <p id="context-unsupported-note" class="hidden text-[10px] text-amber-500 mt-1" data-i18n="context_unsupported_note">This engine translates each line independently — context has no effect here.</p>
+                            <p id="context-unsupported-note" class="hidden text-xs text-amber-500 mt-1" data-i18n="context_unsupported_note">This engine translates each line independently — context has no effect here.</p>
                             <div class="flex items-center justify-between mt-1">
-                                <p class="text-[10px] text-gray-500" data-i18n="context_history_desc">Previous lines sent as context for LLM engines.</p>
+                                <p class="text-xs text-gray-500" data-i18n="context_history_desc">Previous lines sent as context for LLM engines.</p>
                                 <button onclick="clearContext()" class="shrink-0 ml-2 text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition" data-i18n="context_clear_btn">Clear Now</button>
                             </div>
                         </div>
@@ -1205,7 +1205,7 @@
                                 <span id="history-limit-val" class="text-[10px] font-mono text-emerald-500">5</span>
                             </div>
                             <input type="range" id="history-limit-range" min="0" max="20" value="5" class="w-full" oninput="document.getElementById('history-limit-val').innerText=this.value; markUnsaved('modal')">
-                            <p class="text-[10px] text-gray-500" data-i18n="history_limit_desc">Máx. traducciones guardadas por perfil. 0 = desactivado.</p>
+                            <p class="text-xs text-gray-500" data-i18n="history_limit_desc">Máx. traducciones guardadas por perfil. 0 = desactivado.</p>
                         </div>
                     </div>
                 </div>
@@ -1234,7 +1234,7 @@
                         <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
                             <div>
                                 <span class="text-xs font-medium" data-i18n="regex_filter_enabled">Filtro activo</span>
-                                <p class="text-[10px] text-gray-400" data-i18n="regex_filter_desc">Filtra el texto del juego antes de traducir. Elimina códigos, etiquetas y basura automáticamente.</p>
+                                <p class="text-xs text-gray-400" data-i18n="regex_filter_desc">Filtra el texto del juego antes de traducir. Elimina códigos, etiquetas y basura automáticamente.</p>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="enable-regex-filter" data-immediate="true" onchange="toggleRegexFilterMaster()" class="sr-only peer" checked>
@@ -1268,7 +1268,7 @@
                                 <span class="text-[10px] font-bold text-gray-400 uppercase" data-i18n="hook_clean_section_title">Limpieza HOOK</span>
                                 <button onclick="resetHookCleaningSteps()" class="text-[9px] font-medium px-2 py-0.5 rounded-md bg-gray-100 dark:bg-dark-700 text-gray-500 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-dark-600 transition" data-i18n="hook_clean_reset_btn">Restablecer</button>
                             </div>
-                            <p class="text-[10px] text-gray-400 mb-2" data-i18n="hook_clean_section_desc">Deduplicación de texto de Textractor (repeticiones y basura del hook). No aplica a OCR.</p>
+                            <p class="text-xs text-gray-400 mb-2" data-i18n="hook_clean_section_desc">Deduplicación de texto de Textractor (repeticiones y basura del hook). No aplica a OCR.</p>
                             <div class="space-y-1.5">
                                 <div class="p-2 rounded-md bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
                                     <div class="flex items-center justify-between">
@@ -1411,7 +1411,7 @@
                                 <option value="prefer_quality_optimized" data-i18n="deepl_model_type_quality">Calidad</option>
                                 <option value="prefer_latency_optimized" data-i18n="deepl_model_type_speed">Velocidad</option>
                             </select>
-                            <p class="text-[10px] text-gray-500 mt-1" data-i18n="deepl_model_type_desc">Solo afecta al motor DeepL. "Calidad" usa el modelo de nueva generación cuando el par de idiomas lo soporta.</p>
+                            <p class="text-xs text-gray-500 mt-1" data-i18n="deepl_model_type_desc">Solo afecta al motor DeepL. "Calidad" usa el modelo de nueva generación cuando el par de idiomas lo soporta.</p>
                         </div>
                         <!-- Glossary mode -->
                         <div>
@@ -1421,13 +1421,13 @@
                                 <option value="prompt" data-i18n="glossary_mode_prompt">Solo instrucción al modelo</option>
                                 <option value="literal" data-i18n="glossary_mode_literal">Solo reemplazo literal</option>
                             </select>
-                            <p class="text-[10px] text-gray-500 mt-1" data-i18n="glossary_mode_desc">Cómo se aplica el glosario en motores LLM. Solo afecta a OpenAI/Local LLM — el resto siempre usa reemplazo literal.</p>
+                            <p class="text-xs text-gray-500 mt-1" data-i18n="glossary_mode_desc">Cómo se aplica el glosario en motores LLM. Solo afecta a OpenAI/Local LLM — el resto siempre usa reemplazo literal.</p>
                         </div>
                         <!-- Translation memory -->
                         <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
                             <div>
                                 <span class="text-xs font-medium" data-i18n="translation_memory">Translation Memory</span>
-                                <p class="text-[10px] text-gray-400" data-i18n="tm_desc">Reutiliza traducciones previas para diálogos repetidos. Ahorra llamadas API y reduce latencia.</p>
+                                <p class="text-xs text-gray-400" data-i18n="tm_desc">Reutiliza traducciones previas para diálogos repetidos. Ahorra llamadas API y reduce latencia.</p>
                             </div>
                             <label class="relative inline-flex items-center cursor-pointer">
                                 <input type="checkbox" id="enable-translation-memory" onchange="markUnsaved('modal')" class="sr-only peer" checked>
@@ -1441,7 +1441,7 @@
                                 <span id="ocr-interval-val" class="text-[10px] font-mono text-emerald-500">3500ms</span>
                             </div>
                             <input type="range" id="ocr-interval-range" min="1500" max="8000" step="250" value="3500" class="w-full" oninput="document.getElementById('ocr-interval-val').innerText=this.value+'ms'; markUnsaved('modal')">
-                            <p class="text-[10px] text-gray-500" data-i18n="ocr_interval_desc">Cada cuánto se captura la pantalla automáticamente en modo OCR.</p>
+                            <p class="text-xs text-gray-500" data-i18n="ocr_interval_desc">Cada cuánto se captura la pantalla automáticamente en modo OCR.</p>
                         </div>
                         <div class="border-t border-gray-200 dark:border-dark-600 pt-3 space-y-3">
                             <!-- Manual Textractor mode — relocated from the
@@ -1452,7 +1452,7 @@
                                 <label class="text-[10px] text-gray-400" data-i18n="manual_mode_label">Modo Manual (sin CLI)</label>
                                 <input type="checkbox" id="manual-textractor-mode" data-immediate="true" onchange="toggleManualMode(this.checked)" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
                             </div>
-                            <p class="text-[10px] text-gray-400 -mt-2" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
+                            <p class="text-xs text-gray-400 -mt-2" data-i18n="manual_mode_help">Activa si ejecutas Textractor GUI manualmente. Tuhua solo se conecta al puerto TCP.</p>
                             <!-- XUAT port — relocated from the sidebar, id
                                  unchanged (still read by copyXuatUrl() etc). -->
                             <div class="flex items-center gap-2">

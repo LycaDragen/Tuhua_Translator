@@ -2874,14 +2874,7 @@
 
             list.innerHTML = profileList.map(profile => {
                 const glossaryCount = profile.glossary ? profile.glossary.length : 0;
-                const historyCount = profile.history ? profile.history.length : 0;
                 const savedDate = profile.savedAt ? new Date(profile.savedAt).toLocaleDateString() : '';
-                const engineName = profile.engine || 'google-free';
-                // v3.13.40: targetLang is global now (the reader's own
-                // language, not the game's) — only sourceLang is still
-                // profile-scoped, so the badge shows one language, not a pair.
-                const sourceLang = profile.sourceLang || 'auto';
-                const inputMethod = profile.inputMethod || 'textractor';
                 const isActive = profile.id === activeProfileId;
                 const isDefault = profile.isDefault === true;
                 const borderClass = isActive ? 'border-emerald-400 dark:border-emerald-600' : 'border-gray-200 dark:border-dark-600';
@@ -2913,6 +2906,11 @@
                 // Duplicar/Renombrar/Eliminar on that row. Cover grew from
                 // a 10×14 strip to a 16×16 square to visually match the
                 // taller 3-line stack next to it.
+                // v3.13.92: badges trimmed from 7 possible down to 3 (game/
+                // glossary/date) — sourceLang/engineName/inputMethod dropped,
+                // Lyca's call after finding the card "muy amontonado": that
+                // trio duplicates what Configuración already shows for
+                // whichever profile is active.
                 return `
                 <div class="p-2.5 rounded-lg ${bgClass} border ${borderClass} ${cardCursor} transition flex gap-2 items-start"${cardOnClick}>
                     ${coverUrl ? `<img src="${escapeHtml(coverUrl)}" loading="lazy" class="w-16 h-16 object-cover rounded flex-shrink-0 bg-gray-200 dark:bg-dark-700" title="${escapeHtml(profile.cover.vnTitle || '')}" onerror="this.style.display='none'">` : ''}
@@ -2923,19 +2921,15 @@
                             ${isDefault ? `<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase flex-shrink-0">${escapeHtml(t.profile_default_name || 'Default')}</span>` : ''}
                         </div>
                         <div class="flex flex-wrap gap-1" onclick="event.stopPropagation()">
-                            <button onclick="openGameProcessPicker({targetProfileId:'${id}'})" class="px-2 py-1 text-[10px] font-medium text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded transition" data-i18n="${profile.game ? 'game_relink_from_card_btn' : 'game_link_from_card_btn'}">${profile.game ? '🎮 Cambiar juego' : '🎮 Vincular juego'}</button>
-                            <button onclick="openVndbImportModal('${id}')" class="px-2 py-1 text-[10px] font-medium text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition" data-i18n="glossary_vndb_import">Importar de VNDB</button>
-                            <button onclick="duplicateProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
-                            <button onclick="renameProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
-                            ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
+                            <button onclick="openGameProcessPicker({targetProfileId:'${id}'})" class="px-1.5 py-1 text-[10px] font-medium text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded transition" data-i18n="${profile.game ? 'game_relink_from_card_btn' : 'game_link_from_card_btn'}">${profile.game ? '🎮 Cambiar' : '🎮 Vincular'}</button>
+                            <button onclick="openVndbImportModal('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition" data-i18n="glossary_vndb_import_short">📖 VNDB</button>
+                            <button onclick="duplicateProfile('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
+                            <button onclick="renameProfile('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
+                            ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
                         </div>
-                        <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-gray-400">
+                        <div class="flex flex-wrap items-center gap-1.5 text-[10px] text-gray-400">
                             ${gameLabel ? `<span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded truncate max-w-[140px]" title="${escapeHtml(profile.game.exePath || '')}">🎮 ${escapeHtml(gameLabel)}</span>` : ''}
                             ${glossaryCount > 0 ? `<span class="bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded">📖 ${glossaryCount}</span>` : ''}
-                            ${historyCount > 0 ? `<span class="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded">📋 ${historyCount}</span>` : ''}
-                            <span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">${sourceLang}</span>
-                            <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${engineName}</span>
-                            <span class="bg-gray-100 dark:bg-dark-700 text-gray-600 dark:text-gray-400 px-1.5 py-0.5 rounded">${inputMethod}</span>
                             ${savedDate ? `<span>${savedDate}</span>` : ''}
                         </div>
                     </div>
