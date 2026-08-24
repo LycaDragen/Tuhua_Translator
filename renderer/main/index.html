@@ -81,6 +81,17 @@
         .guide-tab-btn.guide-tab-active { color: #059669; border-color: #10b981; }
         .dark .guide-tab-btn.guide-tab-active { color: #34d399; }
 
+        /* v3.13.100 (settings tabs): same visual pattern as .guide-tab-btn
+           above (base/inactive here, switchSettingsTab() in renderer.js
+           toggles the active class) — a new class rather than reusing
+           .guide-tab-btn so nothing about the Guide modal (already shipped,
+           confirmed working) has to be touched for this. */
+        .settings-tab-btn { color: #9ca3af; border-color: transparent; }
+        .settings-tab-btn:hover { color: #4b5563; }
+        .dark .settings-tab-btn:hover { color: #d1d5db; }
+        .settings-tab-btn.settings-tab-active { color: #059669; border-color: #10b981; }
+        .dark .settings-tab-btn.settings-tab-active { color: #34d399; }
+
         /* v3.13.95: #shortcuts-grid responds to <main>'s own width (via a
            CSS container query, not the viewport) — 2 columns at main's
            normal, unsqueezed width; 1 once dragging the sidebar
@@ -1119,16 +1130,21 @@
             </div>
             <!-- Content -->
             <div class="overflow-y-auto scrollbar-thin p-6 space-y-2">
-                <!-- ===== Overlay Category (collapsible) ===== -->
-                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
-                    <button onclick="toggleSettingsCategory('overlay')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
-                        <div class="flex items-center gap-2">
-                            <div class="w-1 h-5 bg-blue-500 rounded-full"></div>
-                            <h3 class="text-xs font-bold text-blue-500 uppercase tracking-wider" data-i18n="settings_cat_overlay">Overlay</h3>
-                        </div>
-                        <svg id="cat-overlay-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                    </button>
-                    <div id="cat-overlay-content" class="px-4 pb-4 pt-3 space-y-3">
+                <!-- v3.13.100 (settings tabs): categories used to be a
+                     collapsible accordion — replaced with tabs (Lyca's
+                     call: no real benefit to having two categories open at
+                     once when neither fits on screen without scrolling
+                     anyway). switchSettingsTab() (renderer.js) shows one
+                     #settings-panel-* at a time; #settings-tabbar below is
+                     the tab strip. -->
+                <div class="flex border-b border-gray-200 dark:border-dark-600 mb-4" id="settings-tabbar">
+                    <button onclick="switchSettingsTab('overlay')" id="settings-tab-btn-overlay" class="settings-tab-btn flex-1 py-2 text-xs font-medium border-b-2 transition" data-i18n="settings_cat_overlay">Overlay</button>
+                    <button onclick="switchSettingsTab('translation')" id="settings-tab-btn-translation" class="settings-tab-btn flex-1 py-2 text-xs font-medium border-b-2 transition" data-i18n="settings_cat_translation">Traducción</button>
+                    <button onclick="switchSettingsTab('textfilter')" id="settings-tab-btn-textfilter" class="settings-tab-btn flex-1 py-2 text-xs font-medium border-b-2 transition" data-i18n="settings_cat_textfilter">Filtro de Texto</button>
+                    <button onclick="switchSettingsTab('advanced')" id="settings-tab-btn-advanced" class="settings-tab-btn flex-1 py-2 text-xs font-medium border-b-2 transition" data-i18n="settings_cat_advanced">Avanzado</button>
+                </div>
+
+                <div id="settings-panel-overlay" class="space-y-3">
                         <!-- Font Family -->
                         <div id="font-family-section">
                             <label class="block text-[10px] text-gray-400 mb-1" data-i18n="overlay_font">Tipo de Letra</label>
@@ -1198,18 +1214,8 @@
                             </label>
                         </div>
                     </div>
-                </div>
 
-                <!-- ===== Traducción Category (collapsible) ===== -->
-                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
-                    <button onclick="toggleSettingsCategory('translation')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
-                        <div class="flex items-center gap-2">
-                            <div class="w-1 h-5 bg-emerald-500 rounded-full"></div>
-                            <h3 class="text-xs font-bold text-emerald-500 uppercase tracking-wider" data-i18n="settings_cat_translation">Traducción</h3>
-                        </div>
-                        <svg id="cat-translation-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                    </button>
-                    <div id="cat-translation-content" class="px-4 pb-4 pt-3 space-y-3">
+                <div id="settings-panel-translation" class="space-y-3 hidden">
                         <!-- Debounce -->
                         <div>
                             <div class="flex justify-between mb-1">
@@ -1293,7 +1299,6 @@
                             <p class="text-xs text-gray-500" data-i18n="history_limit_desc">Máx. traducciones guardadas por perfil. 0 = desactivado.</p>
                         </div>
                     </div>
-                </div>
 
                 <!-- v3.13.40: the "Glosario por Perfil" toggle that used to
                      live here is gone — it was global-scoped but supposedly
@@ -1305,16 +1310,7 @@
                      Glosario tab (renderer/main/index.html's #tab-glossary),
                      since both layers always exist now, nothing to toggle. -->
 
-                <!-- ===== Filtro de Texto Category (collapsible) ===== -->
-                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
-                    <button onclick="toggleSettingsCategory('textfilter')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
-                        <div class="flex items-center gap-2">
-                            <div class="w-1 h-5 bg-amber-500 rounded-full"></div>
-                            <h3 class="text-xs font-bold text-amber-500 uppercase tracking-wider" data-i18n="settings_cat_textfilter">Filtro de Texto</h3>
-                        </div>
-                        <svg id="cat-textfilter-chevron" class="w-4 h-4 text-gray-400 transition-transform" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                    </button>
-                    <div id="cat-textfilter-content" class="px-4 pb-4 pt-3 space-y-3">
+                <div id="settings-panel-textfilter" class="space-y-3 hidden">
                         <!-- Enable toggle -->
                         <div class="flex items-center justify-between p-3 rounded-lg bg-gray-50 dark:bg-dark-900/50 border border-gray-200 dark:border-dark-600">
                             <div>
@@ -1470,25 +1466,18 @@
                             </div>
                         </div>
                     </div>
-                </div>
 
-                <!-- ===== Avanzado Category (collapsible, v3.13.8x settings UX audit) =====
-                     Collapsed by default (see toggleSettingsModal()) — knobs
-                     that ARE real (each has its own live wiring, not a
-                     ghost setting) but aren't things most people need to
-                     touch: DeepL's quality/speed tradeoff, how the
-                     glossary gets applied to LLM engines, translation
-                     memory reuse, OCR's scan interval, plus Manual Mode and
-                     the XUAT port relocated here from the sidebar. -->
-                <div class="border border-gray-200 dark:border-dark-600 rounded-lg overflow-hidden">
-                    <button onclick="toggleSettingsCategory('advanced')" class="w-full flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-dark-900/50 hover:bg-gray-100 dark:hover:bg-dark-900/70 transition">
-                        <div class="flex items-center gap-2">
-                            <div class="w-1 h-5 bg-gray-500 rounded-full"></div>
-                            <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider" data-i18n="settings_cat_advanced">Avanzado</h3>
-                        </div>
-                        <svg id="cat-advanced-chevron" class="w-4 h-4 text-gray-400 transition-transform -rotate-90" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
-                    </button>
-                    <div id="cat-advanced-content" class="px-4 pb-4 pt-3 space-y-3" style="display:none">
+                <!-- v3.13.100 (settings tabs): knobs that ARE real (each has
+                     its own live wiring, not a ghost setting) but aren't
+                     things most people need to touch: DeepL's quality/speed
+                     tradeoff, how the glossary gets applied to LLM engines,
+                     translation memory reuse, OCR's scan interval, plus
+                     Manual Mode and the XUAT port relocated here from the
+                     sidebar. Used to be collapsed by default as an
+                     accordion; now just the 4th tab, same as the other
+                     three — see switchSettingsTab()'s own doc comment for
+                     why. -->
+                <div id="settings-panel-advanced" class="space-y-3 hidden">
                         <!-- DeepL model type -->
                         <div>
                             <label class="block text-[10px] text-gray-400 mb-1" data-i18n="deepl_model_type_label">Modelo de DeepL</label>
@@ -1547,7 +1536,6 @@
                             </div>
                         </div>
                     </div>
-                </div>
             </div>
 
             <!-- Footer: Apply + Reset buttons (always visible) -->

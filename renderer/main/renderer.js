@@ -933,13 +933,24 @@
         }
 
         // ===== SETTINGS MODAL =====
-        // Collapsible category state
-        // v3.13.8x (settings UX audit): 'advanced' starts collapsed
-        // (false) — everything else in this object defaults open. Matches
-        // the HTML's own `style="display:none"` on #cat-advanced-content,
-        // which this state must agree with on first paint (see
-        // toggleSettingsCategory()'s chevron/display sync just below).
-        const _settingsCatState = { overlay: true, translation: true, glossary: true, textfilter: true, advanced: false };
+        // v3.13.100 (settings tabs): replaces the old collapsible-category
+        // accordion (_settingsCatState/toggleSettingsCategory) — Lyca's
+        // call, no real benefit to two categories open at once when
+        // neither fits on screen without scrolling anyway. Remembers the
+        // last tab viewed for the rest of the session (not persisted to
+        // settings) so iterating on, say, Avanzado across several
+        // open/close cycles doesn't reset to Overlay every time.
+        const SETTINGS_TABS = ['overlay', 'translation', 'textfilter', 'advanced'];
+        let _lastSettingsTab = 'overlay';
+
+        function switchSettingsTab(name) {
+            _lastSettingsTab = name;
+            for (const tab of SETTINGS_TABS) {
+                const active = tab === name;
+                document.getElementById('settings-panel-' + tab).classList.toggle('hidden', !active);
+                document.getElementById('settings-tab-btn-' + tab).classList.toggle('settings-tab-active', active);
+            }
+        }
 
         function toggleSettingsModal() {
             const modal = document.getElementById('settings-modal');
@@ -947,6 +958,7 @@
                 const willShow = modal.classList.contains('hidden');
                 modal.classList.toggle('hidden');
                 if (willShow) {
+                    switchSettingsTab(_lastSettingsTab);
                     // Restore current settings values to the modal controls
                     restoreSettingsModalValues();
                     // Load regex filters for the Text Filter category
@@ -1009,19 +1021,6 @@
             document.getElementById('ocr-interval-range').value = settings.ocrCaptureIntervalMs || 3500;
             document.getElementById('ocr-interval-val').innerText = (settings.ocrCaptureIntervalMs || 3500) + 'ms';
             document.getElementById('xuat-port').value = settings.xuatPort || 8419;
-        }
-
-        function toggleSettingsCategory(cat) {
-            _settingsCatState[cat] = !_settingsCatState[cat];
-            const content = document.getElementById(`cat-${cat}-content`);
-            const chevron = document.getElementById(`cat-${cat}-chevron`);
-            if (_settingsCatState[cat]) {
-                content.style.display = '';
-                chevron.style.transform = 'rotate(0deg)';
-            } else {
-                content.style.display = 'none';
-                chevron.style.transform = 'rotate(-90deg)';
-            }
         }
 
         function restoreSettingsModalValues() {
