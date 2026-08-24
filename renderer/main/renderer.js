@@ -676,6 +676,20 @@
                 }
             });
 
+            // v3.13.91: #display-engine (under the play/pause toggle) is only
+            // ever set from toggleInputFields() reading the SELECTED option's
+            // live text (renderer.js ~1476) — called on init and on engine
+            // change, never on a language switch. The <option> text above just
+            // got retranslated, but this cached copy didn't, so it stayed
+            // stuck in whatever language was active at the last engine change
+            // (real bug reported by Lyca: sidebar dropdown showed the new
+            // language correctly, this label kept showing Spanish).
+            const engineSelectEl = document.getElementById('engine-select');
+            const displayEngineEl = document.getElementById('display-engine');
+            if (engineSelectEl && displayEngineEl) {
+                displayEngineEl.innerText = engineSelectEl.options[engineSelectEl.selectedIndex]?.text || engineSelectEl.value;
+            }
+
             // Update the custom font option
             const customFontOption = document.querySelector('#overlay-font option[data-i18n-font="custom_font"]');
             if (customFontOption) customFontOption.textContent = '✏️ ' + (t.custom_font || 'Custom...');
@@ -4065,7 +4079,7 @@
             if (lineEl) {
                 const profile = profileList.find((p) => p.id === activeProfileId);
                 if (profile && profile.game) {
-                    lineEl.textContent = '🎮 ' + (profile.game.windowTitle || profile.game.exeName || profile.game.exePath || '');
+                    lineEl.textContent = profile.game.windowTitle || profile.game.exeName || profile.game.exePath || '';
                     lineEl.title = profile.game.exePath || '';
                     // v3.13.85: same cover the profile card shows (set on a
                     // VNDB import, same field the card reads) — a profile
