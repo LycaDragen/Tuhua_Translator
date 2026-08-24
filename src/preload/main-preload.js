@@ -47,6 +47,9 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'textractor-browse-cli',
   'textractor-clear-cli-path',
   'list-game-processes',
+  'inspect-game',
+  'set-profile-game',
+  'scan-known-games',
   'get-textractor-auto-detect-result',
   'textractor-launch',
   'textractor-kill',
@@ -101,6 +104,10 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   // AND wrapper both required, not just one.
   'textractor-cli-search-started',
   'hooks-discovered',
+  // v3.13.85 (auto-configuración de juegos, Fase C2): promoted out of
+  // hooks-discovered's payload — see textractor-launcher.js's
+  // _detectAndEmitGameEngine for the full rationale.
+  'game-engine-advice',
   'translation-result',
   'translation-error',
   'shortcut-pressed',
@@ -290,6 +297,16 @@ const api = {
   // v3.13.8x (settings UX audit, Fase 4): Windows-only game process picker
   // for the Game PID field — see the handler's own doc comment.
   listGameProcesses: () => secureInvoke('list-game-processes'),
+  // v3.13.85 (auto-configuración de juegos, Fase C1): engine+arch inspection
+  // for an arbitrary exe — the Windows-independent replacement for the old
+  // Textractor-only, post-launch-only advisory. See game-inspect.js.
+  inspectGame: (exePath) => secureInvoke('inspect-game', { exePath }),
+  // v3.13.85 (Fase B): the only writer of profile.game — `process: null`
+  // unlinks. See the handler's own doc comment in ipc-handlers.js.
+  setProfileGame: (payload) => secureInvoke('set-profile-game', payload),
+  // v3.13.85 (Fase B): matches running processes against every profile's
+  // saved game link — see the handler's own doc comment.
+  scanKnownGames: () => secureInvoke('scan-known-games'),
   // v3.13.8x (Fase 5): read-once startup auto-detect result — see the
   // handler's own doc comment in ipc-handlers.js.
   getTextractorAutoDetectResult: () => secureInvoke('get-textractor-auto-detect-result'),
@@ -326,6 +343,10 @@ const api = {
   onTextractorCliArchResolved: (callback) => secureOn('textractor-cli-arch-resolved', callback),
   onTextractorCliSearchStarted: (callback) => secureOn('textractor-cli-search-started', callback),
   onHooksDiscovered: (callback) => secureOn('hooks-discovered', callback),
+  // v3.13.85 (auto-configuración de juegos, Fase C2): the game-engine
+  // advisory's own push channel — see textractor-launcher.js's
+  // _detectAndEmitGameEngine doc comment.
+  onGameEngineAdvice: (callback) => secureOn('game-engine-advice', callback),
   onTranslationResult: (callback) => secureOn('translation-result', callback),
   onTranslationError: (callback) => secureOn('translation-error', callback),
   onShortcutPressed: (callback) => secureOn('shortcut-pressed', callback),

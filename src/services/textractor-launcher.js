@@ -32,8 +32,14 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const textCleaning = require('./text-cleaning');
-const { detectGameEngine } = require('./game-engine-detect');
 const { detectExeArch } = require('./pe-arch');
+// v3.13.85 (auto-configuración de juegos, Fase C1): consumes the shared
+// engine+arch inspector instead of calling detectGameEngine() directly —
+// see game-inspect.js's own doc for why this can't just be inlined here:
+// the `inspect-game` IPC handler and profile.game's cached engine/arch
+// snapshot both need to agree with THIS advisory on what "the same"
+// detection result looks like.
+const { inspectGame } = require('./game-inspect');
 
 /**
  * Interpret Windows exit codes into human-readable messages.
@@ -347,10 +353,14 @@ class TextractorLauncher extends EventEmitter {
     // deleting the fallback.
     this._legacyParseCount = 0;
     this._gamePid = null;
-    // v3.13.76: result of detectGameEngine() for the current game process,
-    // set async right after attach — null until it resolves (or forever, if
-    // resolution fails silently, see _resolveExePathFromPid). Surfaced to the
-    // UI via _emitHookDiscovery()'s `gameEngine` payload field.
+    // v3.13.76: result of inspectGame(exePath).engine (game-inspect.js's
+    // toEngineSummary() shape — v3.13.85 (Fase C1) narrowed this from the
+    // raw detectGameEngine() result, which renderEngineAdvice() never
+    // needed the wider Unity-specific fields of anyway) for the current
+    // game process, set async right after attach — null until it resolves
+    // (or forever, if resolution fails silently, see
+    // _resolveExePathFromPid). Surfaced to the UI via
+    // _emitHookDiscovery()'s `gameEngine` payload field.
     this._gameEngine = null;
     this._launchTime = null;
     this._diagnosticTimer = null;
@@ -1017,27 +1027,52 @@ class TextractorLauncher extends EventEmitter {
   _detectAndEmitGameEngine(pid) {
     this._resolveExePathFromPid(pid, (exePath) => {
       if (!exePath) return;
-      // A relaunch/arch-fallback or a fresh attach to a different game may
-      // have happened while the async resolve above was in flight — only
-      // apply the result if it's still for the PID we asked about.
-      if (this._gamePid !== pid) return;
-      this._gameEngine = detectGameEngine(exePath);
-      if (this._gameEngine.adviceKey) {
-        // Don't wait for the next scheduled discovery update (debounced
-        // every 500ms, or the 3s phase-complete timer) — an advisory this
-        // actionable should reach the UI as soon as it's known.
-        this._emitHookDiscovery();
-      }
-      // v3.13.8x: Level 2 of the arch pre-flight feature — piggybacks on
-      // this exact PowerShell resolution rather than issuing a second one.
-      // Level 1 (_preflightArchSwap, in launch()) only fires when the exe
-      // path was already known before spawn (the process picker). When
-      // the PID was typed by hand instead, this is the SAME resolution
-      // _detectAndEmitGameEngine already pays for the engine advisory —
-      // reusing it here costs nothing extra, and still corrects the
-      // architecture in ~1-2s instead of the full 60s fallback wait.
-      this._checkArchAgainstGame(pid, exePath);
+      this._onGameExeResolved(pid, exePath);
     });
+  }
+
+  /**
+   * v3.13.85 (Fase C2): body of _detectAndEmitGameEngine's resolve
+   * callback, extracted to its own method purely as a test seam — mirrors
+   * why _checkArchAgainstGame is called directly in
+   * scripts/test-launcher-lifecycle.js instead of driving a real
+   * child_process.exec('powershell ...') call through
+   * _resolveExePathFromPid (see that file's own comment on why exec-faking
+   * infrastructure isn't worth building for this). No behavior change from
+   * inlining it in the callback.
+   *
+   * @param {number} pid
+   * @param {string} exePath
+   */
+  _onGameExeResolved(pid, exePath) {
+    // A relaunch/arch-fallback or a fresh attach to a different game may
+    // have happened while the async resolve above was in flight — only
+    // apply the result if it's still for the PID we asked about.
+    if (this._gamePid !== pid) return;
+    // v3.13.85 (Fase C1): inspectGame() composes detectGameEngine() +
+    // detectExeArch() in one call — its `arch` result is handed to
+    // _checkArchAgainstGame below so Level 2 doesn't re-read the same PE
+    // header a second time.
+    const info = inspectGame(exePath);
+    this._gameEngine = info.engine;
+    if (this._gameEngine.adviceKey) {
+      // v3.13.85 (Fase C2): own event, not piggybacked on
+      // hooks-discovered any more — see _emitHookDiscovery's own comment
+      // for why that coupling was removed. `source: 'launcher'` lets a
+      // consumer (killTextractorCli(), renderer.js) tell this advisory
+      // apart from one that came from the game picker/profile link
+      // instead, which must survive a Kill click.
+      this.emit('game-engine-advice', { ...this._gameEngine, exePath, source: 'launcher' });
+    }
+    // v3.13.8x: Level 2 of the arch pre-flight feature — piggybacks on
+    // this exact PowerShell resolution rather than issuing a second one.
+    // Level 1 (_preflightArchSwap, in launch()) only fires when the exe
+    // path was already known before spawn (the process picker). When the
+    // PID was typed by hand instead, this is the SAME resolution
+    // _detectAndEmitGameEngine already pays for the engine advisory —
+    // reusing it here costs nothing extra, and still corrects the
+    // architecture in ~1-2s instead of the full 60s fallback wait.
+    this._checkArchAgainstGame(pid, exePath, info.arch);
   }
 
   /**
@@ -1065,13 +1100,21 @@ class TextractorLauncher extends EventEmitter {
    *
    * @param {number} pid
    * @param {string} gameExePath
+   * @param {'x86'|'x64'|null} [precomputedArch] - v3.13.85 (Fase C1):
+   *   when the caller already ran inspectGame() on this exact exePath
+   *   (as _detectAndEmitGameEngine does), pass its `arch` here to skip a
+   *   redundant PE-header read. Omit (or pass undefined) to have this
+   *   detect it directly — kept as the default so this method still works
+   *   standalone, exactly as scripts/test-launcher-lifecycle.js's Level 2
+   *   fixtures call it (they simulate "the PowerShell callback fired"
+   *   directly, without going through _detectAndEmitGameEngine at all).
    */
-  _checkArchAgainstGame(pid, gameExePath) {
+  _checkArchAgainstGame(pid, gameExePath, precomputedArch) {
     if (this._gamePid !== pid) return;
     if (this._hasRealHookWithText()) return;
     const textractorArch = this._detectArch(this._lastResolvedPath);
     if (!textractorArch) return;
-    const gameArch = detectExeArch(gameExePath);
+    const gameArch = precomputedArch !== undefined ? precomputedArch : detectExeArch(gameExePath);
     if (!gameArch || gameArch === textractorArch) return;
     this._attemptArchFallback('arch-mismatch');
   }
@@ -2269,20 +2312,15 @@ class TextractorLauncher extends EventEmitter {
       autoSelectedHookKey: this._autoSelectedHookKey,
       activeHookKey,
       totalHooks: hooks.length,
-      noRealHookFound,
-      // v3.13.76: `gameEngine` (see _detectAndEmitGameEngine) rides on this
-      // existing, already-allowlisted event instead of getting a channel of
-      // its own — deliberate, to keep IPC surface flat (see
-      // test-ipc-channels.js checks 1/4/5). The cost: this couples "what
-      // engine the game is" to "what hooks exist", and this function stops
-      // being pure over just `this._hooks`.
-      // TRIGGER TO PROMOTE THIS TO ITS OWN CHANNEL: the moment the advisory
-      // needs to appear outside the Textractor flow — OCR or XUAT mode,
-      // where TextractorLauncher never runs at all, so this event is never
-      // emitted and the advisory would simply never reach those screens.
-      // Until then, this coupling is correct: the advisory only ever needs
-      // to be seen from here.
-      gameEngine: this._gameEngine
+      noRealHookFound
+      // v3.13.76 used to carry `gameEngine` here, piggybacked on this
+      // event because the advisory only ever needed to be seen from the
+      // Textractor flow. v3.13.85 (Fase C2) promoted it to its own
+      // 'game-engine-advice' event (see _detectAndEmitGameEngine below) —
+      // the trigger the old comment named ("the moment the advisory needs
+      // to appear outside the Textractor flow — OCR or XUAT mode") is
+      // exactly what Fase B needs. This function is pure over
+      // `this._hooks` again.
     });
   }
 

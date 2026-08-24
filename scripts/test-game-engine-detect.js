@@ -117,7 +117,7 @@ const CASES = [
   { id: 'renpy',
     exePath: '/game/Game.exe',
     fs: makeFakeFs({ '/game': ['Game.exe', 'Game.py', 'renpy', 'game', 'lib'] }),
-    expected: { engine: 'renpy', family: 'renpy', recommendedMethod: 'ocr', adviceKey: 'engine_advice_renpy' } },
+    expected: { engine: 'renpy', family: 'renpy', recommendedMethod: 'clipboard', adviceKey: 'engine_advice_renpy' } },
 
   { id: 'godot',
     exePath: '/game/Game.exe',

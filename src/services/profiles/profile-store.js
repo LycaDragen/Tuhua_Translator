@@ -11,7 +11,7 @@
  */
 
 const { createProfile, normalizeProfile, PROFILE_SCHEMA_VERSION } = require('./profile-schema');
-const { migrateProfiles, seedDeeplCustomInstructions, seedDeeplFormality, stripGhostSettingsV2, DEAD_SETTING_KEYS_V2 } = require('./profile-migrations');
+const { migrateProfiles, seedDeeplCustomInstructions, seedDeeplFormality, stripGhostSettingsV2, seedGameField, DEAD_SETTING_KEYS_V2 } = require('./profile-migrations');
 
 const DEFAULT_PROFILE_NAME = 'Por Defecto';
 
@@ -95,7 +95,18 @@ class ProfileStore {
     }
     const source = cloneFromId ? this.getById(cloneFromId) : null;
     const created = source
-      ? createProfile({ ...source, id: undefined, name, isDefault: false })
+      // v3.13.85 (auto-configuración de juegos, Fase A): `game` and
+      // `deeplGlossarySync` are per-INSTALLATION state, not per-profile
+      // config, so cloning must not carry them over. Without this, two
+      // profiles would end up claiming the same game process (permanently
+      // ambiguous for game-identity.js's matching — no visible symptom
+      // until you have both open). deeplGlossarySync is the same class of
+      // bug for a different resource: it holds a remote DeepL glossaryId,
+      // and delete-profile best-effort-deletes that remote resource
+      // (ipc-handlers.js) — duplicating it and later deleting the
+      // duplicate would silently orphan/kill the ORIGINAL's glossary.
+      // Same pattern as `hook: null` forced in migrateProfiles() below.
+      ? createProfile({ ...source, id: undefined, name, isDefault: false, game: null, deeplGlossarySync: null })
       : createProfile({ name, isDefault: false });
     this.store.set('profiles', [...profiles, created]);
     return created;
@@ -250,6 +261,13 @@ class ProfileStore {
       settings = result.settings;
       changed = changed || result.changed;
       currentVersion = 4;
+    }
+
+    if (currentVersion < 5) {
+      const result = seedGameField(profiles);
+      profiles = result.profiles;
+      changed = changed || result.changed;
+      currentVersion = 5;
     }
 
     for (const key of ghostKeysToDelete) {

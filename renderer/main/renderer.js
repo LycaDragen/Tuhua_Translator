@@ -143,6 +143,15 @@
                 showToast((t.cli_arch_resolved_toast || 'This architecture works — Tuhua will use it from now on.'));
             });
             api.onHooksDiscovered((data) => updateHookSelector(data));
+            // v3.13.85 (Fase C2): the game-engine advisory's own push,
+            // replacing the old hooks-discovered piggyback — deliberately a
+            // SEPARATE listener, not folded into updateHookSelector, since
+            // this must render with zero hooks discovered (Ren'Py/Godot/FNA)
+            // and now also fires outside Textractor mode entirely.
+            api.onGameEngineAdvice((data) => {
+                _lastEngineAdvice = data;
+                renderEngineAdvice();
+            });
             api.onOcrStatus((status) => updateOcrStatus(status));
 
             // v3.13.01-fix: Handle PaddleOCR fallback to Tesseract
@@ -208,6 +217,23 @@
                     counterEl.classList.remove('hidden');
                     countEl.textContent = xuatTranslationCount;
                 }
+            });
+
+            // v3.13.85 (auto-configuración de juegos, Fase B, disparador 2):
+            // the trigger that actually solves "abrí Tuhua antes que el
+            // juego" — el usuario lanza el juego y vuelve con alt-tab.
+            // Registrado UNA sola vez acá (registerIpcListeners corre una
+            // vez), nunca dentro de init() (que se re-ejecuta en cada
+            // cambio de perfil) — repetirlo ahí apilaría un listener de
+            // 'focus' por cada switch de perfil. Throttle de
+            // GAME_SCAN_FOCUS_THROTTLE_MS: algunos window managers disparan
+            // 'focus' varias veces seguidas en un solo alt-tab.
+            let _lastGameScanFocusAt = 0;
+            window.addEventListener('focus', () => {
+                const now = Date.now();
+                if (now - _lastGameScanFocusAt < GAME_SCAN_FOCUS_THROTTLE_MS) return;
+                _lastGameScanFocusAt = now;
+                scanForKnownGames(false);
             });
         }
 
@@ -495,6 +521,12 @@
                     updateXuatConnectedGame(settings.xuatConnectedGame, settings.xuatConnectedPath);
                 }
             }
+
+            // v3.13.85 (Fase B, disparador 1): cubre "el juego ya estaba
+            // abierto antes de abrir Tuhua". Fire-and-forget, mismo patrón
+            // que loadGlossary()/loadProfiles() arriba — silencioso si no
+            // hay nada que resolver (manual=false).
+            scanForKnownGames(false);
         }
 
         // ===== UNSAVED CHANGES TRACKER =====
@@ -679,6 +711,13 @@
             // a language change instead of staying stuck in whatever
             // language they were first rendered in.
             if (profileList.length) renderProfiles();
+
+            // v3.13.85 (Fase B): same reason — the current-game line, the
+            // undo banner, and the re-link/suggestion banners are all
+            // computed strings with runtime substitutions, not
+            // [data-i18n].
+            renderGameStatus();
+            renderGameBanners();
 
             api.saveSettings({ uiLanguage: lang });
         }
@@ -2684,6 +2723,12 @@
                 profileList = result.profiles || [];
                 activeProfileId = result.activeProfileId || null;
                 renderProfiles();
+                // v3.13.85 (Fase B): profile.game only ever changes via a
+                // call that already awaits loadProfiles() afterward (see
+                // set-profile-game's renderer call sites) — repainting here
+                // instead of at each call site keeps this section always
+                // in sync without duplicating the paint logic.
+                renderGameStatus();
             } catch (e) { console.error('Failed to load profiles:', e); }
         }
 
@@ -2731,6 +2776,11 @@
                 // profile be recognized by its game at a glance instead of
                 // just its (often generic) name.
                 const coverUrl = profile.cover && profile.cover.url ? profile.cover.url : null;
+                // v3.13.85 (auto-configuración de juegos): the linked game,
+                // if any — shown here too, not just in the settings panel's
+                // #game-section, since this is where a user actually
+                // compares profiles at a glance.
+                const gameLabel = profile.game ? (profile.game.windowTitle || profile.game.exeName || '') : '';
 
                 // v3.13.40-fix: clicking anywhere on a non-active card now
                 // switches to it (feedback: depending on a small "Cargar"
@@ -2762,6 +2812,7 @@
                             ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
                         </div>
                         <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-gray-400">
+                            ${gameLabel ? `<span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded truncate max-w-[140px]" title="${escapeHtml(profile.game.exePath || '')}">🎮 ${escapeHtml(gameLabel)}</span>` : ''}
                             ${glossaryCount > 0 ? `<span class="bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-1.5 py-0.5 rounded">📖 ${glossaryCount}</span>` : ''}
                             ${historyCount > 0 ? `<span class="bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 px-1.5 py-0.5 rounded">📋 ${historyCount}</span>` : ''}
                             <span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded">${sourceLang}</span>
@@ -3103,6 +3154,11 @@
             // doesn't auto-retry).
             maybeAutoLaunchTextractor();
 
+            // v3.13.85 (Fase B, disparador 3): the user just asked Tuhua to
+            // start working — the moment a background scan's answer is
+            // actually worth acting on.
+            scanForKnownGames(false);
+
             // Update cached settings
             window._lastSettings = await api.getSettings();
 
@@ -3171,6 +3227,15 @@
             // the only manual stop control.
             if (currentInputMethod === 'textractor' && translationActive) {
                 maybeAutoLaunchTextractor();
+            }
+
+            // v3.13.85 (Fase B, disparador 4): resuming is exactly when a
+            // resolved PID/engine advisory becomes actionable — not gated
+            // to Textractor, since the engine advisory and PID pre-fill
+            // are useful in OCR/XUAT too (maybeAutoLaunchTextractor above
+            // already no-ops outside Textractor mode on its own).
+            if (translationActive) {
+                scanForKnownGames(false);
             }
         }
 
@@ -3314,6 +3379,18 @@
                 gameExePathHint = option.dataset.exePath || null;
                 checkGamePidVsAttached();
                 closeModal();
+                // v3.13.85 (Fase A.4/B): the picker's own click is the
+                // explicit user action — decides whether to auto-write this
+                // process as the active profile's game link, ask to
+                // re-point it, or suggest a different profile that already
+                // claims this exe. See handlePickedProcessForGameLink's own
+                // doc comment for the full decision table.
+                handlePickedProcessForGameLink({
+                    pid: parseInt(option.dataset.pid, 10),
+                    name: option.dataset.name || '',
+                    windowTitle: option.dataset.windowTitle || option.dataset.name || '',
+                    exePath: option.dataset.exePath || ''
+                });
             });
 
             let result;
@@ -3341,7 +3418,7 @@
                 const icon = p.iconDataUrl
                     ? `<img src="${p.iconDataUrl}" class="w-5 h-5 rounded shrink-0" alt="">`
                     : `<span class="w-5 h-5 rounded bg-gray-200 dark:bg-dark-700 shrink-0 flex items-center justify-center text-[10px]">🎮</span>`;
-                return `<div class="game-process-option flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-dark-700 cursor-pointer" data-pid="${p.pid}" data-name="${escapeHtml(p.name)}" data-exe-path="${escapeHtml(p.exePath || '')}">
+                return `<div class="game-process-option flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-dark-700 cursor-pointer" data-pid="${p.pid}" data-name="${escapeHtml(p.name)}" data-window-title="${escapeHtml(p.windowTitle || '')}" data-exe-path="${escapeHtml(p.exePath || '')}">
                     ${icon}
                     <div class="min-w-0 flex-1">
                         <p class="text-[10px] font-medium truncate">${escapeHtml(p.windowTitle || p.name)}</p>
@@ -3395,6 +3472,13 @@
             // process now.
             gameExePathHint = null;
             checkGamePidVsAttached();
+            // v3.13.85 (Fase B): a PID typed by hand means there's nothing
+            // left for the background scan to resolve — _maybeArmGameScanPolling
+            // only ever re-arms while the field is empty, so stopping here
+            // (rather than waiting for the next tick to notice) just avoids
+            // a few pointless PowerShell calls before the field naturally
+            // stops qualifying.
+            _stopGameScanPolling();
         }
 
         // The explicit action the reconnect banner offers: kill the CLI
@@ -3411,6 +3495,433 @@
             await doLaunchTextractor(cliPath, newPid);
             const banner = document.getElementById('game-pid-reconnect-banner');
             if (banner) banner.classList.add('hidden');
+        }
+
+        // ===== GAME RECOGNITION (auto-configuración de juegos, v3.13.85, Fase B) =====
+        //
+        // Reconoce el juego corriendo y resuelve el PID solo, a partir del
+        // vínculo perfil<->exe que Fase A introdujo (profile.game). Toda la
+        // lógica de decisión (exact/moved/suggestion/ambiguous) vive en
+        // game-identity.js's matchRunningProcesses(), pura y testeada — este
+        // bloque es sólo el I/O (cuándo llamar a scan-known-games) y el
+        // pintado de sus tres resultados posibles.
+
+        // Named constants, not inline literals — mismo patrón que
+        // textractor-launcher.js's ARCH_FALLBACK_CHECK_MAX_MS/
+        // HOOK_SWITCH_THRESHOLD, para que una sesión futura no "corrija" un
+        // número sin saber contra qué se eligió.
+        //
+        // GAME_SCAN_FOCUS_THROTTLE_MS: algunos window managers disparan
+        // varios eventos 'focus' seguidos al hacer alt-tab — sin esto, una
+        // sola vuelta a la ventana podría disparar varios escaneos.
+        const GAME_SCAN_FOCUS_THROTTLE_MS = 5000;
+        // GAME_SCAN_POLL_INTERVAL_MS × GAME_SCAN_POLL_MAX_ATTEMPTS ≈ 4 min:
+        // cubre el caso real de arrancar un juego pesado (o desde el
+        // launcher de Steam) DESPUÉS de haber dejado Tuhua esperando, sin
+        // convertirse en un costo de fondo permanente si el juego nunca
+        // abre en esta sesión — se desarma solo y avisa una vez.
+        const GAME_SCAN_POLL_INTERVAL_MS = 10000;
+        const GAME_SCAN_POLL_MAX_ATTEMPTS = 24;
+
+        // Pares `${profileId}::${exePath}` que el usuario ya descartó
+        // (✕ en la sugerencia, "No, ignorar" en la confirmación) — no
+        // vuelven a molestar en lo que resta de la sesión. Sólo en memoria:
+        // no tiene sentido persistir un "no, gracias" de una sesión pasada.
+        const _suppressedGameLinkPrompts = new Set();
+
+        let _pendingGameLinkConfirm = null; // { profileId, profileName, process, reason:'moved'|'active-relink', savedExePath, foundExePath } | null
+        let _pendingGameSuggestion = null; // { profileId, profileName, coverUrl, pid, windowTitle, exePath } | null
+        let _lastGameLinkUndo = null; // { profileId, exeName, profileName } | null — siempre restaura a null (ver A.4: el auto-write sólo ocurre cuando el perfil NO tenía game)
+        let _gameScanPollTimer = null;
+        let _gameScanPollAttempts = 0;
+        let _gameScanPollHintShown = false;
+        let _lastGameAutoResolvedPid = null; // toast de "PID resuelto" una sola vez por PID, no por escaneo
+
+        function _normalizeExePathForCompare(p) {
+            return (p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+        }
+
+        function _stopGameScanPolling() {
+            if (_gameScanPollTimer) {
+                clearInterval(_gameScanPollTimer);
+                _gameScanPollTimer = null;
+            }
+            _gameScanPollAttempts = 0;
+        }
+
+        // Se arma SOLO cuando la respuesta realmente puede cambiar: hay un
+        // juego vinculado al perfil activo, no hay PID puesto todavía, la
+        // traducción está activa, y el último escaneo no encontró nada. En
+        // reposo (juego ya conectado, o perfil sin `game`) el costo es CERO
+        // spawns de PowerShell — el disparador real es 'focus' de la
+        // ventana; esto es sólo el cinturón de los tirantes.
+        function _maybeArmGameScanPolling() {
+            if (_gameScanPollTimer) return; // ya armado
+            const profile = profileList.find((p) => p.id === activeProfileId);
+            const gamePidField = document.getElementById('game-pid');
+            const pidEmpty = !gamePidField || !gamePidField.value || parseInt(gamePidField.value) <= 0;
+            if (!profile || !profile.game || !pidEmpty || !translationActive) return;
+            _gameScanPollHintShown = false;
+            _gameScanPollAttempts = 0;
+            _gameScanPollTimer = setInterval(() => {
+                _gameScanPollAttempts++;
+                if (_gameScanPollAttempts > GAME_SCAN_POLL_MAX_ATTEMPTS) {
+                    _stopGameScanPolling();
+                    if (!_gameScanPollHintShown) {
+                        _gameScanPollHintShown = true;
+                        const t = translations[currentLang] || translations['en'];
+                        showToast((t.game_scan_poll_gave_up || 'No encontré «{game}» abierto — abrí el juego y tocá 🔍 Buscar juego.').replace('{game}', profile.game.windowTitle || profile.game.exeName || ''));
+                    }
+                    return;
+                }
+                scanForKnownGames(false);
+            }, GAME_SCAN_POLL_INTERVAL_MS);
+        }
+
+        // manual=true: el usuario tocó el botón 🔍 explícito — siempre
+        // avisa (encontrado o no). manual=false: disparador pasivo
+        // (init/focus/Save/reanudar/salir de manual/sondeo) — silencioso
+        // si no hay nada nuevo que mostrar, para no interrumpir con un
+        // toast en cada guardado.
+        async function scanForKnownGames(manual) {
+            let result;
+            try {
+                result = await api.scanKnownGames();
+            } catch (e) {
+                result = { success: false, error: e.message };
+            }
+            const t = translations[currentLang] || translations['en'];
+            if (!result || !result.success) {
+                if (manual && result && result.error === 'windows-only') {
+                    showToast(t.game_scan_windows_only || 'Solo disponible en Windows.');
+                }
+                return;
+            }
+
+            if (result.resolved) {
+                // Real bug found via a live Windows session (v3.13.85):
+                // a background scan re-filling #game-pid while Textractor
+                // is ALREADY attached and genuinely extracting real text
+                // (cliEverExtracted) surfaces the pre-existing "🔄
+                // Reconectar" banner (v3.13.8x) over a session that's
+                // working fine — and if the match happens to be a
+                // DIFFERENT process sharing the same exePath (a stray
+                // launcher/updater window, a duplicate instance left
+                // running), reconnecting to it replaces a good session
+                // with a broken one. A scan can only ever improve on
+                // "nothing attached yet" or "attached to something that
+                // never produced real text" — once real text is flowing,
+                // there's nothing for it to fix, so it must not touch the
+                // PID field at all.
+                if (cliRunning && cliEverExtracted) {
+                    _stopGameScanPolling();
+                    return;
+                }
+                _applyResolvedGame(result.resolved);
+                _stopGameScanPolling();
+                return;
+            }
+
+            if (result.needsPathConfirm) {
+                const key = `${result.needsPathConfirm.profileId}::${result.needsPathConfirm.foundExePath}`;
+                if (!_suppressedGameLinkPrompts.has(key)) {
+                    _pendingGameLinkConfirm = { ...result.needsPathConfirm, reason: 'moved' };
+                    renderGameBanners();
+                }
+                return;
+            }
+
+            if (result.suggestion) {
+                const key = `${result.suggestion.profileId}::${result.suggestion.exePath}`;
+                if (!_suppressedGameLinkPrompts.has(key)) {
+                    _pendingGameSuggestion = result.suggestion;
+                    renderGameBanners();
+                }
+                return;
+            }
+
+            // Nada resuelto, ni confirmación, ni sugerencia, ni ambiguo —
+            // sólo aquí tiene sentido armar el sondeo (la próxima vez el
+            // juego puede no estar abierto todavía) y avisar si fue manual.
+            _maybeArmGameScanPolling();
+            if (manual) {
+                showToast(t.game_scan_not_found || 'No encontré tu juego abierto.');
+            }
+        }
+
+        function _applyResolvedGame(resolved) {
+            // Real bug found via a live Windows session (v3.13.85): a
+            // passive background scan (triggered by window focus, Save,
+            // resume, etc. — NOT an explicit pick) must never silently
+            // overwrite a PID the user already has in the field, even if
+            // Textractor isn't currently running against it. Observed
+            // failure: the field kept "reverting" to a different PID than
+            // the one just manually selected, because a focus-triggered
+            // scan re-resolved the SAME exePath to a second, apparently
+            // lingering process and silently swapped + auto-launched over
+            // it. A scan can only ever be useful when there's NOTHING in
+            // the field yet — once populated (by any means), only an
+            // explicit re-pick (handlePickedProcessForGameLink, a
+            // separate call path) is allowed to change it.
+            const pidField = document.getElementById('game-pid');
+            const currentPid = parseInt(pidField.value, 10);
+            const fieldHasAValue = Number.isInteger(currentPid) && currentPid > 0;
+            if (fieldHasAValue && currentPid !== resolved.pid) {
+                return;
+            }
+            pidField.value = resolved.pid;
+            const nameEl = document.getElementById('game-pid-selected-name');
+            if (nameEl) {
+                nameEl.textContent = '🎮 ' + (resolved.exeName || '');
+                nameEl.classList.remove('hidden');
+            }
+            gameExePathHint = resolved.exePath || null;
+            checkGamePidVsAttached();
+            if (resolved.engine) {
+                _lastEngineAdvice = { ...resolved.engine, source: 'profile' };
+                renderEngineAdvice();
+            }
+            maybeAutoLaunchTextractor();
+            if (_lastGameAutoResolvedPid !== resolved.pid) {
+                _lastGameAutoResolvedPid = resolved.pid;
+                const t = translations[currentLang] || translations['en'];
+                showToast((t.game_auto_resolved || '🎮 Encontré tu juego — PID {pid} conectado').replace('{pid}', resolved.pid));
+            }
+        }
+
+        // Pinta la línea de "juego vinculado a este perfil" + la tira de
+        // deshacer de A.4. Llamado desde loadProfiles() (siempre que la
+        // lista de perfiles se refresca) y desde changeLanguage().
+        //
+        // v3.13.86: deliberately does NOT touch #game-pid. Tried scoping
+        // it per profile (clear/restore on every switch) after a real bug
+        // report — a freshly duplicated profile showed the PID of the
+        // profile it was cloned from. Reverted after checking Textractor's
+        // own CLI protocol (Artikash/Textractor, host/CLI/main.cpp):
+        // `attach -P<pid>`/`detach -P<pid>` are per-process, so the
+        // upstream binary itself doesn't forbid multiple simultaneous
+        // attachments (its GUI famously supports hooking several games at
+        // once) — but Tuhua's own TextractorLauncher is architected around
+        // exactly ONE active attachment at a time (kills + relaunches on
+        // every PID change, confirmed in every session log), and the
+        // whole pipeline (overlay, TM context, hook selection) assumes a
+        // single current game. Given that, #game-pid is correctly a
+        // GLOBAL "what Textractor is attached to right now" value, not a
+        // per-profile one — showing the same PID across every profile
+        // while it's attached is accurate, not a bug. Lyca's explicit
+        // call after walking through this.
+        function renderGameStatus() {
+            const t = translations[currentLang] || translations['en'];
+            const lineEl = document.getElementById('game-current-line');
+            const coverEl = document.getElementById('game-current-cover');
+            if (lineEl) {
+                const profile = profileList.find((p) => p.id === activeProfileId);
+                if (profile && profile.game) {
+                    lineEl.textContent = '🎮 ' + (profile.game.windowTitle || profile.game.exeName || profile.game.exePath || '');
+                    lineEl.title = profile.game.exePath || '';
+                    // v3.13.85: same cover the profile card shows (set on a
+                    // VNDB import, same field the card reads) — a profile
+                    // linked to a game AND imported from VNDB gets its
+                    // thumbnail here too, matching Lyca's ask that this look
+                    // like the profile card instead of a bare text line.
+                    const coverUrl = profile.cover && profile.cover.url ? profile.cover.url : null;
+                    if (coverEl) {
+                        if (coverUrl) {
+                            coverEl.src = coverUrl;
+                            coverEl.classList.remove('hidden');
+                        } else {
+                            coverEl.classList.add('hidden');
+                            coverEl.src = '';
+                        }
+                    }
+                } else {
+                    lineEl.textContent = t.game_none_linked || 'Sin juego vinculado a este perfil.';
+                    lineEl.title = '';
+                    if (coverEl) { coverEl.classList.add('hidden'); coverEl.src = ''; }
+                }
+            }
+            const undoBox = document.getElementById('game-link-undo');
+            if (undoBox) {
+                if (_lastGameLinkUndo) {
+                    undoBox.classList.remove('hidden');
+                    const textEl = document.getElementById('game-link-undo-text');
+                    if (textEl) {
+                        textEl.textContent = (t.game_saved_to_profile || '🎮 {game} guardado en el perfil «{profile}»')
+                            .replace('{game}', _lastGameLinkUndo.exeName || '')
+                            .replace('{profile}', _lastGameLinkUndo.profileName || '');
+                    }
+                } else {
+                    undoBox.classList.add('hidden');
+                }
+            }
+        }
+
+        async function undoGameLink() {
+            if (!_lastGameLinkUndo) return;
+            const { profileId } = _lastGameLinkUndo;
+            _lastGameLinkUndo = null;
+            renderGameStatus();
+            try {
+                await api.setProfileGame({ profileId, process: null });
+            } catch (e) { /* best-effort — nada crítico que reportar */ }
+            await loadProfiles();
+        }
+
+        // Pinta las dos banners de acción (confirmación de re-vínculo,
+        // sugerencia de otro perfil) — nunca ambas a la vez en la práctica
+        // (scanForKnownGames sólo puebla una u otra por escaneo), pero cada
+        // una se oculta independientemente si su estado es null.
+        function renderGameBanners() {
+            const t = translations[currentLang] || translations['en'];
+
+            const confirmBox = document.getElementById('game-link-confirm');
+            if (confirmBox) {
+                if (_pendingGameLinkConfirm) {
+                    confirmBox.classList.remove('hidden');
+                    const descEl = document.getElementById('game-link-confirm-desc');
+                    if (descEl) {
+                        const p = _pendingGameLinkConfirm;
+                        const key = p.reason === 'moved' ? 'game_link_confirm_moved_desc' : 'game_link_confirm_relink_desc';
+                        const fallback = p.reason === 'moved'
+                            ? '«{profile}» parece haberse movido de carpeta.\nGuardado: {saved}\nEncontrado: {found}'
+                            : '«{profile}» ya está vinculado a otro juego. ¿Vincularlo a este en su lugar?\n{found}';
+                        descEl.textContent = (t[key] || fallback)
+                            .replace('{profile}', p.profileName || '')
+                            .replace('{saved}', p.savedExePath || '')
+                            .replace('{found}', p.foundExePath || (p.process && p.process.exePath) || '');
+                    }
+                } else {
+                    confirmBox.classList.add('hidden');
+                }
+            }
+
+            const suggestBox = document.getElementById('game-profile-suggestion');
+            if (suggestBox) {
+                if (_pendingGameSuggestion) {
+                    suggestBox.classList.remove('hidden');
+                    const descEl = document.getElementById('game-profile-suggestion-desc');
+                    if (descEl) {
+                        descEl.textContent = (t.game_profile_suggestion_desc || 'Detecté «{game}» — parece el perfil «{profile}».')
+                            .replace('{game}', _pendingGameSuggestion.windowTitle || _pendingGameSuggestion.exePath || '')
+                            .replace('{profile}', _pendingGameSuggestion.profileName || '');
+                    }
+                } else {
+                    suggestBox.classList.add('hidden');
+                }
+            }
+        }
+
+        async function confirmGameLinkChange() {
+            if (!_pendingGameLinkConfirm) return;
+            const pending = _pendingGameLinkConfirm;
+            const process = pending.process || {
+                pid: pending.pid, name: pending.processName || '',
+                windowTitle: pending.windowTitle, exePath: pending.foundExePath
+            };
+            let result;
+            try {
+                result = await api.setProfileGame({ profileId: pending.profileId, process });
+            } catch (e) {
+                result = { success: false, error: e.message };
+            }
+            _pendingGameLinkConfirm = null;
+            renderGameBanners();
+            if (!result || !result.success) {
+                showToast(result && result.error ? result.error : 'Error');
+                return;
+            }
+            await loadProfiles();
+            if (process.pid) {
+                document.getElementById('game-pid').value = process.pid;
+                gameExePathHint = process.exePath || null;
+                checkGamePidVsAttached();
+                if (result.game && result.game.engine) {
+                    _lastEngineAdvice = { ...result.game.engine, source: 'profile' };
+                    renderEngineAdvice();
+                }
+                maybeAutoLaunchTextractor();
+            }
+        }
+
+        function dismissGameLinkChange() {
+            if (_pendingGameLinkConfirm) {
+                const exePath = _pendingGameLinkConfirm.foundExePath || (_pendingGameLinkConfirm.process && _pendingGameLinkConfirm.process.exePath);
+                _suppressedGameLinkPrompts.add(`${_pendingGameLinkConfirm.profileId}::${exePath}`);
+            }
+            _pendingGameLinkConfirm = null;
+            renderGameBanners();
+        }
+
+        async function acceptGameProfileSuggestion() {
+            if (!_pendingGameSuggestion) return;
+            const id = _pendingGameSuggestion.profileId;
+            _pendingGameSuggestion = null;
+            renderGameBanners();
+            await loadProfile(id);
+            scanForKnownGames(false);
+        }
+
+        function dismissGameProfileSuggestion() {
+            if (_pendingGameSuggestion) {
+                _suppressedGameLinkPrompts.add(`${_pendingGameSuggestion.profileId}::${_pendingGameSuggestion.exePath}`);
+            }
+            _pendingGameSuggestion = null;
+            renderGameBanners();
+        }
+
+        // Llamado desde el click handler del picker (openGameProcessPicker)
+        // — implementa la tabla de decisión de Fase A.4. El único caso que
+        // escribe SOLO (sin click adicional) es "primera vez" (el perfil
+        // activo no tiene game todavía); todo lo demás pide confirmación o
+        // se limita a sugerir.
+        async function handlePickedProcessForGameLink(process) {
+            if (!process || !process.exePath) return;
+            const profile = profileList.find((p) => p.id === activeProfileId);
+            if (!profile) return;
+
+            const targetPathNorm = _normalizeExePathForCompare(process.exePath);
+            const ownedByOther = profileList.find((p) =>
+                p.id !== activeProfileId && p.game && _normalizeExePathForCompare(p.game.exePath) === targetPathNorm
+            );
+            if (ownedByOther) {
+                const key = `${ownedByOther.id}::${process.exePath}`;
+                if (!_suppressedGameLinkPrompts.has(key)) {
+                    _pendingGameSuggestion = {
+                        profileId: ownedByOther.id, profileName: ownedByOther.name,
+                        coverUrl: (ownedByOther.cover && ownedByOther.cover.url) || null,
+                        pid: process.pid, windowTitle: process.windowTitle, exePath: process.exePath
+                    };
+                    renderGameBanners();
+                }
+                return;
+            }
+
+            if (!profile.game) {
+                let result;
+                try {
+                    result = await api.setProfileGame({ profileId: activeProfileId, process });
+                } catch (e) {
+                    result = { success: false, error: e.message };
+                }
+                if (!result || !result.success) return;
+                _lastGameLinkUndo = { profileId: activeProfileId, exeName: result.game.exeName, profileName: profile.name };
+                if (result.game.engine) {
+                    _lastEngineAdvice = { ...result.game.engine, source: 'profile' };
+                    renderEngineAdvice();
+                }
+                await loadProfiles();
+                return;
+            }
+
+            if (_normalizeExePathForCompare(profile.game.exePath) === targetPathNorm) {
+                return; // ya vinculado exactamente a este exe
+            }
+
+            _pendingGameLinkConfirm = {
+                profileId: activeProfileId, profileName: profile.name, process,
+                reason: 'active-relink', savedExePath: profile.game.exePath, foundExePath: process.exePath
+            };
+            renderGameBanners();
         }
 
         // v3.13.8x (settings UX audit, Fase 5): "avisar siempre" from the
@@ -3579,8 +4090,15 @@
             // survives into whatever gets attached next, at least until a
             // fresh one arrives (which may take a while if the next game's
             // engine detection resolves to `unknown`/silent).
-            _lastEngineAdvice = null;
-            renderEngineAdvice();
+            // v3.13.85 (Fase C2): only clear an advisory that came FROM the
+            // launcher (source==='launcher') — one seeded from the game
+            // picker/a linked profile (Fase B/D) describes the CONFIGURED
+            // game, not the Textractor session that just died, and must
+            // survive a Kill click.
+            if (_lastEngineAdvice && _lastEngineAdvice.source === 'launcher') {
+                _lastEngineAdvice = null;
+                renderEngineAdvice();
+            }
 
             const status = document.getElementById('cli-status-bar');
             const text = document.getElementById('cli-status-text');
@@ -3862,6 +4380,9 @@
                 // v3.13.37: leaving manual mode is a "real trigger" for
                 // auto-launch — see maybeAutoLaunchTextractor's doc.
                 maybeAutoLaunchTextractor();
+                // v3.13.85 (Fase B, disparador 5): same "real trigger"
+                // reasoning as above.
+                scanForKnownGames(false);
             }
         }
 
@@ -3871,6 +4392,9 @@
         // from _discoveredHooks because it must render even with zero hooks
         // (the Ren'Py/Godot/FNA case: those engines can produce no hooks at
         // all, but the advisory still has to show). See renderEngineAdvice().
+        // v3.13.85 (Fase C2): populated by onGameEngineAdvice's own push
+        // listener now, not by updateHookSelector's payload — see that
+        // listener for the `source` field this checks before clearing on Kill.
         let _lastEngineAdvice = null;
         // v3.13.79 (Fase 3, round-3 plan): sticky cache for the OCR-side
         // advisory (suggest PaddleOCR when Tesseract quality has been
@@ -3921,7 +4445,9 @@
         }
 
         function updateHookSelector(data) {
-            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks, noRealHookFound, gameEngine }
+            // data = { hooks, selectedHookKey, autoSelectedHookKey, activeHookKey, totalHooks, noRealHookFound }
+            // v3.13.85 (Fase C2): `gameEngine` used to ride on this same
+            // payload (v3.13.76) — now its own push, see onGameEngineAdvice.
             _discoveredHooks = data.hooks || [];
             const section = document.getElementById('hook-selector-section');
             const selector = document.getElementById('hook-selector');
@@ -3940,12 +4466,6 @@
             if (noRealWarning) {
                 noRealWarning.classList.toggle('hidden', !data.noRealHookFound);
             }
-
-            // v3.13.76: deliberately OUTSIDE the `_discoveredHooks.length > 0`
-            // gate above — the engine advisory (Ren'Py/Godot/FNA in
-            // particular) must be able to show up with ZERO hooks discovered.
-            if (data.gameEngine) _lastEngineAdvice = data.gameEngine;
-            renderEngineAdvice();
 
             countBadge.textContent = _discoveredHooks.length + ' hook' + (_discoveredHooks.length !== 1 ? 's' : '');
 

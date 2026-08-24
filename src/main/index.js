@@ -360,6 +360,14 @@ app.whenReady().then(() => {
     windowManager.sendToMainWindow('hooks-discovered', data);
   });
 
+  // v3.13.85 (auto-configuración de juegos, Fase C2): promoted out of
+  // hooks-discovered's payload — see that event's own comment in
+  // textractor-launcher.js and _detectAndEmitGameEngine's doc for why.
+  // Same forward pattern as the events above.
+  textractorLauncher.on('game-engine-advice', (data) => {
+    windowManager.sendToMainWindow('game-engine-advice', data);
+  });
+
   textractorLauncher.on('exited', ({ code, signal }) => {
     log.info('[TextractorLauncher] Exited:', { code, signal });
   });

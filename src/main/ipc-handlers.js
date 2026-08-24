@@ -9,6 +9,8 @@ const path = require('path');
 const axios = require('axios');
 const { exec } = require('child_process');
 const { parseProcessListJson } = require('../services/game-process-list');
+const { inspectGame } = require('../services/game-inspect');
+const { buildGameRecord, matchRunningProcesses, normalizeExePath } = require('../services/game-identity');
 const { runAutoDetectAndPersist } = require('../services/textractor-path-detect');
 
 const XuatInstaller = require('../services/xuat-installer');
@@ -39,6 +41,47 @@ const translations = require('../../renderer/main/i18n.js');
 // stale mid-session (an app updating its own binary while running) is a
 // cosmetic non-issue, not worth the complexity of invalidation.
 const _gameProcessIconCache = new Map();
+
+// v3.13.85 (auto-configuración de juegos, Fase B): scan-known-games can be
+// triggered from several independent places in the renderer (init, window
+// focus, Save, resuming from pause, leaving manual mode, the explicit 🔍
+// button) — without a cache, a burst of those firing close together (e.g.
+// focus right after Save) would each pay for their own PowerShell
+// cold-start. 3s is short enough that a stale answer never survives past
+// the window where a fresh one would have looked any different, and long
+// enough to collapse a realistic burst into one real call.
+const GAME_SCAN_CACHE_TTL_MS = 3000;
+let _knownGameScanCache = null; // { at: number, result: object } | null
+let _scanInFlight = null; // Promise<object> | null — collapses concurrent calls into the one already running
+
+/**
+ * v3.13.8x/v3.13.85: the PowerShell process-listing command shared by
+ * list-game-processes (icons resolved, used by the picker) and
+ * scan-known-games (no icons needed — a background match against saved
+ * profiles never shows a picker row). Split out so the two handlers can't
+ * drift on the underlying filter (MainWindowTitle/Path/own-PID exclusion).
+ *
+ * @returns {Promise<Array<{pid:number, name:string, windowTitle:string, exePath:string}>>}
+ */
+async function _listRunningGameProcesses() {
+  if (process.platform !== 'win32') return [];
+  const ownPid = process.pid;
+  const psCommand = `Get-Process | Where-Object { $_.MainWindowTitle -ne '' -and $_.Path -and $_.Id -ne ${ownPid} } | Select-Object Id, ProcessName, MainWindowTitle, Path | ConvertTo-Json -Compress`;
+  const raw = await new Promise((resolve) => {
+    exec(
+      `powershell -NoProfile -NonInteractive -Command "${psCommand}"`,
+      { encoding: 'utf8', windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          console.warn('[Tuhua] _listRunningGameProcesses: PowerShell call failed:', err.message);
+          return resolve(null);
+        }
+        resolve(stdout);
+      }
+    );
+  });
+  return parseProcessListJson(raw);
+}
 
 /**
  * Look up a translated string for a main-process-only UI surface (native
@@ -581,26 +624,11 @@ class IpcHandlers {
       if (process.platform !== 'win32') {
         return { success: false, error: 'windows-only' };
       }
-      const ownPid = process.pid;
-      const psCommand = `Get-Process | Where-Object { $_.MainWindowTitle -ne '' -and $_.Path -and $_.Id -ne ${ownPid} } | Select-Object Id, ProcessName, MainWindowTitle, Path | ConvertTo-Json -Compress`;
-      const raw = await new Promise((resolve) => {
-        exec(
-          `powershell -NoProfile -NonInteractive -Command "${psCommand}"`,
-          { encoding: 'utf8', windowsHide: true, timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
-          (err, stdout) => {
-            if (err) {
-              console.warn('[Tuhua] list-game-processes: PowerShell call failed:', err.message);
-              return resolve(null);
-            }
-            resolve(stdout);
-          }
-        );
-      });
-      // parseProcessListJson (src/services/game-process-list.js) is the
-      // pure/testable half of this handler — see its own doc comment for
-      // why going through it (not JSON.parse directly) matters even for
-      // the single-process case.
-      const rows = parseProcessListJson(raw);
+      // v3.13.85: PowerShell call + parseProcessListJson factored into
+      // _listRunningGameProcesses(), shared with scan-known-games below —
+      // this handler adds icon resolution on top, which a background scan
+      // never needs (it doesn't paint any picker rows).
+      const rows = await _listRunningGameProcesses();
 
       // Icons resolved in parallel — app.getFileIcon() is a real per-file
       // disk read, and there can be a couple dozen matching windows on a
@@ -625,6 +653,110 @@ class IpcHandlers {
       }));
 
       return { success: true, processes };
+    });
+
+    // v3.13.85 (auto-configuración de juegos, Fase C1): the game-engine
+    // advisory used to be Textractor-only (piggybacked on
+    // hooks-discovered, only ever emitted once a hook-discovery session
+    // was already running). This is the fix — a plain, Windows-independent
+    // invoke the renderer can call for ANY exe, from the process picker or
+    // a background scan, regardless of which input method is active. Not
+    // gated to win32: inspectGame() itself is pure fs/PE-header logic that
+    // degrades to `engine.engine==='unknown'`/`arch:null` on any read
+    // failure — see its own doc comment.
+    ipcMain.handle('inspect-game', (event, { exePath } = {}) => {
+      if (typeof exePath !== 'string' || !exePath) {
+        return { success: false, error: 'Invalid exePath' };
+      }
+      const result = inspectGame(exePath);
+      return { success: true, ...result };
+    });
+
+    // v3.13.85 (auto-configuración de juegos, Fase B): the only writer of
+    // profile.game — every renderer call site (the picker's auto-write on
+    // a profile with no game yet, the re-link confirmation banner for a
+    // moved game, Fase D's "vincular juego" button) goes through here, so
+    // the "never re-point another profile's game silently" guard below
+    // lives in exactly one place. `process: null` unlinks.
+    //
+    // Not gated to win32: this only writes to the local profile store —
+    // it never itself talks to PowerShell (the caller already resolved
+    // `process` via list-game-processes/scan-known-games, both of which
+    // ARE win32-gated on their own).
+    ipcMain.handle('set-profile-game', (event, { profileId, process: proc } = {}) => {
+      if (typeof profileId !== 'string' || !profileId) {
+        return { success: false, error: 'Invalid profile id' };
+      }
+      const target = this.profileStore.getById(profileId);
+      if (!target) return { success: false, error: 'Profile not found' };
+      const previousGame = target.game || null;
+
+      if (proc === null || proc === undefined) {
+        this.profileStore.update(profileId, () => ({ game: null }));
+        return { success: true, game: null, previousGame };
+      }
+
+      if (typeof proc.exePath !== 'string' || !proc.exePath) {
+        return { success: false, error: 'Invalid process: exePath is required' };
+      }
+
+      // Regression guard for the class of bug this feature exists to
+      // avoid: silently re-pointing a DIFFERENT profile's game out from
+      // under it. Every renderer call site is expected to have already
+      // asked the user before calling this with a `process` that belongs
+      // to another profile (the suggestion banner, never an overwrite) —
+      // this is the backend's own check, not just a UI courtesy.
+      const targetPathNorm = normalizeExePath(proc.exePath);
+      const owner = this.profileStore.list().find((p) =>
+        p.id !== profileId && p.game && normalizeExePath(p.game.exePath) === targetPathNorm
+      );
+      if (owner) {
+        return { success: false, error: 'game-owned-by-other-profile', profileName: owner.name };
+      }
+
+      const inspection = inspectGame(proc.exePath);
+      const game = buildGameRecord(proc, inspection);
+      this.profileStore.update(profileId, () => ({ game }));
+      return { success: true, game, previousGame };
+    });
+
+    // v3.13.85 (auto-configuración de juegos, Fase B): matches currently
+    // running processes against every profile's saved `game` link — the
+    // background half of "reconocer el juego y resolver el PID solo".
+    // Pure decision logic lives in matchRunningProcesses() (game-identity.js);
+    // this handler is just the I/O (PowerShell) + cache around it.
+    //
+    // Deliberately does NOT call inspectGame() for any branch: `resolved`
+    // reads engine/arch straight from the matched profile's ALREADY-STORED
+    // game.engine/game.arch (cached at link time), and none of
+    // needsPathConfirm/suggestion/ambiguous need engine/arch at all — that
+    // only gets (re-)computed inside set-profile-game, when a link is
+    // actually written.
+    ipcMain.handle('scan-known-games', async () => {
+      if (process.platform !== 'win32') {
+        return { success: false, error: 'windows-only' };
+      }
+      const now = Date.now();
+      if (_knownGameScanCache && (now - _knownGameScanCache.at) < GAME_SCAN_CACHE_TTL_MS) {
+        return _knownGameScanCache.result;
+      }
+      if (_scanInFlight) {
+        return _scanInFlight;
+      }
+      _scanInFlight = (async () => {
+        const processes = await _listRunningGameProcesses();
+        const profiles = this.profileStore.list();
+        const activeProfileId = this.profileStore.getActiveId();
+        const match = matchRunningProcesses(processes, profiles, activeProfileId);
+        const result = { success: true, scannedAt: now, ...match };
+        _knownGameScanCache = { at: now, result };
+        return result;
+      })();
+      try {
+        return await _scanInFlight;
+      } finally {
+        _scanInFlight = null;
+      }
     });
 
     ipcMain.handle('textractor-launch', async (event, { cliPath, gamePid, port: requestedPort, gameExePath }) => {
@@ -2436,7 +2568,7 @@ class IpcHandlers {
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-status',
       'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
-      'list-game-processes', 'get-textractor-auto-detect-result',
+      'list-game-processes', 'inspect-game', 'set-profile-game', 'scan-known-games', 'get-textractor-auto-detect-result',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',

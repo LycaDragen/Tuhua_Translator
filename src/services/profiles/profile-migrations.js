@@ -315,6 +315,28 @@ function stripGhostSettingsV2(settings) {
   return { settings: next, changed };
 }
 
+/**
+ * Migration 4 -> 5 (auto-configuración de juegos, Fase A) — pure,
+ * additive, same shape as seedDeeplCustomInstructions()/seedDeeplFormality()
+ * above: a raw pre-3.13.85 profile has no `game` key at all. Unlike those
+ * two, `game` isn't a PROFILE_SCOPED_SETTING_KEYS field, so there's no
+ * global value to seed FROM — this step is pure structural fill-in,
+ * `changed` is always false (it never carries real content, only
+ * presence). Kept as its own step rather than folded into
+ * normalizeProfile()'s defaults because validateProfile() can run on a
+ * profile straight off disk, before it's ever passed through
+ * normalizeProfile() — same reasoning documented on
+ * seedDeeplCustomInstructions() above. Idempotent: a profile that already
+ * has a `game` (object or explicit null) is left untouched.
+ */
+function seedGameField(profiles) {
+  const seeded = profiles.map((p) => {
+    if (Object.prototype.hasOwnProperty.call(p, 'game')) return p;
+    return { ...p, game: null };
+  });
+  return { profiles: seeded, changed: false };
+}
+
 module.exports = {
   PROMOTABLE_CREDENTIAL_KEYS,
   DEAD_SETTING_KEYS,
@@ -326,5 +348,6 @@ module.exports = {
   migrateProfiles,
   seedDeeplCustomInstructions,
   seedDeeplFormality,
-  stripGhostSettingsV2
+  stripGhostSettingsV2,
+  seedGameField
 };

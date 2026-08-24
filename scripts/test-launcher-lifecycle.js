@@ -1169,6 +1169,94 @@ function testArchPreflightLevel2() {
   return results;
 }
 
+// ─── Tests: game-engine-advice event (v3.13.85, Fase C2) ───────────────
+// _onGameExeResolved is the extracted body of _detectAndEmitGameEngine's
+// resolve callback — same "call it directly instead of driving a real
+// PowerShell exec" approach _checkArchAgainstGame's own tests use above
+// (see their header comment for why exec-faking infra isn't worth
+// building). This pins two things: the promotion from the old
+// hooks-discovered piggyback to its own event, and that the anti-annoyance
+// confidence gate from game-engine-detect.js survives that promotion.
+function testGameEngineAdvisoryEvent() {
+  const results = [];
+  const { x64Path } = archSiblingPaths();
+
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+
+    // A path OUTSIDE /fake on purpose: installFakeFs()'s global fake
+    // (isFakePath) makes fs.existsSync always true for anything under
+    // /fake — which would falsely satisfy the Unity `${exeName}_Data`
+    // existsSync() check regardless of readdirSync content. A /tmp path
+    // goes through the REAL fs.existsSync (correctly false for a
+    // nonexistent dir) and only readdirSync needs a scoped override here,
+    // restored immediately after — same technique the arch pre-flight
+    // sibling-missing fixture above uses for fs.existsSync.
+    const gameExeDir = '/tmp/game-engine-advice-test/renpy-game';
+    const gameExe = `${gameExeDir}/game.exe`;
+    const origReaddirSync = fs.readdirSync;
+    fs.readdirSync = (p) => (path.resolve(p) === path.resolve(gameExeDir) ? ['renpy', 'game'] : origReaddirSync(p));
+
+    const advisories = [];
+    launcher.on('game-engine-advice', (e) => advisories.push(e));
+    withSilencedConsole(() => launcher._onGameExeResolved(12345, gameExe));
+
+    fs.readdirSync = origReaddirSync;
+    clock.restore();
+
+    const pass = advisories.length === 1 && advisories[0].engine === 'renpy'
+      && advisories[0].adviceKey === 'engine_advice_renpy' && advisories[0].source === 'launcher'
+      && advisories[0].exePath === gameExe;
+    results.push({ id: 'game-engine-advice-emitted-for-renpy', pass, advisories });
+  }
+
+  // An engine with no adviceKey (unknown/low confidence, or a
+  // medium-confidence corroborant-only match) must never emit the event —
+  // the anti-annoyance gate must survive the promotion to its own channel.
+  // A genuinely nonexistent /tmp dir (no override at all) naturally yields
+  // 'unknown' via detectGameEngine's own ENOENT catch — see its own doc.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+
+    const gameExe = '/tmp/game-engine-advice-test/does-not-exist/game.exe';
+    const advisories = [];
+    launcher.on('game-engine-advice', (e) => advisories.push(e));
+    withSilencedConsole(() => launcher._onGameExeResolved(12345, gameExe));
+
+    clock.restore();
+    const pass = advisories.length === 0;
+    results.push({ id: 'game-engine-advice-not-emitted-for-unknown-engine', pass, advisories });
+  }
+
+  // hooks-discovered no longer carries a `gameEngine` field at all — pins
+  // the removal of the v3.13.76 piggyback. _scheduleHookDiscoveryUpdate
+  // debounces 500ms, so the fake clock needs draining before the event
+  // fires.
+  {
+    const clock = installFakeClock();
+    const launcher = new TextractorLauncher();
+    launcher.on('error', () => {});
+    withSilencedConsole(() => launcher.launch(12345, { cliPath: x64Path }));
+    const proc = lastFakeProcess;
+    const discoveries = [];
+    launcher.on('hooks-discovered', (d) => discoveries.push(d));
+    const hookLine = '[6:12345:AAAA:BBBB:0::HQ8@0:nekopara.exe] hola mundo\n';
+    withSilencedConsole(() => proc.stdout.emit('data', Buffer.from(hookLine, 'utf16le')));
+    drainUntil(clock, () => discoveries.length > 0, 10);
+    clock.restore();
+    const pass = discoveries.length > 0 && discoveries.every((d) => !Object.prototype.hasOwnProperty.call(d, 'gameEngine'));
+    results.push({ id: 'hooks-discovered-no-longer-carries-gameengine', pass, sample: discoveries[0] });
+  }
+
+  return results;
+}
+
 // ─── Test 3: arch-fallback diagnostic tick count, three scenarios ───────
 
 function runDiagnosticScenario(label, setupHooks) {
@@ -1989,6 +2077,7 @@ function run() {
   if (!args.only || 'arch-preference-not-crossing-installs'.includes(args.only)) all.push(testArchPreferenceNotCrossingInstalls());
   if (!args.only || 'preflight'.includes(args.only)) all.push(...testArchPreflightLevel1());
   if (!args.only || 'preflight'.includes(args.only) || 'level2'.includes(args.only)) all.push(...testArchPreflightLevel2());
+  if (!args.only || 'game-engine-advice'.includes(args.only)) all.push(...testGameEngineAdvisoryEvent());
   if (!args.only || 'diagnostic'.includes(args.only) || 'tick'.includes(args.only)) all.push(...testDiagnosticScenarios());
   if (!args.only || 'hysteresis'.includes(args.only) || 'stale'.includes(args.only)) all.push(...testHysteresisAgeDiscount());
   if (!args.only || 'parse'.includes(args.only)) all.push(...testHookLineParsing());

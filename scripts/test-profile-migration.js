@@ -17,7 +17,7 @@
  *   node scripts/test-profile-migration.js --quiet
  */
 const path = require('path');
-const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions, seedDeeplFormality, stripGhostSettingsV2 } =
+const { migrateProfiles, resolvePromotedValue, splitGlossaryLayer, seedDeeplCustomInstructions, seedDeeplFormality, stripGhostSettingsV2, seedGameField } =
   require(path.join('..', 'src', 'services', 'profiles', 'profile-migrations.js'));
 const ProfileStore = require(path.join('..', 'src', 'services', 'profiles', 'profile-store.js'));
 const { PROFILE_SCHEMA_VERSION, PROMOTED_TO_GLOBAL_KEYS } =
@@ -488,6 +488,55 @@ check('profile-store-migrate-from-v3-strips-ghost-settings-and-keeps-existing-ba
   return { pass, actual: { stillPresent, raw, deleteCalls: store._deleteCallCount() } };
 }, 'Starting from v3 (already through v0->v1/v1->v2/v2->v3), only the new v3->v4 step runs — the six ghost keys, including a STALE historical backup that has already proven itself, are gone via real store.delete() calls (not just omitted from the merge-set); a real setting (deeplKey) survives.');
 
+// ─── v4 -> v5: seedGameField (pure function) ───────────────────────────
+// v3.13.85 (auto-configuración de juegos, Fase A): `game` isn't a
+// PROFILE_SCOPED_SETTING_KEYS field (no global value to seed FROM), so
+// this step is pure structural fill-in — unlike the DeepL seed steps
+// above, `changed` is always false.
+check('seed-game-field-fills-missing-key-with-null', () => {
+  const profiles = [v1Profile({ name: 'A' }), v1Profile({ name: 'B' })];
+  const { profiles: seeded, changed } = seedGameField(profiles);
+  const pass = changed === false && seeded.every((p) => p.game === null);
+  return { pass, actual: seeded.map((p) => p.game) };
+});
+
+check('seed-game-field-is-idempotent-on-already-populated-profile', () => {
+  const gameLink = { exePath: 'C:\\Games\\x.exe', exeName: 'x.exe' };
+  const profiles = [{ ...v1Profile({ name: 'A' }), game: gameLink }];
+  const { profiles: seeded, changed } = seedGameField(profiles);
+  const pass = changed === false && seeded[0].game === gameLink;
+  return { pass, actual: seeded[0].game };
+}, 'A profile that already has a `game` (populated OR explicit null) is left completely untouched — same object reference, not just an equal value.');
+
+check('profile-store-migrate-from-v4-only-seeds-game-does-not-rerun-earlier-steps', () => {
+  // Mirrors the v1/v2-stepping tests above, one version later: a store
+  // already at v4 (through v0->v1/v1->v2/v2->v3/v3->v4) must run ONLY the
+  // v4->v5 game-seed step, and leave a real, already-populated `game`
+  // completely alone.
+  const gameLink = { exePath: 'C:\\Games\\nekopara.exe', exeName: 'nekopara.exe', dirName: 'games', windowTitle: 'Nekopara', processName: 'nekopara', engine: null, arch: 'x86', detectedAt: 1 };
+  const store = createFakeStore({
+    profiles: [
+      { ...v1Profile({ name: 'Nekopara' }), game: gameLink },
+      v1Profile({ name: 'Fate' }) // no `game` key at all — the v4-and-earlier shape
+    ],
+    activeProfile: 'Nekopara',
+    profilesSchemaVersion: 4
+  });
+  const ps = new ProfileStore(store);
+  const setCallsBefore = store._setCallCount();
+  const result = ps.migrate([]);
+  const setCallsAfter = store._setCallCount();
+  const raw = store._raw();
+  const nekopara = raw.profiles.find((p) => p.name === 'Nekopara');
+  const fate = raw.profiles.find((p) => p.name === 'Fate');
+  const pass = result.ran === true
+    && (setCallsAfter - setCallsBefore) === 1
+    && raw.profilesSchemaVersion === PROFILE_SCHEMA_VERSION
+    && JSON.stringify(nekopara.game) === JSON.stringify(gameLink)
+    && fate.game === null;
+  return { pass, actual: { nekopara: nekopara.game, fate: fate.game } };
+}, 'Starting from v4, only the new v4->v5 step runs: a real game link survives untouched, and a profile with no `game` key at all gets it seeded to null.');
+
 // ─── ProfileStore#migrate() wrapper: version gate + one write ─────────
 check('profile-store-migrate-runs-once-and-gates-by-version', () => {
   const store = createFakeStore({
@@ -540,6 +589,25 @@ check('profile-store-duplicate-clones-explicitly', () => {
   const dup = ps.duplicate(original.id, 'Nekopara Vol 2');
   const pass = dup.id !== original.id && dup.sourceLang === 'ja' && dup.glossary.length === 1 && dup.name === 'Nekopara Vol 2';
   return { pass, actual: dup };
+});
+
+check('profile-store-duplicate-does-not-copy-game-or-deeplGlossarySync', () => {
+  // v3.13.85 (auto-configuración de juegos, Fase A): without this, two
+  // profiles would end up claiming the same game process (permanently
+  // ambiguous for game-identity.js's matching, no visible symptom until
+  // both are open) — and deleting the duplicate would orphan/kill the
+  // ORIGINAL's remote DeepL glossary via delete-profile's best-effort
+  // cleanup, since deeplGlossarySync.glossaryId would be duplicated too.
+  const store = createFakeStore({ profiles: [] });
+  const ps = new ProfileStore(store);
+  const original = ps.create({ name: 'Nekopara' });
+  ps.update(original.id, () => ({
+    game: { exePath: 'C:\\Games\\nekopara.exe', exeName: 'nekopara.exe', dirName: 'games', windowTitle: 'Nekopara', processName: 'nekopara', engine: null, arch: 'x86', detectedAt: 1 },
+    deeplGlossarySync: { glossaryId: 'remote-g1', hash: 'abc', sourceLang: 'ja', targetLang: 'es' }
+  }));
+  const dup = ps.duplicate(original.id, 'Nekopara Vol 2');
+  const pass = dup.game === null && dup.deeplGlossarySync === null;
+  return { pass, actual: { game: dup.game, deeplGlossarySync: dup.deeplGlossarySync } };
 });
 
 check('profile-store-rename-rejects-duplicate-name', () => {

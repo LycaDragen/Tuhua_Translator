@@ -193,6 +193,98 @@
             <!-- ===== SETTINGS TAB ===== -->
             <div id="tab-settings" class="flex-1 overflow-y-auto scrollbar-thin p-5 space-y-6 fade-in">
 
+                <!-- Game (auto-configuración de juegos, v3.13.85) —
+                     deliberately BEFORE "Método de Entrada" and OUTSIDE
+                     #textractor-port-section: setInputMethod() hides that
+                     whole section outside Textractor mode, but the game
+                     link / engine advisory below must stay visible in
+                     OCR/XUAT/Clipboard too — that's the whole point of
+                     promoting the advisory off the old Textractor-only
+                     hooks-discovered piggyback (see textractor-launcher.js's
+                     _detectAndEmitGameEngine doc comment). -->
+                <div id="game-section" class="space-y-2">
+                    <div class="flex items-center justify-between">
+                        <label class="block text-[10px] font-bold text-gray-400 uppercase tracking-wider" data-i18n="game_section_label">Juego</label>
+                        <div class="flex gap-2 items-center">
+                            <!-- v3.13.85: method-agnostic entry point — the
+                                 "🎮 Elegir…" button inside #textractor-port-section
+                                 fills #game-pid too (Textractor-specific), but
+                                 THIS one must work regardless of input method
+                                 (OCR/Clipboard/XUAT included), since linking a
+                                 game is exactly as useful there. Same picker,
+                                 same handlePickedProcessForGameLink() decision
+                                 table either way.
+                                 v3.13.86: used to be two buttons here (this
+                                 picker + a separate "🔍 Buscar juego" that
+                                 called scanForKnownGames(true)). Merged into
+                                 one on Lyca's call after testing: the scan
+                                 button was structurally a dead end on any
+                                 profile without a game linked yet (it only
+                                 re-verifies an EXISTING profile.game.exePath,
+                                 never a first-time link), so a user hitting it
+                                 first got nothing. The passive/event-driven
+                                 scanForKnownGames(false) triggers elsewhere
+                                 (focus, save, polling) still do the
+                                 re-verification job on their own — this
+                                 button only ever needs to open the picker
+                                 now. Keeps the "Buscar juego" label/icon
+                                 (that's the wording Lyca wants users to see)
+                                 wired to openGameProcessPicker() instead. -->
+                            <button type="button" onclick="openGameProcessPicker()" class="text-[10px] text-emerald-500 hover:text-emerald-400 font-medium flex items-center gap-1" data-i18n="game_scan_btn">
+                                🔍 Buscar juego
+                            </button>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <img id="game-current-cover" src="" alt="" class="hidden w-8 h-10 object-cover rounded flex-shrink-0 bg-gray-200 dark:bg-dark-700" onerror="this.classList.add('hidden')">
+                        <p id="game-current-line" class="text-[10px] text-gray-500 dark:text-gray-400 truncate" data-i18n="game_none_linked">Sin juego vinculado a este perfil.</p>
+                    </div>
+
+                    <!-- A.4: auto-write on the FIRST pick for a profile with
+                         no game yet — reversible until the next repaint. -->
+                    <div id="game-link-undo" class="hidden p-2 rounded-md bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-800 flex items-center justify-between gap-2">
+                        <span id="game-link-undo-text" class="text-[9px] text-emerald-700 dark:text-emerald-400"></span>
+                        <button type="button" onclick="undoGameLink()" class="shrink-0 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 underline hover:no-underline" data-i18n="game_saved_undo">Deshacer</button>
+                    </div>
+
+                    <!-- B.4: re-link confirmation — shared by "the saved
+                         game moved folders" (background scan) and "the
+                         active profile already points elsewhere and you
+                         just picked a different process" (picker). Never
+                         written without this explicit click either way. -->
+                    <div id="game-link-confirm" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800 space-y-1.5">
+                        <p id="game-link-confirm-desc" class="text-[9px] text-amber-700 dark:text-amber-400 whitespace-pre-line leading-relaxed"></p>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="confirmGameLinkChange()" class="flex-1 text-[9px] font-bold px-2 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white transition" data-i18n="game_path_confirm_btn">Actualizar y conectar</button>
+                            <button type="button" onclick="dismissGameLinkChange()" class="flex-1 text-[9px] font-medium px-2 py-1 rounded border border-amber-300 dark:border-amber-700 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition" data-i18n="game_path_confirm_dismiss">No, ignorar</button>
+                        </div>
+                    </div>
+
+                    <!-- B.3: the detected game belongs to a DIFFERENT
+                         profile — sugerencia con banner, nunca auto-switch. -->
+                    <div id="game-profile-suggestion" class="hidden p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/20 border border-blue-300 dark:border-blue-800 space-y-1.5">
+                        <p id="game-profile-suggestion-desc" class="text-[9px] text-blue-700 dark:text-blue-400 leading-relaxed"></p>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="acceptGameProfileSuggestion()" class="flex-1 text-[9px] font-bold px-2 py-1 rounded bg-blue-600 hover:bg-blue-500 text-white transition" data-i18n="game_profile_suggestion_btn">Cambiar de perfil</button>
+                            <button type="button" onclick="dismissGameProfileSuggestion()" class="flex-1 text-[9px] font-medium px-2 py-1 rounded border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition" data-i18n="game_profile_suggestion_dismiss">Ignorar</button>
+                        </div>
+                    </div>
+
+                    <!-- v3.13.76: proactive game-engine advisory — MOVED
+                         here (v3.13.85, Fase B) from inside
+                         #textractor-port-section, which setInputMethod()
+                         hides outside Textractor mode. No data-i18n on the
+                         text/button: rendered dynamically by
+                         renderEngineAdvice() (renderer.js), not the generic
+                         [data-i18n] sweep, because the message needs a
+                         runtime {engine}/{method} substitution a static
+                         translation swap would clobber. -->
+                    <div id="engine-advice" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800">
+                        <p id="engine-advice-text" class="text-[10px] text-amber-700 dark:text-amber-400 leading-relaxed"></p>
+                        <button id="engine-advice-action" type="button" onclick="applyEngineAdvice()" class="hidden mt-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 underline hover:no-underline"></button>
+                    </div>
+                </div>
+
                 <!-- Input Method -->
                 <div>
                     <label class="block text-[10px] font-bold text-gray-400 uppercase mb-2 tracking-wider" data-i18n="input_method">Método de Entrada</label>
@@ -648,19 +740,6 @@
                                 <div id="cli-error-technical" class="mt-1 text-[8px] font-mono text-red-600/80 dark:text-red-400/70 whitespace-pre-wrap break-all max-h-24 overflow-y-auto"></div>
                             </details>
                         </div>
-                    </div>
-
-                    <!-- v3.13.76: proactive game-engine advisory — no data-i18n on
-                         the text/button, they're rendered dynamically by
-                         renderEngineAdvice() (renderer.js), not the generic
-                         [data-i18n] sweep, because the message needs a runtime
-                         {engine}/{method} substitution that a static translation
-                         swap would clobber. Shown independently of the hook
-                         selector below (it must appear even with zero hooks —
-                         the Ren'Py/Godot/FNA case). -->
-                    <div id="engine-advice" class="hidden p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-800">
-                        <p id="engine-advice-text" class="text-[10px] text-amber-700 dark:text-amber-400 leading-relaxed"></p>
-                        <button id="engine-advice-action" type="button" onclick="applyEngineAdvice()" class="hidden mt-1.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 underline hover:no-underline"></button>
                     </div>
 
                     <!-- Hook Selector (v3.8.22) -->

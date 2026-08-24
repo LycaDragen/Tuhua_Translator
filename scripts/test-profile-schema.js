@@ -51,7 +51,7 @@ const EXPECTED_FIELDS = [
   // v3.13.80: added on Lyca's explicit request after the instructions
   // scoping above — a VN's register is exactly as game-specific.
   'deeplFormality',
-  'glossary', 'hook', 'cover', 'history'
+  'glossary', 'hook', 'cover', 'game', 'history'
 ].sort();
 
 const LEGACY_V0_PROFILE = {
@@ -92,7 +92,7 @@ check('create-profile-defaults-are-sane', () => {
   const p = createProfile({ name: 'Test' });
   const pass = p.sourceLang === 'auto' && p.inputMethod === 'textractor' && p.engine === 'google-free'
     && p.isDefault === false && Array.isArray(p.glossary) && p.glossary.length === 0
-    && p.hook === null && p.cover === null && Array.isArray(p.history) && p.history.length === 0
+    && p.hook === null && p.cover === null && p.game === null && Array.isArray(p.history) && p.history.length === 0
     && typeof p.id === 'string' && p.id.length > 0;
   return { pass, actual: p };
 });
@@ -230,9 +230,9 @@ check('round-trip-identity-over-scoped-subset', () => {
   return { pass, actual: roundTripped, expected: original };
 });
 
-// v3.13.8x (settings UX audit): bumped 3 -> 4 for stripGhostSettingsV2() —
-// see profile-migrations.js's DEAD_SETTING_KEYS_V2 comment.
-check('schema-version-is-4', () => ({ pass: PROFILE_SCHEMA_VERSION === 4 }));
+// v3.13.85 (auto-configuración de juegos, Fase A): bumped 4 -> 5 for
+// seedGameField() — see profile-migrations.js's own comment.
+check('schema-version-is-5', () => ({ pass: PROFILE_SCHEMA_VERSION === 5 }));
 
 // ─── v3.13.58 (Fase 3): llmProvider* fields ─────────────────────────────
 check('llm-provider-keys-is-promoted-to-global-not-scoped', () => {
@@ -311,6 +311,54 @@ check('normalizeProfile-round-trips-a-populated-deeplGlossarySync', () => {
     pass: normalized.deeplGlossaryId === 'manual-id' && normalized.deeplAutoGlossary === true && JSON.stringify(normalized.deeplGlossarySync) === JSON.stringify(sync),
     actual: normalized
   };
+});
+
+// ─── auto-configuración de juegos, Fase A: `game` field ────────────────
+check('game-is-neither-scoped-nor-promoted', () => {
+  const pass = !PROFILE_SCOPED_SETTING_KEYS.includes('game') && !PROMOTED_TO_GLOBAL_KEYS.includes('game');
+  return { pass };
+}, "It's own-write-path bookkeeping (same category as hook/cover/deeplGlossarySync), not a user-facing setting projected to/from global settings via a profile switch.");
+
+check('profile-to-settings-never-emits-game', () => {
+  const p = createProfile({ name: 'Test' });
+  p.game = { exePath: 'C:\\Games\\x.exe', exeName: 'x.exe', dirName: 'games', windowTitle: 'X', processName: 'x', engine: null, arch: 'x64', detectedAt: 1 };
+  const settings = profileToSettings(p);
+  return { pass: !Object.prototype.hasOwnProperty.call(settings, 'game'), actual: settings };
+}, 'A game link must never leak into global settings on profile activation — that would defeat the whole point of per-profile identity.');
+
+check('settings-to-profile-preserves-game-untouched', () => {
+  const gameLink = { exePath: 'C:\\Games\\x.exe', exeName: 'x.exe', dirName: 'games', windowTitle: 'X', processName: 'x', engine: null, arch: 'x64', detectedAt: 1 };
+  const existing = { ...createProfile({ name: 'Test' }), game: gameLink };
+  const updated = settingsToProfile({ sourceLang: 'ja' }, existing);
+  return { pass: updated.game === gameLink, actual: updated.game };
+}, 'Callers update `game` through set-profile-game (own dedicated path), not through settingsToProfile — a config save must never clobber the link.');
+
+check('validateProfile-accepts-a-populated-game', () => {
+  const p = createProfile({ name: 'Test' });
+  p.game = { exePath: 'C:\\Games\\x.exe', exeName: 'x.exe', dirName: 'games', windowTitle: 'X', processName: 'x', engine: null, arch: 'x64', detectedAt: 1 };
+  const { valid, errors } = validateProfile(p);
+  return { pass: valid && errors.length === 0, actual: errors };
+});
+
+check('validateProfile-rejects-a-non-object-non-null-game', () => {
+  const p = createProfile({ name: 'Test' });
+  p.game = 'not-an-object';
+  const result = validateProfile(p);
+  return { pass: result.valid === false && result.errors.some((e) => e.includes('game')), actual: result };
+});
+
+check('normalizeProfile-round-trips-a-populated-game', () => {
+  const gameLink = { exePath: 'C:\\Games\\x.exe', exeName: 'x.exe', dirName: 'games', windowTitle: 'X', processName: 'x', engine: { id: 'renpy' }, arch: 'x86', detectedAt: 999 };
+  const normalized = normalizeProfile({ name: 'Test', game: gameLink });
+  return { pass: JSON.stringify(normalized.game) === JSON.stringify(gameLink), actual: normalized.game };
+});
+
+check('normalizeProfile-defaults-missing-game-to-null', () => {
+  // A raw v4-and-earlier profile has no `game` key at all — normalizeProfile
+  // (structural, not a delete list) must fill it in as null, not leave it
+  // undefined (which would fail validateProfile's new check).
+  const normalized = normalizeProfile({ name: 'Old Profile' });
+  return { pass: normalized.game === null, actual: normalized.game };
 });
 
 function run() {

@@ -31,7 +31,14 @@ const crypto = require('crypto');
 // see profile-migrations.js's DEAD_SETTING_KEYS_V2 comment for what it
 // removes and why it needed its own step rather than joining
 // DEAD_SETTING_KEYS (which only fires for a genuinely-v0 install).
-const PROFILE_SCHEMA_VERSION = 4;
+// v3.13.85 (auto-configuración de juegos, Fase A): bumped 4 -> 5 for
+// seedGameField() — same reasoning as seedDeeplCustomInstructions()/
+// seedDeeplFormality() above: `game` isn't a PROFILE_SCOPED_SETTING_KEYS
+// field, so it doesn't get rejected as `undefined` the way those would,
+// but a raw profile from disk still needs the key PRESENT (not absent)
+// for normalizeProfile()'s structural-defaults design to keep holding —
+// see the field's own doc comment below.
+const PROFILE_SCHEMA_VERSION = 5;
 
 // The only fields copied INTO global settings when a profile activates,
 // and copied OUT of global settings when a profile is saved. Both
@@ -229,6 +236,37 @@ function createProfile(overrides = {}) {
     // glance. Purely cosmetic identification, never read by translation/
     // pipeline logic.
     cover: overrides.cover || null,
+    // v3.13.85 (auto-configuración de juegos, Fase A): the identity of the
+    // GAME PROCESS this profile is linked to — {exePath, exeName, dirName,
+    // windowTitle, processName, engine, arch, detectedAt} | null. Own write
+    // path (set-profile-game IPC handler), NOT in
+    // PROFILE_SCOPED_SETTING_KEYS — same category as `cover`/
+    // `deeplGlossarySync` above, not a setting the profile-switch
+    // projection touches.
+    //
+    // exePath is the primary match key, stored verbatim (as PowerShell
+    // returned it) so it displays exactly as the user sees it in Explorer
+    // — normalization (lowercase, `/`->`\`, trailing-slash strip) happens
+    // at COMPARE time, in game-identity.js, not here. exeName (lowercase
+    // basename) is the fallback match key for when a game moves folders or
+    // gets reinstalled; dirName (lowercase basename of the parent dir)
+    // exists purely to disambiguate the degenerate case of two profiles
+    // both pointing at a generic `Game.exe` (RPG Maker, older engines) —
+    // without it, two such profiles would permanently shadow each other's
+    // name-based match. windowTitle is display-only, captured at link time
+    // (also doubles as the seed query for a VNDB search — see the game
+    // picker's "create profile" flow). engine/arch are CACHED snapshots of
+    // detectGameEngine()/detectExeArch() taken at link time, not derived
+    // lazily — this is what lets the engine-mismatch advice show on a
+    // profile card / in the game section without re-touching the
+    // filesystem, and remains the only source once the game isn't running.
+    // They're overwritten on every (re-)link, so they can't go stale in a
+    // way that matters.
+    //
+    // Deliberately does NOT resurrect `hook` (see that field's own comment
+    // above) — this is a different kind of identity (which EXE, not which
+    // Textractor hook) and was evaluated/kept independently.
+    game: overrides.game || null,
     history: Array.isArray(overrides.history) ? overrides.history : []
   };
 }
@@ -281,6 +319,9 @@ function validateProfile(profile) {
   if (profile.deeplGlossarySync !== null && typeof profile.deeplGlossarySync !== 'object') {
     errors.push('deeplGlossarySync must be null or an object');
   }
+  if (profile.game !== null && typeof profile.game !== 'object') {
+    errors.push('game must be null or an object');
+  }
   for (const key of PROFILE_SCOPED_SETTING_KEYS) {
     if (profile[key] === undefined) {
       errors.push(`missing scoped setting: ${key}`);
@@ -316,9 +357,10 @@ function profileToSettings(profile) {
  * The copy-on-save projection: folds the scoped subset of the current
  * global settings into an existing profile object, bumping savedAt.
  * Fields the profile owns outside of PROFILE_SCOPED_SETTING_KEYS (id,
- * name, isDefault, createdAt, glossary, hook, history) are preserved from
- * `existingProfile` untouched — callers update glossary/hook/history
- * through their own dedicated paths, not through this function.
+ * name, isDefault, createdAt, glossary, hook, cover, game, history) are
+ * preserved from `existingProfile` untouched — callers update
+ * glossary/hook/cover/game/history through their own dedicated paths, not
+ * through this function.
  */
 function settingsToProfile(settings, existingProfile) {
   if (!existingProfile || typeof existingProfile !== 'object') {

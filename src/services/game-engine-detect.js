@@ -52,7 +52,7 @@ const XNA_FAMILY_ADVICE_KEY = 'engine_advice_xna';
  * @returns {{
  *   engine: string, engineLabel: string|null, family: string|null,
  *   confidence: 'high'|'medium'|'low', markers: string[],
- *   recommendedMethod: 'xuat'|'ocr'|null, textractorWorks: boolean|null,
+ *   recommendedMethod: 'xuat'|'ocr'|'clipboard'|null, textractorWorks: boolean|null,
  *   adviceKey: string|null, exePath: string,
  *   isUnity: boolean, gameDir: string, gameName: string, dataDir: string|null,
  *   hasUnityPlayer: boolean, hasManaged: boolean, isIL2CPP: boolean,
@@ -171,7 +171,14 @@ function detectGameEngine(exePath, deps = {}) {
         family: 'renpy',
         confidence: 'high',
         markers: ['renpy/', has('game') ? 'game/' : 'lib/'],
-        recommendedMethod: 'ocr',
+        // v3.13.86: NOT 'ocr' — real bug found by Lyca testing a real
+        // Ren'Py game. Ren'Py ships a built-in "copy dialogue to the OS
+        // clipboard" shortcut (Shift+C) — that's a far more reliable text
+        // source than screen OCR (no scan-region setup, no OCR misreads,
+        // exact text every time). OCR is the right fallback for engines
+        // that draw text on the GPU with no such feature (Unity IL2CPP,
+        // Godot, FNA/XNA); Ren'Py specifically has a better one.
+        recommendedMethod: 'clipboard',
         textractorWorks: false,
         adviceKey: 'engine_advice_renpy'
       });
