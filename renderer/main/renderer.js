@@ -268,6 +268,18 @@
             }
             applyTheme(settings.theme || 'dark');
 
+            // v3.13.94: restore a manually-dragged sidebar width, if the
+            // user ever set one — see setupSidebarResize()'s own comment
+            // for why this switches the sidebar out of its default
+            // grows-with-the-window flex-1 behavior.
+            if (settings.sidebarWidth) {
+                const savedAside = document.getElementById('app-sidebar');
+                if (savedAside) {
+                    savedAside.style.flex = 'none';
+                    savedAside.style.width = settings.sidebarWidth + 'px';
+                }
+            }
+
             // v3.13.58: provider/model/params restored BEFORE toggleInputFields()
             // runs, same reasoning as loadLlmProviders() above.
             const savedProviderId = settings.llmProvider || 'openai';
@@ -755,6 +767,55 @@
                 document.getElementById('theme-icon-moon').classList.add('hidden');
                 document.getElementById('theme-icon-sun').classList.remove('hidden');
             }
+        }
+
+        // ===== SIDEBAR RESIZE =====
+        // v3.13.94 (Lyca's ask): the sidebar already grows automatically
+        // with the window (v3.13.93), but he wanted to be able to drag it
+        // wider still — past whatever the window itself provides — and
+        // shrink the play-button column down to it, since that column
+        // still reads fine narrow (own comment on the shortcuts grid
+        // above). A drag switches #app-sidebar out of its default flex-1
+        // (grows-with-window) mode into a fixed width the user chose;
+        // init() restores that choice from settings.sidebarWidth on
+        // startup the same way it restores theme/uiLanguage. Doesn't fight
+        // the automatic v3.13.93 behavior — that stays the default for
+        // anyone who's never dragged the handle.
+        function setupSidebarResize() {
+            const handle = document.getElementById('sidebar-resize-handle');
+            const aside = document.getElementById('app-sidebar');
+            const container = handle && handle.parentElement;
+            if (!handle || !aside || !container) return;
+
+            const MIN_WIDTH = 380; // matches #app-sidebar's own min-w-[380px] floor
+            const MAIN_MIN_WIDTH = 280; // matches <main>'s own min-w-[280px] floor
+            const HARD_MAX_WIDTH = 900; // sane ceiling — a single-column form gains nothing past this
+            let dragging = false;
+
+            handle.addEventListener('mousedown', (e) => {
+                dragging = true;
+                document.body.style.cursor = 'col-resize';
+                document.body.style.userSelect = 'none';
+                e.preventDefault();
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                if (!dragging) return;
+                const containerRect = container.getBoundingClientRect();
+                const maxWidth = Math.min(HARD_MAX_WIDTH, containerRect.width - MAIN_MIN_WIDTH - handle.offsetWidth);
+                const rawWidth = e.clientX - containerRect.left;
+                const newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, rawWidth));
+                aside.style.flex = 'none';
+                aside.style.width = newWidth + 'px';
+            });
+
+            window.addEventListener('mouseup', () => {
+                if (!dragging) return;
+                dragging = false;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                api.saveSettings({ sidebarWidth: Math.round(aside.getBoundingClientRect().width) });
+            });
         }
 
         // ===== TABS =====
@@ -5724,6 +5785,9 @@
         // v3.13.39: registered exactly once here — init() itself is
         // re-invoked on resetSettingsToDefaults()/loadProfile() and must
         // NOT re-register listeners each time (see registerIpcListeners's
-        // doc for the bug this fixes).
+        // doc for the bug this fixes). v3.13.94: setupSidebarResize()
+        // follows the same rule — its mousedown/mousemove/mouseup
+        // listeners would stack up on every init() re-run otherwise.
         registerIpcListeners();
+        setupSidebarResize();
         init();

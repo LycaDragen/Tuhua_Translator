@@ -196,10 +196,14 @@
              bar/shortcuts card next door are all capped at max-w-lg already
              and just centered when given more room than that, so giving
              THEM the window's extra pixels was buying nothing). Was a fixed
-             w-[380px]; now flex-1 with the old 380px as a floor and a
-             640px ceiling so an ultrawide monitor doesn't stretch the
-             single-column settings form absurdly wide. -->
-        <aside class="flex-1 min-w-[380px] max-w-[640px] bg-white dark:bg-dark-800 border-r border-gray-200 dark:border-dark-700 flex flex-col overflow-hidden z-10">
+             w-[380px]; now flex-1 with 380px as a floor.
+             v3.13.94: also manually draggable past that automatic growth,
+             via #sidebar-resize-handle below (setupSidebarResize() in
+             renderer.js). No more Tailwind max-w cap here — the drag
+             handler clamps in JS instead (main's own min-width, plus a
+             hard ceiling), so a fixed CSS cap can't fight a legitimate
+             larger drag target. -->
+        <aside id="app-sidebar" class="flex-1 min-w-[380px] bg-white dark:bg-dark-800 border-r border-gray-200 dark:border-dark-700 flex flex-col overflow-hidden z-10">
             <!-- Tabs -->
             <div class="flex border-b border-gray-200 dark:border-dark-700 px-2">
                 <button onclick="switchTab('settings')" id="tab-btn-settings" class="tab-btn active flex-1 py-2.5 text-xs font-medium text-gray-500 hover:text-gray-800 dark:hover:text-white transition" data-i18n="tab_settings">Configuración</button>
@@ -886,7 +890,7 @@
                         <li data-i18n="profile_stores_input">Método de entrada (Textractor/Clipboard/OCR)</li>
                         <li data-i18n="profile_stores_engine">Motor de traducción y su configuración</li>
                     </ul>
-                    <p class="text-xs text-gray-400 dark:text-gray-500 pt-1" data-i18n="profile_stores_note">El idioma de destino, las claves de API y la ruta de Textractor son globales — no cambian entre perfiles.</p>
+                    <p class="text-[10px] text-blue-600 dark:text-blue-400 pt-1" data-i18n="profile_stores_note">El idioma de destino, las claves de API y la ruta de Textractor son globales — no cambian entre perfiles.</p>
                 </div>
                 <div id="profile-list" class="space-y-2">
                     <p class="text-xs text-gray-400 text-center py-4" data-i18n="profile_empty">Sin perfiles guardados.</p>
@@ -910,12 +914,20 @@
             </div>
         </aside>
 
+        <!-- v3.13.94: manual drag handle for #app-sidebar — see
+             setupSidebarResize() in renderer.js. -->
+        <div id="sidebar-resize-handle" class="w-1 flex-shrink-0 cursor-col-resize bg-gray-200 dark:bg-dark-700 hover:bg-emerald-400 dark:hover:bg-emerald-500 transition-colors" title="Arrastrá para ajustar el ancho"></div>
+
         <!-- MAIN CONTENT -->
         <!-- v3.13.93: no longer flex-1 — its content (play button, status
              bar, shortcuts) is capped at max-w-lg already, so it settles at
              that natural width instead of stretching; the sidebar now
-             claims whatever the window grows into (see its own comment). -->
-        <main class="min-w-[420px] bg-gray-50 dark:bg-dark-950 flex items-center justify-center relative overflow-hidden">
+             claims whatever the window grows into (see its own comment).
+             v3.13.94: min-width shrunk from 420 to 280 — the shortcuts card
+             now stacks 1-column (see its own comment below) instead of a
+             2x2 grid, so it no longer needs the wider floor to stay
+             readable when the sidebar is dragged wide. -->
+        <main class="min-w-[280px] bg-gray-50 dark:bg-dark-950 flex items-center justify-center relative overflow-hidden">
             <!-- Subtle background pattern -->
             <div class="absolute inset-0 opacity-[0.02] pointer-events-none" style="background-image: radial-gradient(#10b981 1px, transparent 1px); background-size: 24px 24px;"></div>
 
@@ -957,9 +969,12 @@
                 </div>
 
                 <!-- Keyboard Shortcuts Reference -->
+                <!-- v3.13.94: 1 column instead of a 2x2 grid — Lyca's own
+                     mockup for what this card should look like once main
+                     is squeezed down to its new, narrower minimum. -->
                 <div class="mt-6 bg-white dark:bg-dark-800 p-4 rounded-xl border border-gray-200 dark:border-dark-700 text-left">
                     <span class="text-[10px] font-bold text-gray-400 uppercase">Shortcuts</span>
-                    <div class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[10px]">
+                    <div class="grid grid-cols-1 gap-y-1 mt-2 text-[10px]">
                         <div class="flex justify-between"><span class="text-gray-500">Main Window</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+L</kbd></div>
                         <div class="flex justify-between"><span class="text-gray-500">Overlays</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+E</kbd></div>
                         <div class="flex justify-between"><span class="text-gray-500">Click-Through</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+M</kbd></div>
