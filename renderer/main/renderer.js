@@ -841,6 +841,20 @@
                 document.body.style.userSelect = '';
                 api.saveSettings({ sidebarWidth: Math.round(aside.getBoundingClientRect().width) });
             });
+
+            // v3.13.97: real confusion this caused — Lyca had dragged the
+            // handle while testing the broken v3.13.94/95 drag, and that
+            // width stayed persisted; the NEXT launch (already on the
+            // fixed v3.13.96) restored it and started with <main> squeezed,
+            // reading as "the 2-column fix doesn't work" when it was
+            // actually working exactly as configured. Double-click resets
+            // back to the auto-grows-with-the-window default (clears the
+            // inline flex override AND the saved width) — no other reset
+            // affordance exists for this.
+            handle.addEventListener('dblclick', () => {
+                aside.style.flex = '';
+                api.saveSettings({ sidebarWidth: null });
+            });
         }
 
         // ===== TABS =====
