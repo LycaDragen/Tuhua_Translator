@@ -2911,21 +2911,30 @@
                 // Lyca's call after finding the card "muy amontonado": that
                 // trio duplicates what Configuración already shows for
                 // whichever profile is active.
+                // v3.13.93: Renombrar/Eliminar move off the button row and
+                // onto icon affordances (pencil by the title, trash pinned
+                // to the card's bottom-right corner) — Lyca's call, frees a
+                // whole button's worth of width for the 3 that stay
+                // (Vincular/Cambiar, VNDB, Duplicar). Card needs `relative`
+                // now so the trash icon has something to anchor `absolute`
+                // against; bottom padding grows a touch so it doesn't sit
+                // flush against the badges row above it.
                 return `
-                <div class="p-2.5 rounded-lg ${bgClass} border ${borderClass} ${cardCursor} transition flex gap-2 items-start"${cardOnClick}>
+                <div class="relative p-2.5 pb-6 rounded-lg ${bgClass} border ${borderClass} ${cardCursor} transition flex gap-2 items-center"${cardOnClick}>
                     ${coverUrl ? `<img src="${escapeHtml(coverUrl)}" loading="lazy" class="w-16 h-16 object-cover rounded flex-shrink-0 bg-gray-200 dark:bg-dark-700" title="${escapeHtml(profile.cover.vnTitle || '')}" onerror="this.style.display='none'">` : ''}
                     <div class="flex-1 min-w-0 space-y-1">
                         <div class="flex items-center gap-1.5 min-w-0">
                             ${isActive ? '<span class="w-2 h-2 rounded-full bg-emerald-500 pulse-dot flex-shrink-0"></span>' : ''}
                             <span class="text-sm font-medium truncate ${isActive ? 'text-emerald-700 dark:text-emerald-300' : ''}" title="${displayName}">${displayName}</span>
+                            <button onclick="event.stopPropagation(); renameProfile('${id}')" title="${escapeHtml(t.profile_rename || 'Renombrar')}" class="flex-shrink-0 p-0.5 text-gray-400 hover:text-emerald-600 dark:hover:text-emerald-400 rounded transition">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+                            </button>
                             ${isDefault ? `<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase flex-shrink-0">${escapeHtml(t.profile_default_name || 'Default')}</span>` : ''}
                         </div>
                         <div class="flex flex-wrap gap-1" onclick="event.stopPropagation()">
                             <button onclick="openGameProcessPicker({targetProfileId:'${id}'})" class="px-1.5 py-1 text-[10px] font-medium text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded transition" data-i18n="${profile.game ? 'game_relink_from_card_btn' : 'game_link_from_card_btn'}">${profile.game ? '🎮 Cambiar' : '🎮 Vincular'}</button>
                             <button onclick="openVndbImportModal('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition" data-i18n="glossary_vndb_import_short">📖 VNDB</button>
                             <button onclick="duplicateProfile('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
-                            <button onclick="renameProfile('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
-                            ${!isDefault ? `<button onclick="deleteProfile('${id}')" class="px-1.5 py-1 text-[10px] font-medium text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition" data-i18n="profile_delete">Eliminar</button>` : ''}
                         </div>
                         <div class="flex flex-wrap items-center gap-1.5 text-[10px] text-gray-400">
                             ${gameLabel ? `<span class="bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded truncate max-w-[140px]" title="${escapeHtml(profile.game.exePath || '')}">🎮 ${escapeHtml(gameLabel)}</span>` : ''}
@@ -2933,6 +2942,9 @@
                             ${savedDate ? `<span>${savedDate}</span>` : ''}
                         </div>
                     </div>
+                    ${!isDefault ? `<button onclick="event.stopPropagation(); deleteProfile('${id}')" title="${escapeHtml(t.profile_delete || 'Eliminar')}" class="absolute bottom-1.5 right-1.5 p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    </button>` : ''}
                 </div>`;
             }).join('');
 
