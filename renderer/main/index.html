@@ -86,10 +86,24 @@
            normal, unsqueezed width; 1 once dragging the sidebar
            (setupSidebarResize() in renderer.js) has pushed main down near
            its floor. container-type on <main> itself (not a wrapper) since
-           its width is exactly the signal that changes during the drag. */
+           its width is exactly the signal that changes during the drag.
+           v3.13.99: 400px was measured against an ESTIMATE of the content's
+           real minimum, not the actual number — found live (WSL, emulated
+           viewports + checking scrollWidth>clientWidth on each row) that
+           2-column content genuinely stops fitting only around 384-386px,
+           leaving just ~3px of margin against the app's own enforced
+           800px-outer-window floor (#app-sidebar's min-w-[380px] +
+           #sidebar-resize-handle's 8px already claim 388px of that before
+           <main> sees a pixel — a few px of native Windows title-bar/
+           border chrome subtracted from content area, which this WSL test
+           bed has ~none of, was enough to tip main under 400 and never
+           show 2 columns at all). Padding trimmed on the shortcuts card
+           itself (its own comment) moved the true break point from ~397
+           to ~386; this threshold sits 4px above THAT verified number,
+           not a guess. */
         main { container-type: inline-size; }
         #shortcuts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        @container (max-width: 400px) {
+        @container (max-width: 390px) {
             #shortcuts-grid { grid-template-columns: 1fr; }
         }
 
@@ -1004,10 +1018,20 @@
                      @container rule in the <style> block up top, keyed off
                      <main>'s own inline-size. grid-template-columns lives
                      entirely in that CSS (no Tailwind grid-cols-* utility
-                     here) so the two don't fight over specificity. -->
-                <div class="mt-6 bg-white dark:bg-dark-800 p-4 rounded-xl border border-gray-200 dark:border-dark-700 text-left">
+                     here) so the two don't fight over specificity.
+                     v3.13.99: p-4->p-3 and gap-x-4->gap-x-3 — found live
+                     that at <main>'s real floor (the app's own enforced
+                     800px minWidth, sidebar undragged) the 2-column layout
+                     was only ~3px from genuinely overflowing, well within
+                     what a native Windows title bar/border eats out of the
+                     content area vs. this WSL test bed's near-zero chrome
+                     — see the @container comment for the actual measured
+                     numbers. Trimming this padding buys real margin
+                     instead of shaving the threshold closer to a breakage
+                     point that already had none. -->
+                <div class="mt-6 bg-white dark:bg-dark-800 p-3 rounded-xl border border-gray-200 dark:border-dark-700 text-left">
                     <span class="text-[10px] font-bold text-gray-400 uppercase">Shortcuts</span>
-                    <div id="shortcuts-grid" class="grid gap-x-4 gap-y-1 mt-2 text-[10px]">
+                    <div id="shortcuts-grid" class="grid gap-x-3 gap-y-1 mt-2 text-[10px]">
                         <div class="flex justify-between"><span class="text-gray-500">Main Window</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+L</kbd></div>
                         <div class="flex justify-between"><span class="text-gray-500">Overlays</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+E</kbd></div>
                         <div class="flex justify-between"><span class="text-gray-500">Click-Through</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+M</kbd></div>
