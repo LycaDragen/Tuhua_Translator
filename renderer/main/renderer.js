@@ -3124,9 +3124,24 @@
         }
 
         // ===== GUIDE MODAL =====
+        // v3.13.90 (Fase E follow-up, pedido de Lyca): 4 pestañas, una por
+        // método de entrada — opens on whichever tab matches the input
+        // method currently selected in the sidebar, so the guide is
+        // immediately relevant instead of always defaulting to Textractor.
+        const GUIDE_TABS = ['textractor', 'clipboard', 'ocr', 'xuat'];
+
+        function switchGuideTab(name) {
+            for (const tab of GUIDE_TABS) {
+                const active = tab === name;
+                document.getElementById('guide-panel-' + tab).classList.toggle('hidden', !active);
+                document.getElementById('guide-tab-btn-' + tab).classList.toggle('guide-tab-active', active);
+            }
+        }
+
         function toggleGuide(show) {
             const modal = document.getElementById('guide-modal');
             if (show) {
+                switchGuideTab(GUIDE_TABS.includes(currentInputMethod) ? currentInputMethod : 'textractor');
                 modal.classList.remove('hidden');
                 setTimeout(() => modal.style.opacity = '1', 10);
             } else {
