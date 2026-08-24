@@ -10,7 +10,7 @@ const axios = require('axios');
 const { exec } = require('child_process');
 const { parseProcessListJson } = require('../services/game-process-list');
 const { inspectGame } = require('../services/game-inspect');
-const { buildGameRecord, matchRunningProcesses, normalizeExePath } = require('../services/game-identity');
+const { buildGameRecord, matchRunningProcesses, normalizeExePath, compareTitles } = require('../services/game-identity');
 const { runAutoDetectAndPersist } = require('../services/textractor-path-detect');
 
 const XuatInstaller = require('../services/xuat-installer');
@@ -718,6 +718,35 @@ class IpcHandlers {
       const game = buildGameRecord(proc, inspection);
       this.profileStore.update(profileId, () => ({ game }));
       return { success: true, game, previousGame };
+    });
+
+    // v3.13.87 (Fase D, D.1 branch b): "is there a game-less profile
+    // whose VNDB cover title matches this running process's window
+    // title?" — needed by the picker's destination screen at pick time,
+    // computed here (not in the renderer) because compareTitles() lives
+    // in game-identity.js, which a sandboxed renderer/preload can't
+    // require() directly (same reason getLlmProviders/getPromptPresets
+    // are invokes and not a require() from main-preload.js). Excludes
+    // excludeProfileId (the active profile, already offered as option
+    // (a) by the caller) and any profile that already has a `game` —
+    // only a profile actually waiting to be linked is a valid candidate.
+    // More than one match is treated as no match — same "don't guess"
+    // reasoning as the suggestion/ambiguous paths in scan-known-games:
+    // two mutually exclusive proposals is worse than none.
+    ipcMain.handle('find-profile-by-title', (event, { windowTitle, excludeProfileId } = {}) => {
+      if (typeof windowTitle !== 'string' || !windowTitle) {
+        return { success: true, match: null };
+      }
+      const candidates = this.profileStore.list().filter((p) =>
+        p.id !== excludeProfileId && !p.game && p.cover && p.cover.vnTitle &&
+        compareTitles(p.cover.vnTitle, windowTitle) !== null
+      );
+      if (candidates.length !== 1) {
+        return { success: true, match: null };
+      }
+      const profile = candidates[0];
+      const matchKind = compareTitles(profile.cover.vnTitle, windowTitle);
+      return { success: true, match: { profileId: profile.id, profileName: profile.name, matchKind } };
     });
 
     // v3.13.85 (auto-configuración de juegos, Fase B): matches currently
@@ -2568,7 +2597,7 @@ class IpcHandlers {
       'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-status',
       'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
-      'list-game-processes', 'inspect-game', 'set-profile-game', 'scan-known-games', 'get-textractor-auto-detect-result',
+      'list-game-processes', 'inspect-game', 'set-profile-game', 'find-profile-by-title', 'scan-known-games', 'get-textractor-auto-detect-result',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',

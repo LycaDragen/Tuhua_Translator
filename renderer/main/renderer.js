@@ -2358,7 +2358,14 @@
         // explains that up front (message + a per-target confirmation
         // line) so the user knows what to expect before importing —
         // there's no way to redirect the import to Global from this UI.
-        async function openVndbImportModal(profileId) {
+        // v3.13.87 (Fase D, D.2): {seedQuery, pendingGame, forceNewProfile}
+        // — the encadenado from the picker's destination screen's option
+        // (c) "Crear un perfil para este juego". `pendingGame` is the
+        // process {pid, name, windowTitle, exePath} the picker resolved;
+        // it rides along through the whole modal (cleared on close/back,
+        // see below) so the eventual import — or the "[Crear sin VNDB]"
+        // escape hatch — can call set-profile-game with it (D.3).
+        async function openVndbImportModal(profileId, options = {}) {
             const t = translations[currentLang] || translations['en'];
             const targetProfile = profileList.find(p => p.id === profileId);
             if (!targetProfile) {
@@ -2366,6 +2373,7 @@
                 return;
             }
             const profileName = displayProfileName(targetProfile, t);
+            const { seedQuery = '', pendingGame = null, forceNewProfile = false } = options;
 
             const overlay = document.createElement('div');
             overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
@@ -2380,6 +2388,7 @@
                         <input type="text" id="vndb-search-input" class="flex-1 p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs" placeholder="${escapeHtml(t.vndb_search_placeholder || '')}">
                         <button data-action="search" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-md transition">${escapeHtml(t.vndb_search_button || 'Search')}</button>
                     </div>
+                    ${pendingGame ? `<button data-action="create-without-vndb" class="text-[10px] text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 underline text-left">${escapeHtml(t.vndb_create_without_vndb_btn || 'VNDB no tiene este juego — crear el perfil sin importar')}</button>` : ''}
                     <div id="vndb-results" class="flex-1 overflow-y-auto scrollbar-thin space-y-1.5 min-h-[80px]"></div>
                 </div>`;
             document.body.appendChild(overlay);
@@ -2390,6 +2399,61 @@
 
             const input = overlay.querySelector('#vndb-search-input');
             const resultsEl = overlay.querySelector('#vndb-results');
+
+            // v3.13.87 (Fase D, D.3 step 6): #game-pid was already filled
+            // by the picker's row click (openGameProcessPicker) before
+            // this modal ever opened — this just makes the launcher/
+            // advisory pipeline react to it now that the game is actually
+            // linked to a profile, same as _confirmGameLinkDestination
+            // does for the picker's own options (a)/(b). No-op when this
+            // modal was opened the normal way (no pendingGame).
+            function _applyPendingGameEffects() {
+                if (!pendingGame) return;
+                const pidField = document.getElementById('game-pid');
+                if (pidField) pidField.value = pendingGame.pid;
+                const nameEl = document.getElementById('game-pid-selected-name');
+                if (nameEl) {
+                    nameEl.textContent = '🎮 ' + (pendingGame.name || '');
+                    nameEl.classList.remove('hidden');
+                }
+                gameExePathHint = pendingGame.exePath || null;
+                checkGamePidVsAttached();
+                maybeAutoLaunchTextractor();
+            }
+
+            // v3.13.87 (Fase D, D.2): the escape hatch for games VNDB
+            // doesn't catalog (indies, doujin) — same sequence as the
+            // normal "save to a new profile" import path minus the VNDB
+            // call itself: create + switch + link, no glossary.
+            const createWithoutVndbBtn = overlay.querySelector('[data-action="create-without-vndb"]');
+            if (createWithoutVndbBtn) {
+                createWithoutVndbBtn.onclick = async () => {
+                    if (!pendingGame) return;
+                    resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_creating_profile || 'Creating profile...')}</p>`;
+                    const newName = _cleanDisplayTitle(pendingGame.windowTitle) || pendingGame.name || 'Game';
+                    const createResult = await api.createProfile({ name: newName });
+                    if (!createResult.success) {
+                        showToast(createResult.error);
+                        closeModal();
+                        return;
+                    }
+                    const newProfileId = createResult.profile.id;
+                    await loadProfile(newProfileId);
+                    let linkResult;
+                    try {
+                        linkResult = await api.setProfileGame({ profileId: newProfileId, process: pendingGame });
+                    } catch (e) {
+                        linkResult = { success: false, error: e.message };
+                    }
+                    if (linkResult && linkResult.success && linkResult.game.engine) {
+                        _lastEngineAdvice = { ...linkResult.game.engine, source: 'profile' };
+                        renderEngineAdvice();
+                    }
+                    _applyPendingGameEffects();
+                    await loadProfiles();
+                    closeModal();
+                };
+            }
 
             // v3.13.41: cover thumbnail (VNDB's `image.url`, added in
             // vndb.js) next to each result — a bare title list made it
@@ -2438,10 +2502,10 @@
                             ${escapeHtml(t.vndb_include_characters || 'Include characters')}
                         </label>
                         <label class="flex items-center gap-2 text-[10px] text-gray-500 dark:text-gray-400 pt-1 border-t border-gray-200 dark:border-dark-600">
-                            <input type="checkbox" id="vndb-new-profile" class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
+                            <input type="checkbox" id="vndb-new-profile" ${forceNewProfile ? 'checked disabled' : ''} ${forceNewProfile ? `title="${escapeHtml(t.vndb_new_profile_locked_hint || 'No se puede destildar: veniste desde «Crear un perfil para este juego»')}"` : ''} class="rounded border-gray-300 dark:border-dark-600 text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5">
                             ${escapeHtml(t.vndb_new_profile_toggle || 'Save to a new profile')}
                         </label>
-                        <div id="vndb-new-profile-wrap" class="hidden">
+                        <div id="vndb-new-profile-wrap" class="${forceNewProfile ? '' : 'hidden'}">
                             <input type="text" id="vndb-new-profile-name" value="${escapeHtml(vn.title)}" class="w-full p-1.5 rounded-md bg-white dark:bg-dark-800 border border-gray-300 dark:border-dark-600 text-xs" placeholder="${escapeHtml(t.vndb_new_profile_name_placeholder || 'New profile name')}">
                         </div>
                         <p id="vndb-target-line" class="text-[9px] font-medium text-emerald-600 dark:text-emerald-400"></p>
@@ -2463,12 +2527,20 @@
                 const targetLine = resultsEl.querySelector('#vndb-target-line');
 
                 function updateTargetLine() {
+                    let line;
                     if (newProfileCheckbox.checked) {
                         const name = newProfileNameInput.value.trim() || vn.title;
-                        targetLine.textContent = (t.vndb_import_target_new_profile || 'A new profile will be created and activated: {profile}').replace('{profile}', name);
+                        line = (t.vndb_import_target_new_profile || 'A new profile will be created and activated: {profile}').replace('{profile}', name);
                     } else {
-                        targetLine.textContent = (t.vndb_import_target || 'Will be imported into: {profile}').replace('{profile}', profileName);
+                        line = (t.vndb_import_target || 'Will be imported into: {profile}').replace('{profile}', profileName);
                     }
+                    // v3.13.87 (Fase D, D.2): chained from the picker —
+                    // make the game link explicit too, not just the VNDB
+                    // import destination.
+                    if (pendingGame) {
+                        line += ' ' + (t.vndb_target_with_game || '🎮 {game} quedará vinculado a este perfil.').replace('{game}', pendingGame.name || pendingGame.windowTitle || '');
+                    }
+                    targetLine.textContent = line;
                 }
                 newProfileCheckbox.onchange = () => {
                     newProfileWrap.classList.toggle('hidden', !newProfileCheckbox.checked);
@@ -2499,6 +2571,29 @@
                         // settings panels, glossary/history all end up
                         // consistent, not just a local variable flip.
                         await loadProfile(targetProfileId);
+                    }
+
+                    // v3.13.87 (Fase D, D.3 step 3): BEFORE the VNDB import
+                    // (network, can fail/rate-limit) — if it does, the
+                    // profile still ends up linked to the game, the more
+                    // valuable half. set-profile-game is local and can't
+                    // fail on network grounds.
+                    if (pendingGame) {
+                        let linkResult;
+                        try {
+                            linkResult = await api.setProfileGame({ profileId: targetProfileId, process: pendingGame });
+                        } catch (e) {
+                            linkResult = { success: false, error: e.message };
+                        }
+                        if (linkResult && linkResult.success && linkResult.game.engine) {
+                            _lastEngineAdvice = { ...linkResult.game.engine, source: 'profile' };
+                            renderEngineAdvice();
+                        }
+                        // v3.13.87 (Fase D, D.3 step 6): fires regardless of
+                        // whether the VNDB import below succeeds — the link
+                        // itself just happened, Textractor should react to
+                        // it either way.
+                        _applyPendingGameEffects();
                     }
 
                     resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_importing || 'Importing...')}</p>`;
@@ -2570,6 +2665,14 @@
                 clearTimeout(searchDebounce);
                 searchDebounce = setTimeout(runSearch, 400);
             });
+            // v3.13.87 (Fase D, D.2): seedQuery from the picker's
+            // destination screen — pre-fill and search immediately instead
+            // of leaving an empty box the user has to re-type the title
+            // into.
+            if (seedQuery) {
+                input.value = seedQuery;
+                runSearch();
+            }
             input.focus();
         }
 
@@ -2806,6 +2909,7 @@
                             ${isDefault ? `<span class="text-[8px] bg-gray-200 dark:bg-dark-600 text-gray-500 dark:text-gray-400 px-1 py-0.5 rounded font-bold uppercase flex-shrink-0">${escapeHtml(t.profile_default_name || 'Default')}</span>` : ''}
                         </div>
                         <div class="flex flex-wrap gap-1" onclick="event.stopPropagation()">
+                            ${!profile.game ? `<button onclick="openGameProcessPicker({targetProfileId:'${id}'})" class="px-2 py-1 text-[10px] font-medium text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 rounded transition" data-i18n="game_link_from_card_btn">🎮 Vincular juego</button>` : ''}
                             <button onclick="openVndbImportModal('${id}')" class="px-2 py-1 text-[10px] font-medium text-purple-600 hover:bg-purple-50 dark:hover:bg-purple-900/20 rounded transition" data-i18n="glossary_vndb_import">Importar de VNDB</button>
                             <button onclick="duplicateProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded transition" data-i18n="profile_duplicate">Duplicar</button>
                             <button onclick="renameProfile('${id}')" class="px-2 py-1 text-[10px] font-medium text-gray-500 hover:bg-gray-100 dark:hover:bg-dark-700 rounded transition" data-i18n="profile_rename">Renombrar</button>
@@ -3336,7 +3440,15 @@
         // you already launched — but list-game-processes' own icon lookups
         // ARE cached now (server-side, see _gameProcessIconCache in
         // ipc-handlers.js), so repeat opens are faster than the first one.
-        async function openGameProcessPicker() {
+        // v3.13.87 (Fase D): {targetProfileId} — called from a specific
+        // profile's card (openGameProcessPicker's reverse direction, "🎮
+        // Vincular juego" in renderProfiles). When present, the picker
+        // skips ALL decision logic below (destination screen included):
+        // it writes directly to THAT profile and never touches
+        // activeProfileId, #game-pid, or gameExePathHint — same contract
+        // the card's own VNDB-import button already has (doesn't switch
+        // profile, just writes + re-renders).
+        async function openGameProcessPicker(options = {}) {
             const t = translations[currentLang] || translations['en'];
 
             const overlay = document.createElement('div');
@@ -3358,9 +3470,37 @@
             overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
 
             const resultsEl = overlay.querySelector('#game-process-results');
-            resultsEl.addEventListener('click', (e) => {
+            resultsEl.addEventListener('click', async (e) => {
                 const option = e.target.closest('.game-process-option');
                 if (!option) return;
+                const process = {
+                    pid: parseInt(option.dataset.pid, 10),
+                    name: option.dataset.name || '',
+                    windowTitle: option.dataset.windowTitle || option.dataset.name || '',
+                    exePath: option.dataset.exePath || ''
+                };
+
+                // v3.13.87 (Fase D): the reverse-direction path — writes
+                // straight to targetProfileId, no PID field, no decision
+                // table. See this function's own doc comment above.
+                if (options.targetProfileId) {
+                    closeModal();
+                    let result;
+                    try {
+                        result = await api.setProfileGame({ profileId: options.targetProfileId, process });
+                    } catch (err) {
+                        result = { success: false, error: err.message };
+                    }
+                    if (result && result.success) {
+                        await loadProfiles();
+                    } else if (result && result.error === 'game-owned-by-other-profile') {
+                        showToast((t.game_owned_by_other_profile || 'Ese juego ya está vinculado al perfil «{profile}».').replace('{profile}', result.profileName || ''));
+                    } else if (result) {
+                        showToast(result.error || (t.game_link_error || 'No se pudo vincular el juego.'));
+                    }
+                    return;
+                }
+
                 document.getElementById('game-pid').value = option.dataset.pid;
                 const nameEl = document.getElementById('game-pid-selected-name');
                 if (nameEl) {
@@ -3378,19 +3518,47 @@
                 // game-engine advisory already pays for.
                 gameExePathHint = option.dataset.exePath || null;
                 checkGamePidVsAttached();
+
+                // v3.13.87 (Fase D): the ONE branch of the old A.4 decision
+                // table that changes — an active profile with no `game`
+                // yet no longer auto-writes straight away. It gets a
+                // destination screen instead (this picker's own puerta de
+                // entrada al camino VNDB). Every other branch (already
+                // linked to this exact exe, exe owned by a DIFFERENT
+                // profile, active profile linked to a DIFFERENT exe)
+                // keeps going through handlePickedProcessForGameLink()
+                // completely unchanged.
+                //
+                // Real bug caught in review before this ever shipped: the
+                // "owned by another profile" check has to run BEFORE
+                // deciding to show the destination screen, not after —
+                // an active profile with no game yet doesn't mean this
+                // exe is free, it can still belong to a different
+                // profile's existing link. Re-derives the exact same
+                // check handlePickedProcessForGameLink does (duplicated,
+                // not extracted, to keep that function's own decision
+                // table untouched and easy to diff against A.4) purely to
+                // decide WHICH path to take; the real write still only
+                // ever happens inside handlePickedProcessForGameLink or
+                // renderGameLinkDestination, never here.
+                const activeProfile = profileList.find((p) => p.id === activeProfileId);
+                const pickTargetPathNorm = _normalizeExePathForCompare(process.exePath);
+                const pickOwnedByOther = activeProfile && profileList.find((p) =>
+                    p.id !== activeProfileId && p.game && _normalizeExePathForCompare(p.game.exePath) === pickTargetPathNorm
+                );
+                if (activeProfile && !activeProfile.game && !pickOwnedByOther) {
+                    renderGameLinkDestination(resultsEl, process, activeProfile, closeModal);
+                    return;
+                }
+
                 closeModal();
                 // v3.13.85 (Fase A.4/B): the picker's own click is the
-                // explicit user action — decides whether to auto-write this
-                // process as the active profile's game link, ask to
-                // re-point it, or suggest a different profile that already
-                // claims this exe. See handlePickedProcessForGameLink's own
-                // doc comment for the full decision table.
-                handlePickedProcessForGameLink({
-                    pid: parseInt(option.dataset.pid, 10),
-                    name: option.dataset.name || '',
-                    windowTitle: option.dataset.windowTitle || option.dataset.name || '',
-                    exePath: option.dataset.exePath || ''
-                });
+                // explicit user action — decides whether to ask to
+                // re-point the active profile's link, or suggest a
+                // different profile that already claims this exe. See
+                // handlePickedProcessForGameLink's own doc comment for the
+                // full decision table.
+                handlePickedProcessForGameLink(process);
             });
 
             let result;
@@ -3426,6 +3594,147 @@
                     </div>
                 </div>`;
             }).join('');
+        }
+
+        // v3.13.87 (Fase D): sibling of game-identity.js's cleanDisplayTitle —
+        // duplicated rather than round-tripped over IPC because it's a pure
+        // string transform over data the renderer already has
+        // (process.windowTitle from list-game-processes), with no
+        // dependency on profileStore or any other main-process-only state
+        // (unlike compareTitles, which needs profile data and DOES go
+        // through find-profile-by-title below). Keep in sync with the
+        // canonical version's TITLE_NOISE_RE/TITLE_SEPARATOR_RE if either
+        // changes — same regexes, copied verbatim.
+        function _cleanDisplayTitle(title) {
+            if (typeof title !== 'string' || !title) return '';
+            let s = title.normalize('NFKC');
+            s = s.replace(/[\[（(【][^\]）)】]*[\]）)】]\s*$/g, '');
+            s = s.replace(/\b(x64|x86|win32|win64|directx\s?\d*|direct3d\s?\d*|opengl|vulkan|steam|v?\d+(\.\d+)+|demo|trial|paused|not responding)\b/gi, ' ');
+            const sepMatch = s.match(/\s[-–—|:]\s/);
+            if (sepMatch) s = s.slice(0, sepMatch.index);
+            // v3.13.87 (Fase D follow-up): itch.io convention, "{Title} by
+            // {Creator}" — see the canonical version's own comment in
+            // game-identity.js for the real case that surfaced this
+            // ("Lust Shards by MindOfFur" searching VNDB with the whole
+            // string attached).
+            const byMatch = s.match(/\s+by\s+\S/i);
+            if (byMatch) s = s.slice(0, byMatch.index);
+            // v3.13.87 (Fase D follow-up): "Chapter"/"Episode" + a number
+            // is a release marker, not part of the canonical title — see
+            // the canonical version's own comment in game-identity.js
+            // (real case: "Lust Shards Chapter 1" should name the profile
+            // "Lust Shards"). Deliberately NOT "Vol"/"Volume" — that's the
+            // full canonical title for franchises like Nekopara, never a
+            // suffix to strip.
+            const chapterMatch = s.match(/\s+(chapter|episode)\s*\d+\b/i);
+            if (chapterMatch) s = s.slice(0, chapterMatch.index);
+            return s.replace(/\s+/g, ' ').trim();
+        }
+
+        // v3.13.87 (Fase D, D.1): the destination screen — replaces the
+        // old silent auto-write for an active profile with no `game` yet.
+        // Same renderVndbResults -> renderVndbDetail in-place-swap pattern
+        // the VNDB modal already uses (no new overlay).
+        async function renderGameLinkDestination(resultsEl, process, activeProfile, closeModal) {
+            const t = translations[currentLang] || translations['en'];
+            resultsEl.innerHTML = `<div class="p-3 text-[10px] text-gray-400 text-center">${escapeHtml(t.game_pid_picker_loading || 'Buscando procesos…')}</div>`;
+
+            let matchResult;
+            try {
+                matchResult = await api.findProfileByTitle({ windowTitle: process.windowTitle, excludeProfileId: activeProfile.id });
+            } catch (e) {
+                matchResult = { success: false };
+            }
+            // The picker may have been closed while this awaited.
+            if (!resultsEl.isConnected) return;
+
+            const match = (matchResult && matchResult.success) ? matchResult.match : null;
+            const preselectMatched = !!(match && match.matchKind === 'exact');
+            const activeName = displayProfileName(activeProfile, t);
+            const selectedCls = 'border-emerald-400 dark:border-emerald-500 bg-emerald-50 dark:bg-emerald-900/10';
+            const unselectedCls = 'border-gray-200 dark:border-dark-600';
+
+            resultsEl.innerHTML = `
+                <div class="space-y-1.5">
+                    <p class="text-[10px] font-medium text-gray-500 dark:text-gray-400 px-0.5">${escapeHtml((t.game_link_destination_title || 'Vincular «{game}»').replace('{game}', process.windowTitle || process.name))}</p>
+                    <button data-dest="active" class="w-full text-left p-2.5 rounded-md border ${preselectMatched ? unselectedCls : selectedCls} hover:border-emerald-400 dark:hover:border-emerald-500 transition text-xs">
+                        <span class="font-medium text-gray-700 dark:text-gray-200">${escapeHtml((t.game_link_dest_current_profile || 'Vincular al perfil actual: «{profile}»').replace('{profile}', activeName))}</span>
+                    </button>
+                    ${match ? `
+                    <button data-dest="matched" class="w-full text-left p-2.5 rounded-md border ${preselectMatched ? selectedCls : unselectedCls} hover:border-emerald-400 dark:hover:border-emerald-500 transition text-xs">
+                        <span class="font-medium text-gray-700 dark:text-gray-200">${escapeHtml((t.game_link_dest_matched_profile || 'Vincular al perfil «{profile}»').replace('{profile}', match.profileName))}</span>
+                    </button>` : ''}
+                    <button data-dest="new" class="w-full text-left p-2.5 rounded-md border ${unselectedCls} hover:border-emerald-400 dark:hover:border-emerald-500 transition text-xs">
+                        <span class="font-medium text-gray-700 dark:text-gray-200">${escapeHtml(t.game_link_dest_create_new || 'Crear un perfil para este juego')}</span>
+                    </button>
+                    <p id="game-link-dest-engine-line" class="text-[9px] text-amber-600 dark:text-amber-400 px-0.5 pt-1"></p>
+                </div>`;
+
+            resultsEl.querySelector('[data-dest="active"]').onclick = () => _confirmGameLinkDestination(activeProfile.id, process, closeModal);
+            if (match) {
+                resultsEl.querySelector('[data-dest="matched"]').onclick = () => _confirmGameLinkDestination(match.profileId, process, closeModal);
+            }
+            resultsEl.querySelector('[data-dest="new"]').onclick = () => {
+                closeModal();
+                openVndbImportModal(activeProfile.id, {
+                    seedQuery: _cleanDisplayTitle(process.windowTitle),
+                    pendingGame: process,
+                    forceNewProfile: true
+                });
+            };
+
+            // Engine advisory line — informational only here (D.3's step 6
+            // wires the actual persistent advice box once a profile
+            // actually owns this link). Fetched after the first paint,
+            // same "don't block on it" reasoning openVndbImportModal's own
+            // async calls already document.
+            const engineLine = resultsEl.querySelector('#game-link-dest-engine-line');
+            api.inspectGame(process.exePath).then((r) => {
+                if (!engineLine || !engineLine.isConnected) return;
+                if (!r || !r.success || !r.engine || !r.engine.adviceKey) return;
+                const template = t[r.engine.adviceKey];
+                if (!template) return;
+                engineLine.textContent = template.replace('{engine}', r.engine.engineLabel || r.engine.engine || '');
+            }).catch(() => {});
+        }
+
+        // v3.13.87 (Fase D): shared confirm for the destination screen's
+        // (a)/(b) options — (c) "crear perfil" has its own path straight
+        // into openVndbImportModal (D.2/D.3), no set-profile-game call
+        // here since that happens inside the VNDB modal's own import
+        // handler.
+        async function _confirmGameLinkDestination(profileId, process, closeModal) {
+            closeModal();
+            let result;
+            try {
+                result = await api.setProfileGame({ profileId, process });
+            } catch (e) {
+                result = { success: false, error: e.message };
+            }
+            const t = translations[currentLang] || translations['en'];
+            if (!result || !result.success) {
+                const msg = result && result.error === 'game-owned-by-other-profile'
+                    ? (t.game_owned_by_other_profile || 'Ese juego ya está vinculado al perfil «{profile}».').replace('{profile}', result.profileName || '')
+                    : (t.game_link_error || 'No se pudo vincular el juego.');
+                showToast(msg);
+                return;
+            }
+            // Only the active-profile path (a) gets the "Deshacer" strip —
+            // same reasoning as A.4: it's the one case that matches
+            // today's existing recovery mechanism 1:1. Linking a
+            // DIFFERENT (non-active) profile via (b) writes + re-renders
+            // without switching to it, same contract as D.4's card button
+            // — an undo strip that only shows while VIEWING the active
+            // profile wouldn't even be visible for that case.
+            if (profileId === activeProfileId) {
+                const profile = profileList.find((p) => p.id === activeProfileId);
+                _lastGameLinkUndo = { profileId: activeProfileId, exeName: result.game.exeName, profileName: profile ? profile.name : '', windowTitle: result.game.windowTitle || '' };
+                if (result.game.engine) {
+                    _lastEngineAdvice = { ...result.game.engine, source: 'profile' };
+                    renderEngineAdvice();
+                }
+            }
+            await loadProfiles();
         }
 
         // v3.13.8x, second pass: real gap Lyca hit — gamePid is
@@ -3681,11 +3990,30 @@
                 _lastEngineAdvice = { ...resolved.engine, source: 'profile' };
                 renderEngineAdvice();
             }
-            maybeAutoLaunchTextractor();
+            // v3.13.87 (Fase D follow-up): real UX bug Lyca caught testing
+            // a Ren'Py game — this used to unconditionally call
+            // maybeAutoLaunchTextractor() and say "PID {pid} conectado"
+            // regardless of the engine. For a game we ALREADY know
+            // Textractor can't read (textractorWorks===false, cached on
+            // profile.game.engine since Fase A/C), that's actively
+            // misleading: "conectado" implies it's working, when in
+            // Textractor mode this would instead spend the full 60s
+            // arch-fallback cycle failing silently in the background (the
+            // exact "NO REAL HOOK EVER APPEARED" dead end Ren'Py always
+            // hits). Skip the launch attempt entirely and say so plainly
+            // instead — the engine advisory box (just rendered above)
+            // already tells the user what TO use.
+            const knownIncompatible = resolved.engine && resolved.engine.textractorWorks === false;
+            if (!knownIncompatible) {
+                maybeAutoLaunchTextractor();
+            }
             if (_lastGameAutoResolvedPid !== resolved.pid) {
                 _lastGameAutoResolvedPid = resolved.pid;
                 const t = translations[currentLang] || translations['en'];
-                showToast((t.game_auto_resolved || '🎮 Encontré tu juego — PID {pid} conectado').replace('{pid}', resolved.pid));
+                const template = knownIncompatible
+                    ? (t.game_auto_resolved_incompatible || '🎮 Encontré tu juego — PID {pid}, pero Textractor no puede leerlo (mirá el aviso de arriba)')
+                    : (t.game_auto_resolved || '🎮 Encontré tu juego — PID {pid} conectado');
+                showToast(template.replace('{pid}', resolved.pid));
             }
         }
 
@@ -3765,6 +4093,19 @@
                 await api.setProfileGame({ profileId, process: null });
             } catch (e) { /* best-effort — nada crítico que reportar */ }
             await loadProfiles();
+        }
+
+        // v3.13.87 (Fase D): the "Buscar en VNDB" follow-up next to
+        // Deshacer — (a) "Vincular al perfil actual" links instantly with
+        // no VNDB detour (same as A.4 always did), but the game is
+        // already linked at this point, so there's no `pendingGame`/
+        // `forceNewProfile` to thread through: just seed the search with
+        // the game's own title and let the user import (or not) like any
+        // other profile's "Importar de VNDB" button.
+        function _searchVndbFromUndo() {
+            if (!_lastGameLinkUndo) return;
+            const { profileId, windowTitle } = _lastGameLinkUndo;
+            openVndbImportModal(profileId, { seedQuery: _cleanDisplayTitle(windowTitle) });
         }
 
         // Pinta las dos banners de acción (confirmación de re-vínculo,
@@ -3904,7 +4245,7 @@
                     result = { success: false, error: e.message };
                 }
                 if (!result || !result.success) return;
-                _lastGameLinkUndo = { profileId: activeProfileId, exeName: result.game.exeName, profileName: profile.name };
+                _lastGameLinkUndo = { profileId: activeProfileId, exeName: result.game.exeName, profileName: profile.name, windowTitle: result.game.windowTitle || '' };
                 if (result.game.engine) {
                     _lastEngineAdvice = { ...result.game.engine, source: 'profile' };
                     renderEngineAdvice();

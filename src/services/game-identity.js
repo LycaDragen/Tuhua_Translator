@@ -330,6 +330,64 @@ function compareTitles(a, b) {
   return shorter.length >= minLen ? 'prefix' : null;
 }
 
+/**
+ * v3.13.87 (Fase D): sibling to normalizeTitle(), for the ONE place a
+ * title needs to survive being shown to the user or sent to an external
+ * search — the VNDB search seed and the "Crear sin VNDB" profile name.
+ * normalizeTitle() is comparison-only (lowercased, punctuation collapsed
+ * to spaces): fine for `===`/prefix checks, useless as a search query or
+ * a profile name — "nekopara vol 1" reads worse than "NEKOPARA Vol. 1"
+ * and searches worse too (confirmed against vndb.js's searchVN(): it
+ * forwards the query string as-is to VNDB's `search` filter with no
+ * noise-stripping of its own, so a raw windowTitle like "NEKOPARA Vol. 1
+ * — v1.03 [Steam]" would search VNDB with that whole suffix attached).
+ *
+ * Same runtime-noise stripping and separator cut as normalizeTitle(), but
+ * skips the NFKC-lowercase and the final collapse-to-alphanumeric step —
+ * casing and punctuation (periods, apostrophes) survive.
+ *
+ * @param {string} title
+ * @returns {string}
+ */
+// v3.13.87 (Fase D follow-up): itch.io-exported games (common for indie
+// Ren'Py/Godot titles — exactly the audience VNDB coverage is weakest
+// for) very often ship their window title as "{Title} by {Creator}",
+// copying the convention of the itch.io page itself. Confirmed real: a
+// window titled "Lust Shards by MindOfFur" searched VNDB with the whole
+// string attached and returned nothing until the "by MindOfFur" part was
+// deleted by hand. cleanDisplayTitle-only (NOT TITLE_SEPARATOR_RE, which
+// compareTitles/normalizeTitle also use) — this is a display/search-seed
+// heuristic, not an identity-matching rule, so it stays out of the
+// higher-stakes comparison path entirely.
+const TITLE_BY_AUTHOR_RE = /\s+by\s+\S/i;
+
+// v3.13.87 (Fase D follow-up): "Chapter"/"Episode" + a number is a
+// release marker, not part of the canonical title — same reasoning as
+// stripping version numbers, but "chapter"/"episode" aren't in
+// TITLE_NOISE_RE because that regex is shared with normalizeTitle()/
+// compareTitles(), where "Lust Shards" needs to keep matching "Lust
+// Shards Chapter 2" as the same game (it already does — the digit right
+// after "Chapter" doesn't trip the Steins;Gate-style sequel guard, since
+// that guard only fires on a digit immediately after the shared prefix,
+// not after a whole extra word). Deliberately does NOT include "Vol"/
+// "Volume": "NEKOPARA Vol. 1" is only ever the FULL canonical title for
+// that franchise, never a suffix to strip (see the bench case for it).
+const TITLE_CHAPTER_RE = /\s+(chapter|episode)\s*\d+\b/i;
+
+function cleanDisplayTitle(title) {
+  if (typeof title !== 'string' || !title) return '';
+  let s = title.normalize('NFKC');
+  s = s.replace(/[\[（(【][^\]）)】]*[\]）)】]\s*$/g, '');
+  s = s.replace(TITLE_NOISE_RE, ' ');
+  const sepMatch = s.match(TITLE_SEPARATOR_RE);
+  if (sepMatch) s = s.slice(0, sepMatch.index);
+  const byMatch = s.match(TITLE_BY_AUTHOR_RE);
+  if (byMatch) s = s.slice(0, byMatch.index);
+  const chapterMatch = s.match(TITLE_CHAPTER_RE);
+  if (chapterMatch) s = s.slice(0, chapterMatch.index);
+  return s.replace(/\s+/g, ' ').trim();
+}
+
 module.exports = {
   normalizeExePath,
   normalizeExeName,
@@ -337,5 +395,6 @@ module.exports = {
   buildGameRecord,
   matchRunningProcesses,
   normalizeTitle,
-  compareTitles
+  compareTitles,
+  cleanDisplayTitle
 };

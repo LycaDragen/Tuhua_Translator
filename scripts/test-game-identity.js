@@ -20,7 +20,8 @@ const {
   buildGameRecord,
   matchRunningProcesses,
   normalizeTitle,
-  compareTitles
+  compareTitles,
+  cleanDisplayTitle
 } = require(path.join('..', 'src', 'services', 'game-identity.js'));
 
 const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
@@ -281,6 +282,42 @@ check('compare-titles-cjk-prefix-shorter-threshold', () => {
   // CJK prefix is a much stronger signal than 3 Latin characters.
   const result = compareTitles('ネコぱら', 'ネコぱらVol.1');
   return { pass: result === 'prefix', actual: result };
+});
+
+// ─── cleanDisplayTitle (Fase D) ─────────────────────────────────────────
+check('clean-display-title-strips-noise-keeps-case-and-punctuation', () => {
+  // The load-bearing difference from normalizeTitle(): this is shown to
+  // the user (VNDB search seed, "Crear sin VNDB" profile name), so
+  // "NEKOPARA Vol. 1" must survive as itself, not become "nekopara vol 1".
+  const result = cleanDisplayTitle('NEKOPARA Vol. 1 — v1.03 [Steam]');
+  return { pass: result === 'NEKOPARA Vol. 1', actual: result };
+});
+check('clean-display-title-cuts-at-first-separator-preserving-case', () => {
+  const result = cleanDisplayTitle("Nekopara Vol. 1 - Chapter 3");
+  return { pass: result === 'Nekopara Vol. 1', actual: result };
+});
+check('clean-display-title-strips-itch-io-by-author-suffix', () => {
+  // Real bug found testing Fase D against a real itch.io/Ren'Py game:
+  // "Lust Shards by MindOfFur" searched VNDB with the whole string
+  // attached and returned nothing until "by MindOfFur" was deleted.
+  const result = cleanDisplayTitle('Lust Shards by MindOfFur');
+  return { pass: result === 'Lust Shards', actual: result };
+});
+check('clean-display-title-strips-chapter-suffix', () => {
+  // Real bug found testing Fase D's "Crear sin VNDB" path: the profile
+  // ended up named "Lust Shards Chapter 1" instead of "Lust Shards".
+  const result = cleanDisplayTitle('Lust Shards Chapter 1');
+  return { pass: result === 'Lust Shards', actual: result };
+});
+check('clean-display-title-keeps-vol-suffix-as-canonical-title', () => {
+  // The negative case that makes the chapter-strip safe: "Vol. 1" is
+  // never a release-marker suffix, it's the franchise's real title.
+  const result = cleanDisplayTitle('NEKOPARA Vol. 1');
+  return { pass: result === 'NEKOPARA Vol. 1', actual: result };
+});
+check('clean-display-title-empty-string-stays-empty', () => {
+  const result = cleanDisplayTitle('');
+  return { pass: result === '', actual: result };
 });
 
 function run() {

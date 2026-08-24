@@ -49,6 +49,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'list-game-processes',
   'inspect-game',
   'set-profile-game',
+  'find-profile-by-title',
   'scan-known-games',
   'get-textractor-auto-detect-result',
   'textractor-launch',
@@ -304,6 +305,11 @@ const api = {
   // v3.13.85 (Fase B): the only writer of profile.game — `process: null`
   // unlinks. See the handler's own doc comment in ipc-handlers.js.
   setProfileGame: (payload) => secureInvoke('set-profile-game', payload),
+  // v3.13.87 (Fase D, D.1 branch b): title-match lookup for the picker's
+  // destination screen — see the handler's own doc comment in
+  // ipc-handlers.js for why this can't just be a client-side
+  // compareTitles() call.
+  findProfileByTitle: (payload) => secureInvoke('find-profile-by-title', payload),
   // v3.13.85 (Fase B): matches running processes against every profile's
   // saved game link — see the handler's own doc comment.
   scanKnownGames: () => secureInvoke('scan-known-games'),

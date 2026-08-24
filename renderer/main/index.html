@@ -244,7 +244,17 @@
                          no game yet — reversible until the next repaint. -->
                     <div id="game-link-undo" class="hidden p-2 rounded-md bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-300 dark:border-emerald-800 flex items-center justify-between gap-2">
                         <span id="game-link-undo-text" class="text-[9px] text-emerald-700 dark:text-emerald-400"></span>
-                        <button type="button" onclick="undoGameLink()" class="shrink-0 text-[9px] font-bold text-emerald-700 dark:text-emerald-300 underline hover:no-underline" data-i18n="game_saved_undo">Deshacer</button>
+                        <span class="shrink-0 flex items-center gap-2">
+                            <!-- v3.13.87 (Fase D): optional, non-blocking —
+                                 (a) "Vincular al perfil actual" never forces
+                                 a VNDB screen (that's the whole point of
+                                 keeping it instant), but offers this as a
+                                 one-click follow-up right where the user is
+                                 already looking. Ignoring it (indie/doujin
+                                 games VNDB doesn't catalog) costs nothing. -->
+                            <button type="button" onclick="_searchVndbFromUndo()" class="text-[9px] font-bold text-emerald-700 dark:text-emerald-300 underline hover:no-underline" data-i18n="game_saved_search_vndb">Buscar en VNDB</button>
+                            <button type="button" onclick="undoGameLink()" class="text-[9px] font-bold text-emerald-700 dark:text-emerald-300 underline hover:no-underline" data-i18n="game_saved_undo">Deshacer</button>
+                        </span>
                     </div>
 
                     <!-- B.4: re-link confirmation — shared by "the saved
