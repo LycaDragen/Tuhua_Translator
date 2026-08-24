@@ -81,6 +81,18 @@
         .guide-tab-btn.guide-tab-active { color: #059669; border-color: #10b981; }
         .dark .guide-tab-btn.guide-tab-active { color: #34d399; }
 
+        /* v3.13.95: #shortcuts-grid responds to <main>'s own width (via a
+           CSS container query, not the viewport) — 2 columns at main's
+           normal, unsqueezed width; 1 once dragging the sidebar
+           (setupSidebarResize() in renderer.js) has pushed main down near
+           its floor. container-type on <main> itself (not a wrapper) since
+           its width is exactly the signal that changes during the drag. */
+        main { container-type: inline-size; }
+        #shortcuts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        @container (max-width: 400px) {
+            #shortcuts-grid { grid-template-columns: 1fr; }
+        }
+
         /* Play/Pause toggle button */
         .toggle-btn-active {
             background: linear-gradient(135deg, #10b981, #059669);
@@ -969,12 +981,16 @@
                 </div>
 
                 <!-- Keyboard Shortcuts Reference -->
-                <!-- v3.13.94: 1 column instead of a 2x2 grid — Lyca's own
-                     mockup for what this card should look like once main
-                     is squeezed down to its new, narrower minimum. -->
+                <!-- v3.13.95: 2 columns at main's normal width, collapsing
+                     to 1 (Lyca's mockup) only once the sidebar drag has
+                     squeezed main down near its floor — see the
+                     @container rule in the <style> block up top, keyed off
+                     <main>'s own inline-size. grid-template-columns lives
+                     entirely in that CSS (no Tailwind grid-cols-* utility
+                     here) so the two don't fight over specificity. -->
                 <div class="mt-6 bg-white dark:bg-dark-800 p-4 rounded-xl border border-gray-200 dark:border-dark-700 text-left">
                     <span class="text-[10px] font-bold text-gray-400 uppercase">Shortcuts</span>
-                    <div class="grid grid-cols-1 gap-y-1 mt-2 text-[10px]">
+                    <div id="shortcuts-grid" class="grid gap-x-4 gap-y-1 mt-2 text-[10px]">
                         <div class="flex justify-between"><span class="text-gray-500">Main Window</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+L</kbd></div>
                         <div class="flex justify-between"><span class="text-gray-500">Overlays</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+E</kbd></div>
                         <div class="flex justify-between"><span class="text-gray-500">Click-Through</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+M</kbd></div>
