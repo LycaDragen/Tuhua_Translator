@@ -1070,7 +1070,14 @@
                 <button onclick="switchGuideTab('ocr')" id="guide-tab-btn-ocr" class="guide-tab-btn flex-1 py-2.5 text-[11px] font-medium border-b-2 transition" data-i18n="guide_tab_ocr">📸 OCR</button>
                 <button onclick="switchGuideTab('xuat')" id="guide-tab-btn-xuat" class="guide-tab-btn flex-1 py-2.5 text-[11px] font-medium border-b-2 transition" data-i18n="guide_tab_xuat">🎮 XUAT</button>
             </div>
-            <div class="p-6 max-h-[65vh] overflow-y-auto scrollbar-thin">
+            <!-- v3.13.101 (Lyca's ask): h-[65vh], not max-h — a FIXED
+                 height so the popup doesn't resize as you switch tabs.
+                 Measured live (WSL/CDP) that Textractor (5 steps) is the
+                 tallest panel at 564px; 65vh comfortably clears that on
+                 the app's default 900px-tall window (585px) without ever
+                 needing internal scroll there, while still shrinking
+                 gracefully (with scroll) on a genuinely short window. -->
+            <div class="p-6 h-[65vh] overflow-y-auto scrollbar-thin">
                 <div id="guide-panel-textractor" class="space-y-5">
                     <div class="flex gap-3"><div class="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold text-sm">1</div><div><h4 class="font-bold text-sm" data-i18n="step1">Descargar Textractor</h4><p class="text-xs text-gray-500 dark:text-gray-400 mt-1" data-i18n="step1_desc">Descárgalo desde github.com/Artikash/Textractor y descomprímelo.</p></div></div>
                     <div class="flex gap-3"><div class="flex-shrink-0 w-7 h-7 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-600 dark:text-emerald-300 flex items-center justify-center font-bold text-sm">2</div><div><h4 class="font-bold text-sm" data-i18n="step2">Configurar TextractorCLI</h4><p class="text-xs text-gray-500 dark:text-gray-400 mt-1" data-i18n="step2_desc">La ruta se detecta sola si Textractor está instalado; si no, hacé clic en 'Examinar' y elegí la carpeta o el .exe directamente.</p></div></div>
@@ -1129,7 +1136,20 @@
                 <span class="text-[10px] font-medium text-emerald-700 dark:text-emerald-400" data-i18n="settings_global_note">Estos ajustes son globales y no se ven afectados por los perfiles</span>
             </div>
             <!-- Content -->
-            <div class="overflow-y-auto scrollbar-thin p-6 space-y-2">
+            <!-- v3.13.101 (Lyca's ask): h-[calc(85vh-175px)], not auto-sized
+                 — a FIXED height so the popup doesn't resize per tab.
+                 175px = header (65px) + global-settings banner (47px) +
+                 footer (61px, measured live via CDP), the fixed chrome
+                 around this content area; 85vh-175px was ALREADY the real
+                 budget the old max-h-[85vh] on the card gave this div
+                 (confirmed: 590px measured at a 900px window, which is
+                 exactly 85vh(900)=765 minus 175). Overlay/Traducción/
+                 Avanzado (243-457px) fit inside that with room to spare;
+                 Filtro de Texto (1085px, the dynamic regex filter list)
+                 still scrolls internally, same as before — this only
+                 stops the OTHER three from shrinking the popup down to
+                 their own shorter content. -->
+            <div class="h-[calc(85vh-175px)] overflow-y-auto scrollbar-thin p-6 space-y-2">
                 <!-- v3.13.100 (settings tabs): categories used to be a
                      collapsible accordion — replaced with tabs (Lyca's
                      call: no real benefit to having two categories open at
