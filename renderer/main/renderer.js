@@ -816,17 +816,40 @@
             const MIN_WIDTH = 380; // matches #app-sidebar's own min-w-[380px] floor
             const MAIN_MIN_WIDTH = 280; // matches <main>'s own min-w-[280px] floor
             const HARD_MAX_WIDTH = 900; // sane ceiling — a single-column form gains nothing past this
+            const DRAG_THRESHOLD = 5; // px of movement before a mousedown counts as a drag, not a click
             let dragging = false;
+            let dragStarted = false; // crossed DRAG_THRESHOLD at least once this mousedown
+            let startX = 0;
 
             handle.addEventListener('mousedown', (e) => {
                 dragging = true;
-                document.body.style.cursor = 'col-resize';
-                document.body.style.userSelect = 'none';
+                dragStarted = false;
+                startX = e.clientX;
                 e.preventDefault();
             });
 
+            // v3.13.98: real bug, found by simulating a double-click with
+            // the couple pixels of jitter any real hand produces (not a
+            // mathematically perfect double-click) — WITHOUT this
+            // threshold, that jitter alone was enough to (a) nudge
+            // #app-sidebar's width on every ordinary click, dblclick
+            // included, and (b) move the two clicks' coordinates far
+            // enough apart that the browser never recognized them as a
+            // double-click at all, so the dblclick handler below never
+            // fired — confirmed live via CDP: a 2-4px jitter left the
+            // sidebar dragged to ~816px instead of resetting it. Only
+            // touching aside.style.flex once real movement crosses
+            // DRAG_THRESHOLD fixes both: an ordinary click (dblclick's two
+            // clicks included) never nudges the width, and the cursor only
+            // switches to col-resize once a drag is actually happening.
             window.addEventListener('mousemove', (e) => {
                 if (!dragging) return;
+                if (!dragStarted) {
+                    if (Math.abs(e.clientX - startX) < DRAG_THRESHOLD) return;
+                    dragStarted = true;
+                    document.body.style.cursor = 'col-resize';
+                    document.body.style.userSelect = 'none';
+                }
                 const containerRect = container.getBoundingClientRect();
                 const maxWidth = Math.min(HARD_MAX_WIDTH, containerRect.width - MAIN_MIN_WIDTH - handle.offsetWidth);
                 const rawWidth = e.clientX - containerRect.left;
@@ -834,26 +857,46 @@
                 aside.style.flex = `1 0 ${newWidth}px`;
             });
 
+            // v3.13.98: NOT the native 'dblclick' event — confirmed live
+            // via CDP that Chromium's own double-click distance tolerance
+            // is tighter than what a real hand produces between two
+            // clicks (2-4px of drift was enough to make 'dblclick' never
+            // fire at all). Tracking two plain clicks (dragStarted===false,
+            // meaning DRAG_THRESHOLD above already ruled out an actual
+            // drag) within DOUBLE_CLICK_MS of each other sidesteps
+            // Chromium's pixel tolerance entirely — position doesn't
+            // matter once we already know it wasn't a drag.
+            const DOUBLE_CLICK_MS = 400;
+            let lastPlainClickAt = 0;
+
             window.addEventListener('mouseup', () => {
                 if (!dragging) return;
                 dragging = false;
+                if (!dragStarted) {
+                    // v3.13.97: real confusion this caused — Lyca had
+                    // dragged the handle while testing the broken
+                    // v3.13.94/95 drag, and that width stayed persisted;
+                    // the NEXT launch (already on the fixed v3.13.96)
+                    // restored it and started with <main> squeezed,
+                    // reading as "the 2-column fix doesn't work" when it
+                    // was actually working exactly as configured.
+                    // Double-clicking resets back to the
+                    // auto-grows-with-the-window default (clears the
+                    // inline flex override AND the saved width) — no other
+                    // reset affordance exists for this.
+                    const now = Date.now();
+                    if (now - lastPlainClickAt < DOUBLE_CLICK_MS) {
+                        aside.style.flex = '';
+                        api.saveSettings({ sidebarWidth: null });
+                        lastPlainClickAt = 0;
+                    } else {
+                        lastPlainClickAt = now;
+                    }
+                    return;
+                }
                 document.body.style.cursor = '';
                 document.body.style.userSelect = '';
                 api.saveSettings({ sidebarWidth: Math.round(aside.getBoundingClientRect().width) });
-            });
-
-            // v3.13.97: real confusion this caused — Lyca had dragged the
-            // handle while testing the broken v3.13.94/95 drag, and that
-            // width stayed persisted; the NEXT launch (already on the
-            // fixed v3.13.96) restored it and started with <main> squeezed,
-            // reading as "the 2-column fix doesn't work" when it was
-            // actually working exactly as configured. Double-click resets
-            // back to the auto-grows-with-the-window default (clears the
-            // inline flex override AND the saved width) — no other reset
-            // affordance exists for this.
-            handle.addEventListener('dblclick', () => {
-                aside.style.flex = '';
-                api.saveSettings({ sidebarWidth: null });
             });
         }
 

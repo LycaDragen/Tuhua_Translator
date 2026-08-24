@@ -928,7 +928,11 @@
 
         <!-- v3.13.94: manual drag handle for #app-sidebar — see
              setupSidebarResize() in renderer.js. -->
-        <div id="sidebar-resize-handle" class="w-1 flex-shrink-0 cursor-col-resize bg-gray-200 dark:bg-dark-700 hover:bg-emerald-400 dark:hover:bg-emerald-500 transition-colors" title="Arrastrá para ajustar el ancho — doble clic para restablecer"></div>
+        <!-- v3.13.98: widened from w-1 (4px) to w-2 (8px) — a 4px hit
+             target is genuinely hard to land precisely with a real mouse
+             (confirmed the drag-threshold bug above with simulated
+             jitter well under 4px). -->
+        <div id="sidebar-resize-handle" class="w-2 flex-shrink-0 cursor-col-resize bg-gray-200 dark:bg-dark-700 hover:bg-emerald-400 dark:hover:bg-emerald-500 transition-colors" title="Arrastrá para ajustar el ancho — doble clic para restablecer"></div>
 
         <!-- MAIN CONTENT -->
         <!-- v3.13.93: no longer flex-1 — its content (play button, status
