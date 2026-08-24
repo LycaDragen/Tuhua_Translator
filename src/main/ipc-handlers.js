@@ -3,7 +3,7 @@
  * Registers all secure IPC communication between main and renderer.
  * All payloads are validated before processing.
  */
-const { ipcMain, dialog, app, desktopCapturer, Menu } = require('electron');
+const { ipcMain, dialog, app, desktopCapturer, Menu, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
@@ -183,6 +183,16 @@ class IpcHandlers {
       const result = this._textractorAutoDetectResult;
       this._textractorAutoDetectResult = null;
       return result;
+    });
+
+    // v3.13.88 (Fase E, Guía de Inicio): the docs link needs shell.openExternal
+    // (a sandboxed renderer can't navigate the OS browser on its own), and the
+    // target is a fixed literal here rather than a URL passed up from the
+    // renderer — no arbitrary-URL-open primitive is exposed for a single
+    // static link.
+    ipcMain.handle('open-docs-link', () => {
+      shell.openExternal('https://tuhua.lyca.dev');
+      return { success: true };
     });
 
     // v3.13.58 (LLM engine overhaul, Fase 3): read-only — llm-providers.js
@@ -2598,6 +2608,7 @@ class IpcHandlers {
       'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
       'textractor-validate-cli', 'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
       'list-game-processes', 'inspect-game', 'set-profile-game', 'find-profile-by-title', 'scan-known-games', 'get-textractor-auto-detect-result',
+      'open-docs-link',
       'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',

@@ -3135,6 +3135,11 @@
             }
         }
 
+        // v3.13.88 (Fase E): opens tuhua.lyca.dev in the OS default browser.
+        function openDocsLink() {
+            api.openDocsLink();
+        }
+
         // ===== GATHER CONFIG =====
         // v3.13.8x (settings UX audit): no longer reads the "Overlay" or
         // "Traducción" categories' fields — those live physically in the

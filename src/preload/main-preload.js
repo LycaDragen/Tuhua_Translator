@@ -52,6 +52,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'find-profile-by-title',
   'scan-known-games',
   'get-textractor-auto-detect-result',
+  'open-docs-link',
   'textractor-launch',
   'textractor-kill',
   'textractor-cli-status',
@@ -316,6 +317,10 @@ const api = {
   // v3.13.8x (Fase 5): read-once startup auto-detect result — see the
   // handler's own doc comment in ipc-handlers.js.
   getTextractorAutoDetectResult: () => secureInvoke('get-textractor-auto-detect-result'),
+  // v3.13.88 (Fase E, Guía de Inicio): opens tuhua.lyca.dev in the OS
+  // default browser — needs shell.openExternal, unreachable from a
+  // sandboxed renderer directly.
+  openDocsLink: () => secureInvoke('open-docs-link'),
   // v3.13.8x: gameExePath (4th arg) is an optional hint — the "🎮 Elegir…"
   // picker already resolves it for free (list-game-processes returns
   // exePath per process), so the renderer forwards it here instead of the
