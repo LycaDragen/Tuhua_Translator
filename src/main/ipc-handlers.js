@@ -1324,9 +1324,15 @@ class IpcHandlers {
       return { success: true, profile: updated };
     });
 
-    ipcMain.handle('create-profile', (event, { name, cloneFromId } = {}) => {
+    ipcMain.handle('create-profile', (event, { name, cloneFromId, inputMethod } = {}) => {
       try {
-        const created = this.profileStore.create({ name, cloneFromId });
+        // v3.13.106: new blank profiles used to always start as
+        // 'textractor' regardless of what method was active when the user
+        // created them (e.g. linking a new game while in XUAT mode) —
+        // validated the same way save-settings' inputMethod is used.
+        const VALID_INPUT_METHODS = ['textractor', 'clipboard', 'ocr', 'xuat'];
+        const safeInputMethod = VALID_INPUT_METHODS.includes(inputMethod) ? inputMethod : undefined;
+        const created = this.profileStore.create({ name, cloneFromId, inputMethod: safeInputMethod });
         return { success: true, profile: created };
       } catch (e) {
         return { success: false, error: e.message };

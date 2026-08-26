@@ -1301,6 +1301,12 @@
             previousInputMethod = method;
             inputMethodInitialized = true;
             recomputeBadge();
+            // v3.13.106: re-evaluate the engine advisory now that
+            // currentInputMethod changed — see renderEngineAdvice()'s own
+            // comment for the bug this closes (the advice text used to
+            // survive forever once the user had already switched to the
+            // method it was suggesting).
+            renderEngineAdvice();
         }
 
         // ===== LLM PROVIDERS (v3.13.58, Fase 3) =====
@@ -2572,7 +2578,7 @@
                     if (!pendingGame) return;
                     resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_creating_profile || 'Creating profile...')}</p>`;
                     const newName = _cleanDisplayTitle(pendingGame.windowTitle) || pendingGame.name || 'Game';
-                    const createResult = await api.createProfile({ name: newName });
+                    const createResult = await api.createProfile({ name: newName, inputMethod: currentInputMethod });
                     if (!createResult.success) {
                         showToast(createResult.error);
                         closeModal();
@@ -2699,7 +2705,7 @@
                     if (newProfileCheckbox.checked) {
                         const newName = newProfileNameInput.value.trim() || vn.title;
                         resultsEl.innerHTML = `<p class="text-[10px] text-gray-400 text-center py-3">${escapeHtml(t.vndb_creating_profile || 'Creating profile...')}</p>`;
-                        const createResult = await api.createProfile({ name: newName });
+                        const createResult = await api.createProfile({ name: newName, inputMethod: currentInputMethod });
                         if (!createResult.success) {
                             showToast(createResult.error);
                             renderVndbDetail(vn); // back to the form so the name can be fixed and retried
@@ -3140,7 +3146,7 @@
                 // v3.13.40: immediate — and no cloneFromId, so the new
                 // profile is genuinely blank. Use "Duplicar" on an
                 // existing card to clone one explicitly.
-                const result = await api.createProfile({ name });
+                const result = await api.createProfile({ name, inputMethod: currentInputMethod });
                 if (!result.success) {
                     if (result.error === 'Profile name already exists') {
                         showProfileNameError(t.profile_name_exists || 'Ya existe un perfil con ese nombre');
@@ -4122,6 +4128,25 @@
             // Nada resuelto, ni confirmación, ni sugerencia, ni ambiguo —
             // sólo aquí tiene sentido armar el sondeo (la próxima vez el
             // juego puede no estar abierto todavía) y avisar si fue manual.
+            //
+            // v3.13.106: real bug reported by Lyca — closing the linked
+            // game (Lethal Company) left its engine advisory ("uses Unity,
+            // install XUAT") on screen forever, since nothing ever cleared
+            // a source==='profile' advisory once the game it described
+            // stopped running. This is the most conservative signal
+            // available for "probably closed": the scan found NO known
+            // game running at all, from any profile — deliberately not
+            // acted on for the ambiguous/needsPathConfirm/suggestion
+            // branches above, where some game IS running and guessing
+            // which one would risk clearing a still-valid advisory. Known
+            // gap: two known games running at once, closing only the
+            // active profile's, won't clear it (this branch never fires
+            // while the other one keeps resolving) — acceptable for now,
+            // no telemetry yet to design the general case with confidence.
+            if (_lastEngineAdvice && _lastEngineAdvice.source === 'profile') {
+                _lastEngineAdvice = null;
+                renderEngineAdvice();
+            }
             _maybeArmGameScanPolling();
             if (manual) {
                 showToast(t.game_scan_not_found || 'No encontré tu juego abierto.');
@@ -5052,7 +5077,14 @@
             if (!box || !textEl || !btn) return;
 
             const advice = _lastEngineAdvice;
-            if (!advice || !advice.adviceKey) {
+            // v3.13.106: real bug — the switch button already hid itself
+            // once currentInputMethod caught up to advice.recommendedMethod
+            // (below), but the advice TEXT ("This game uses Ren'Py...")
+            // kept showing forever after, since nothing here or in
+            // setInputMethod() re-checked it once the switch had already
+            // happened. An advice with no useful action left is not worth
+            // showing at all.
+            if (!advice || !advice.adviceKey || (advice.recommendedMethod && advice.recommendedMethod === currentInputMethod)) {
                 box.classList.add('hidden');
                 return;
             }
@@ -5066,7 +5098,7 @@
             textEl.textContent = template.replace('{engine}', advice.engineLabel || advice.engine || '');
             box.classList.remove('hidden');
 
-            if (advice.recommendedMethod && advice.recommendedMethod !== currentInputMethod) {
+            if (advice.recommendedMethod) {
                 const methodLabel = t['method_' + advice.recommendedMethod] || advice.recommendedMethod;
                 const btnTemplate = t.engine_advice_switch_btn || '→ Switch to {method}';
                 btn.textContent = btnTemplate.replace('{method}', methodLabel);

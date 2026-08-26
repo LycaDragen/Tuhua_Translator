@@ -206,9 +206,9 @@ const api = {
     if (typeof id !== 'string') throw new Error('Invalid profile id');
     return secureInvoke('save-profile', id);
   },
-  createProfile: ({ name, cloneFromId } = {}) => {
+  createProfile: ({ name, cloneFromId, inputMethod } = {}) => {
     if (typeof name !== 'string') throw new Error('Invalid profile name');
-    return secureInvoke('create-profile', { name, cloneFromId: cloneFromId || undefined });
+    return secureInvoke('create-profile', { name, cloneFromId: cloneFromId || undefined, inputMethod: inputMethod || undefined });
   },
   renameProfile: (id, newName) => {
     if (typeof id !== 'string') throw new Error('Invalid profile id');

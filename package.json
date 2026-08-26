@@ -1,6 +1,6 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.105",
+  "version": "3.13.106",
   "productName": "Tuhua Translator",
   "description": "Tuhua Translator - Open Source Visual Novel Translator",
   "main": "src/main/index.js",

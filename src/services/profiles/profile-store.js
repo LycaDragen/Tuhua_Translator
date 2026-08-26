@@ -80,8 +80,15 @@ class ProfileStore {
    * Creates a profile. Without `cloneFromId`, the new profile is blank
    * (v3.13.40: create no longer silently clones the active profile — see
    * `duplicate()` for that behavior, now explicit).
+   *
+   * v3.13.106: `inputMethod` — only applied to the blank-profile branch.
+   * A clone (`cloneFromId` set) keeps the SOURCE profile's own inputMethod
+   * regardless of what's passed here, same reasoning as `game: null` below
+   * forcing per-installation state to not carry over — "Duplicar" means
+   * "same config, new game", not "same config except the method I happen
+   * to be on right now".
    */
-  create({ name, cloneFromId } = {}) {
+  create({ name, cloneFromId, inputMethod } = {}) {
     if (typeof name !== 'string' || !name.trim()) {
       throw new Error('Invalid profile name');
     }
@@ -103,7 +110,7 @@ class ProfileStore {
       // duplicate would silently orphan/kill the ORIGINAL's glossary.
       // Same pattern as `hook: null` forced in migrateProfiles() below.
       ? createProfile({ ...source, id: undefined, name, isDefault: false, game: null, deeplGlossarySync: null })
-      : createProfile({ name, isDefault: false });
+      : createProfile({ name, isDefault: false, ...(inputMethod ? { inputMethod } : {}) });
     this.store.set('profiles', [...profiles, created]);
     return created;
   }
