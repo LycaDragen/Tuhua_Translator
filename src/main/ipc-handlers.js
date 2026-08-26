@@ -2541,7 +2541,12 @@ class IpcHandlers {
           try {
             const imageBuffer = await this._captureScreenRegion();
             if (!imageBuffer) return;
-            await this.ocrService.recognize(imageBuffer);
+            // force:true — same reasoning as the manual capture button
+            // (ocr-capture handler above): the hotkey is an explicit
+            // "rescan now" request, so it must bypass the similarity dedup
+            // or pressing it while the same line is still on screen would
+            // silently do nothing.
+            await this.ocrService.recognize(imageBuffer, { force: true });
           } catch (err) {
             console.error('[OCR] Hotkey capture error:', err.message);
           }

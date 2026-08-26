@@ -39,7 +39,14 @@ log.info('Tuhua Translator starting...');
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
+  // app.quit() is async — without this return, app.whenReady().then(...)
+  // below still gets registered and can run before the process actually
+  // exits, letting a second launch build the Store and run
+  // profileStore.migrate() (writing config.json) before it dies. Verified
+  // as a real risk, not theoretical: electron-builder packaging surfaces it
+  // more (a doubled-clicked shortcut is the common trigger).
   app.quit();
+  return;
 }
 
 let store;

@@ -159,12 +159,10 @@
                 const t = translations[currentLang] || translations['en'];
                 const selectEl = document.getElementById('ocr-engine-select');
                 const descEl = document.getElementById('ocr-engine-desc');
-                const warningEl = document.getElementById('ocr-paddle-warning');
                 // Update selector to reflect actual engine
                 if (selectEl) selectEl.value = engine;
                 // Show fallback message
                 if (descEl) descEl.textContent = t.ocr_paddle_fallback || `PaddleOCR falló, usando Tesseract: ${reason}`;
-                if (warningEl) warningEl.classList.add('hidden');
                 // Show toast notification
                 showToast(t.ocr_paddle_fallback_toast || `PaddleOCR no disponible, usando Tesseract como respaldo`);
             });
@@ -648,22 +646,35 @@
         }
 
         // ===== LANGUAGE =====
-        function changeLanguage(lang) {
-            currentLang = lang;
-            const t = translations[lang] || translations['en'];
-            document.querySelectorAll('[data-i18n]').forEach(el => {
+        // v3.13.103: extracted from changeLanguage() so any function that
+        // injects fresh HTML (via innerHTML/template strings) after the
+        // page's initial [data-i18n] sweep can re-run the same sweep on
+        // just what it rendered. Without this, elements created AFTER the
+        // sweep (e.g. renderProfiles()'s cards, or the regex filter add/
+        // edit forms, both built from raw template strings) kept whatever
+        // language was hardcoded in their template forever, even after
+        // switching the UI language — real bug, found auditing i18n
+        // coverage: "Duplicar"/"🎮 Vincular"/"📖 VNDB" stayed in Spanish in
+        // every locale because renderProfiles() runs (renderer.js ~741)
+        // after changeLanguage()'s sweep, not before it.
+        function applyI18nTo(root = document) {
+            const t = translations[currentLang] || translations['en'];
+            root.querySelectorAll('[data-i18n]').forEach(el => {
                 const key = el.getAttribute('data-i18n');
                 if (t[key]) el.innerText = t[key];
             });
-
-            // v3.13.23: Same pattern as [data-i18n], but for the placeholder
-            // attribute of inputs — needed because placeholder text isn't
-            // covered by innerText and was previously stuck hardcoded in
-            // whatever language was typed into the HTML.
-            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+            // Same pattern, but for the placeholder attribute of inputs —
+            // not covered by innerText.
+            root.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
                 const key = el.getAttribute('data-i18n-placeholder');
                 if (t[key]) el.placeholder = t[key];
             });
+        }
+
+        function changeLanguage(lang) {
+            currentLang = lang;
+            const t = translations[lang] || translations['en'];
+            applyI18nTo(document);
 
             // Update language selector options (native name + translated name)
             const FLAGS = { auto: '🌐', ja: '🇯🇵', en: '🇺🇸', es: '🇪🇸', zh: '🇨🇳', lzh: '📜', ko: '🇰🇷', ru: '🇷🇺', pt: '🇧🇷', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹', ar: '🇸🇦', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩', tr: '🇹🇷', nl: '🇳🇱', pl: '🇵🇱', uk: '🇺🇦', hi: '🇮🇳' };
@@ -3091,6 +3102,13 @@
             }).join('');
 
             updateActiveProfileIndicator();
+            // v3.13.103: the cards above are raw HTML with their own
+            // [data-i18n] attributes (game_link_from_card_btn,
+            // glossary_vndb_import_short, profile_duplicate) — this render
+            // runs after changeLanguage()'s document-wide sweep, so without
+            // this call they'd stay hardcoded in Spanish regardless of the
+            // active UI language.
+            applyI18nTo(list);
         }
 
         function updateActiveProfileIndicator() {
@@ -5537,6 +5555,7 @@
 
             if (regexFilterEntries.length === 0) {
                 listEl.innerHTML = '<p class="text-[9px] text-gray-400 italic text-center" data-i18n="regex_filter_empty">Sin filtros configurados.</p>';
+                applyI18nTo(listEl);
                 return;
             }
 
@@ -5574,6 +5593,8 @@
                 el.addEventListener('mouseenter', showRegexTooltip);
                 el.addEventListener('mouseleave', hideRegexTooltip);
             });
+
+            applyI18nTo(listEl);
         }
 
         // v3.11.34: Fixed-position tooltip for filter examples
@@ -5647,9 +5668,9 @@
                     <span class="text-[9px] font-bold text-emerald-600 dark:text-emerald-400" data-i18n="regex_filter_add_title">Agregar Filtro</span>
                     <button onclick="cancelRegexFilterAdd()" class="text-[9px] text-gray-400 hover:text-gray-300">✕</button>
                 </div>
-                <input id="regex-add-name" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px]" placeholder="Name (e.g. Remove color codes)">
-                <input id="regex-add-pattern" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono" placeholder="Pattern (e.g. \\\\c[\\d+])">
-                <input id="regex-add-replacement" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono" placeholder="Replacement (empty = remove)">
+                <input id="regex-add-name" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px]" data-i18n-placeholder="regex_filter_name_ph" placeholder="Name (e.g. Remove color codes)">
+                <input id="regex-add-pattern" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono" data-i18n-placeholder="regex_filter_pattern_ph" placeholder="Pattern (e.g. \\\\c[\\d+])">
+                <input id="regex-add-replacement" type="text" class="w-full p-1 rounded bg-white dark:bg-dark-900 border border-gray-200 dark:border-dark-600 text-[10px] font-mono" data-i18n-placeholder="regex_filter_replacement_ph" placeholder="Replacement (empty = remove)">
                 <div class="flex items-center gap-3">
                     <label class="flex items-center gap-1 text-[9px] text-gray-500">
                         <input id="regex-add-regex" type="checkbox" checked class="w-3 h-3"> Regex
@@ -5661,6 +5682,7 @@
                 <button onclick="saveNewRegexFilter()" class="w-full py-1 text-[9px] font-bold bg-emerald-600 hover:bg-emerald-500 text-white rounded transition" data-i18n="regex_filter_save_btn">Guardar</button>
             `;
             listEl.prepend(form);
+            applyI18nTo(form);
         }
 
         function cancelRegexFilterAdd() {
@@ -5747,6 +5769,7 @@
                 <button onclick="saveEditedRegexFilter('${entry.id}')" class="w-full py-1 text-[9px] font-bold bg-blue-600 hover:bg-blue-500 text-white rounded transition" data-i18n="regex_filter_save_btn">Guardar</button>
             `;
             listEl.prepend(form);
+            applyI18nTo(form);
         }
 
         function cancelRegexFilterEdit() {

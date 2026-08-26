@@ -1,7 +1,8 @@
 {
   "name": "tuhua-translator",
-  "version": "3.13.102",
-  "description": "Tuhua Translator - Open Source Visual Novel Translator v3.13.62",
+  "version": "3.13.103",
+  "productName": "Tuhua Translator",
+  "description": "Tuhua Translator - Open Source Visual Novel Translator",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
@@ -10,7 +11,7 @@
     "build": "electron-builder",
     "build:win": "electron-builder --win",
     "build:linux": "electron-builder --linux",
-    "build:mac": "electron-builder --mac",
+    "build:mac": "electron-builder --mac --arm64",
     "rebuild": "electron-builder install-app-deps",
     "test:hook-cleaning": "node scripts/test-hook-cleaning.js",
     "test:stdout-decoding": "node scripts/test-stdout-decoding.js",
@@ -98,19 +99,39 @@
     "files": [
       "src/**/*",
       "renderer/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v6/*/*/*providers_cuda*",
+      "!node_modules/onnxruntime-node/bin/napi-v6/*/*/*providers_tensorrt*"
+    ],
+    "asarUnpack": [
+      "**/node_modules/onnxruntime-node/**",
+      "**/node_modules/tesseract.js/**",
+      "**/node_modules/tesseract.js-core/**"
     ],
     "win": {
       "target": ["nsis"],
-      "icon": "renderer/main/assets/Tuhua.ico"
+      "icon": "renderer/main/assets/Tuhua.ico",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**"
+      ]
     },
     "linux": {
       "target": ["AppImage"],
-      "icon": "renderer/main/assets/icon.png"
+      "icon": "renderer/main/assets/icon-1024.png",
+      "category": "Utility",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/**"
+      ]
     },
     "mac": {
-      "target": ["dmg"],
-      "icon": "renderer/main/assets/icon.png"
+      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "icon": "renderer/main/assets/icon-1024.png",
+      "files": [
+        "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+        "!node_modules/onnxruntime-node/bin/napi-v6/win32/**"
+      ]
     },
     "nsis": {
       "oneClick": false,
