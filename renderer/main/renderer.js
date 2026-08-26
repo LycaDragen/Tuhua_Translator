@@ -954,13 +954,20 @@
         const SETTINGS_TABS = ['overlay', 'translation', 'textfilter', 'advanced'];
         let _lastSettingsTab = 'overlay';
 
+        // v3.13.105: shared by switchSettingsTab and switchGuideTab (below) —
+        // same loop, only the tab list / element id prefixes / active class
+        // differed between them.
+        function switchTabs(tabs, name, panelPrefix, btnPrefix, activeClass) {
+            for (const tab of tabs) {
+                const active = tab === name;
+                document.getElementById(panelPrefix + tab).classList.toggle('hidden', !active);
+                document.getElementById(btnPrefix + tab).classList.toggle(activeClass, active);
+            }
+        }
+
         function switchSettingsTab(name) {
             _lastSettingsTab = name;
-            for (const tab of SETTINGS_TABS) {
-                const active = tab === name;
-                document.getElementById('settings-panel-' + tab).classList.toggle('hidden', !active);
-                document.getElementById('settings-tab-btn-' + tab).classList.toggle('settings-tab-active', active);
-            }
+            switchTabs(SETTINGS_TABS, name, 'settings-panel-', 'settings-tab-btn-', 'settings-tab-active');
         }
 
         function toggleSettingsModal() {
@@ -1518,7 +1525,6 @@
             const libreSec = document.getElementById('libretranslate-section');
             const customSec = document.getElementById('custom-mt-section');
             // llm-options removed in v3.10.4 — system prompt always visible in settings modal
-            const desc = document.getElementById('engine-desc');
             const t = translations[currentLang] || translations['en'];
 
             // Save current API key to the previous engine before switching
@@ -1539,17 +1545,11 @@
             }
             document.getElementById('engine-select').dataset.prevEngine = engine;
 
-            const ENGINE_DESC_MAP = {
-                'google-free': 'desc_google_free',
-                'bing': 'desc_bing',
-                'local-llm': 'desc_local_llm',
-                'libretranslate': 'desc_libretranslate',
-                'deepl': 'desc_deepl',
-                'openai': 'desc_openai',
-                'custom-mt': 'desc_custom_mt'
-            };
-            const descKey = ENGINE_DESC_MAP[engine] || 'desc_google_free';
-            desc.innerText = t[descKey] || t.desc_google_free;
+            // v3.13.105: was a second copy of the same ENGINE_DESC_MAP lookup
+            // updateEngineDescription() (below) already does — reuse it
+            // instead of reimplementing, so adding a new engine only means
+            // updating one map, not two.
+            updateEngineDescription();
 
             keySec.classList.add('hidden'); localSec.classList.add('hidden');
             libreSec.classList.add('hidden'); customSec.classList.add('hidden');
@@ -1854,30 +1854,6 @@
         }
 
         // ===== FONT FAMILY =====
-        // Map source languages to recommended font stacks
-        const FONT_AUTO_DETECT_MAP = {
-            'ja': "'Meiryo', 'MS Gothic', 'Noto Sans JP', sans-serif",
-            'zh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', sans-serif",
-            'lzh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', serif",  // v3.13.08-fix: Classical Chinese uses Chinese fonts with serif
-            'ko': "'Noto Sans KR', 'Malgun Gothic', sans-serif",
-            'th': "'Tahoma', 'Noto Sans Thai', sans-serif",
-            'vi': "'Tahoma', 'Noto Sans', sans-serif",
-            'ar': "'Tahoma', 'Noto Sans Arabic', sans-serif",
-            'hi': "'Tahoma', 'Noto Sans Devanagari', sans-serif",
-            'ru': "'Segoe UI', 'Noto Sans', sans-serif",
-            'en': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif",
-            'es': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif",
-            'pt': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif",
-            'fr': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif",
-            'de': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif",
-            'it': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif",
-            'auto': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif"
-        };
-
-        function getAutoDetectedFont(sourceLang) {
-            return FONT_AUTO_DETECT_MAP[sourceLang] || FONT_AUTO_DETECT_MAP['auto'];
-        }
-
         function onFontFamilyChange() {
             const select = document.getElementById('overlay-font');
             const customInput = document.getElementById('custom-font-input');
@@ -2081,6 +2057,13 @@
             }
         }
 
+        // v3.13.105: same animate-spin SVG was copied literal at every call
+        // site that shows a "working..." state — extracted so there's one
+        // place to change the icon, not four.
+        function spinnerHtml(sizeClass, label) {
+            return '<svg class="' + sizeClass + ' animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + label + '</span>';
+        }
+
         async function validateApiKey() {
             const engine = document.getElementById('engine-select').value;
             const apiKey = document.getElementById('api-key').value.trim();
@@ -2096,7 +2079,7 @@
             // Show loading state
             statusEl.classList.remove('hidden');
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
+            statusEl.innerHTML = spinnerHtml('w-3.5 h-3.5', translate('validate_validating') || 'Validando...');
 
             // v3.13.58 (Fase 3): for engine==='openai', also send which provider
             // is selected (and its custom base URL, if that's the one picked) so
@@ -2108,10 +2091,15 @@
             setValidationStatus(statusEl, inputEl, containerEl, result);
         }
 
-        async function validateLocalEndpoint() {
-            const endpoint = document.getElementById('local-endpoint').value.trim();
-            const statusEl = document.getElementById('local-endpoint-status');
-            const inputEl = document.getElementById('local-endpoint');
+        // v3.13.105: extracted from validateLocalEndpoint/validateLibreTranslate/
+        // validateCustomMT — those three were byte-identical except the
+        // input/status element ids and the engine id passed to
+        // api.validateApiKey. validateApiKey() (above) stays separate: it
+        // also handles the openai/provider case, which these three don't have.
+        async function validateEndpoint(engineId, inputId, statusId) {
+            const endpoint = document.getElementById(inputId).value.trim();
+            const statusEl = document.getElementById(statusId);
+            const inputEl = document.getElementById(inputId);
 
             if (!endpoint) {
                 setValidationStatus(statusEl, inputEl, null, { valid: false, message: translate('validate_enter_endpoint') || 'Ingresa un endpoint primero' });
@@ -2120,46 +2108,22 @@
 
             statusEl.classList.remove('hidden');
             statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
+            statusEl.innerHTML = spinnerHtml('w-3.5 h-3.5', translate('validate_validating') || 'Validando...');
 
-            const result = await api.validateApiKey('local-llm', '', endpoint);
+            const result = await api.validateApiKey(engineId, '', endpoint);
             setValidationStatus(statusEl, inputEl, null, result);
         }
 
-        async function validateLibreTranslate() {
-            const endpoint = document.getElementById('libretranslate-endpoint').value.trim();
-            const statusEl = document.getElementById('libretranslate-status');
-            const inputEl = document.getElementById('libretranslate-endpoint');
-
-            if (!endpoint) {
-                setValidationStatus(statusEl, inputEl, null, { valid: false, message: translate('validate_enter_endpoint') || 'Ingresa un endpoint primero' });
-                return;
-            }
-
-            statusEl.classList.remove('hidden');
-            statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
-
-            const result = await api.validateApiKey('libretranslate', '', endpoint);
-            setValidationStatus(statusEl, inputEl, null, result);
+        function validateLocalEndpoint() {
+            return validateEndpoint('local-llm', 'local-endpoint', 'local-endpoint-status');
         }
 
-        async function validateCustomMT() {
-            const endpoint = document.getElementById('custom-mt-endpoint').value.trim();
-            const statusEl = document.getElementById('custom-mt-status');
-            const inputEl = document.getElementById('custom-mt-endpoint');
+        function validateLibreTranslate() {
+            return validateEndpoint('libretranslate', 'libretranslate-endpoint', 'libretranslate-status');
+        }
 
-            if (!endpoint) {
-                setValidationStatus(statusEl, inputEl, null, { valid: false, message: translate('validate_enter_endpoint') || 'Ingresa un endpoint primero' });
-                return;
-            }
-
-            statusEl.classList.remove('hidden');
-            statusEl.className = 'flex items-center gap-1.5 text-[11px] font-medium mt-1 text-gray-400';
-            statusEl.innerHTML = '<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>' + (translate('validate_validating') || 'Validando...') + '</span>';
-
-            const result = await api.validateApiKey('custom-mt', '', endpoint);
-            setValidationStatus(statusEl, inputEl, null, result);
+        function validateCustomMT() {
+            return validateEndpoint('custom-mt', 'custom-mt-endpoint', 'custom-mt-status');
         }
 
         // v3.13.8x (settings UX audit): renamed from autoSaveEngine() — it
@@ -2514,6 +2478,16 @@
             if (result.success) showToast((t.glossary_export_success || 'Exportadas {count} entradas').replace('{count}', result.exported));
         }
 
+        // v3.13.105: the four in-page modals below (openVndbImportModal,
+        // showTextPrompt, showConfirm, openGameProcessPicker) each build
+        // their own overlay with this exact style string — extracted since
+        // it never varies. Their close/cleanup logic stays separate on
+        // purpose (each returns something different — void, a string-or-
+        // null, a boolean — and only showConfirm closes on Escape; unifying
+        // that would change observable behavior, not just remove
+        // duplication, so it's left as-is).
+        const MODAL_OVERLAY_STYLE = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+
         // ===== VNDB IMPORT (profiles Phase 1, step 6) =====
         // v3.13.41: moved from a Glosario-tab button to a per-CARD action
         // in the Profiles tab (next to Duplicar/Renombrar) — real feedback
@@ -2543,7 +2517,7 @@
             const { seedQuery = '', pendingGame = null, forceNewProfile = false } = options;
 
             const overlay = document.createElement('div');
-            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+            overlay.style.cssText = MODAL_OVERLAY_STYLE;
             overlay.innerHTML = `
                 <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-[420px] max-h-[80vh] flex flex-col gap-3 shadow-xl border border-gray-200 dark:border-dark-600">
                     <div class="flex items-center justify-between">
@@ -2911,7 +2885,7 @@
         function showTextPrompt(message, defaultValue = '') {
             return new Promise((resolve) => {
                 const overlay = document.createElement('div');
-                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+                overlay.style.cssText = MODAL_OVERLAY_STYLE;
                 overlay.innerHTML = `
                     <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-80 space-y-3 shadow-xl border border-gray-200 dark:border-dark-600">
                         <p class="text-xs font-medium text-gray-700 dark:text-gray-200">${escapeHtml(message)}</p>
@@ -2953,7 +2927,7 @@
         function showConfirm(message, confirmLabel = 'Confirm', cancelLabel = 'Cancel') {
             return new Promise((resolve) => {
                 const overlay = document.createElement('div');
-                overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+                overlay.style.cssText = MODAL_OVERLAY_STYLE;
                 overlay.innerHTML = `
                     <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-80 space-y-3 shadow-xl border border-gray-200 dark:border-dark-600">
                         <p class="text-xs font-medium text-gray-700 dark:text-gray-200">${escapeHtml(message)}</p>
@@ -3311,11 +3285,7 @@
         const GUIDE_TABS = ['textractor', 'clipboard', 'ocr', 'xuat'];
 
         function switchGuideTab(name) {
-            for (const tab of GUIDE_TABS) {
-                const active = tab === name;
-                document.getElementById('guide-panel-' + tab).classList.toggle('hidden', !active);
-                document.getElementById('guide-tab-btn-' + tab).classList.toggle('guide-tab-active', active);
-            }
+            switchTabs(GUIDE_TABS, name, 'guide-panel-', 'guide-tab-btn-', 'guide-tab-active');
         }
 
         function toggleGuide(show) {
@@ -3652,7 +3622,7 @@
             const t = translations[currentLang] || translations['en'];
 
             const overlay = document.createElement('div');
-            overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;';
+            overlay.style.cssText = MODAL_OVERLAY_STYLE;
             overlay.innerHTML = `
                 <div class="bg-white dark:bg-dark-800 rounded-lg p-4 w-[380px] max-h-[70vh] flex flex-col gap-2 shadow-xl border border-gray-200 dark:border-dark-600">
                     <div class="flex items-center justify-between">
@@ -4846,7 +4816,7 @@
             // Show testing state
             const t = translations[currentLang] || translations['en'];
             btn.disabled = true;
-            btn.innerHTML = '<svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span>Test...</span>';
+            btn.innerHTML = spinnerHtml('w-3 h-3', t.validate_validating || 'Validating...');
             statusBar.classList.remove('hidden');
             statusText.innerHTML = '<span class="text-blue-500">⏳ ' + (t.cli_testing_status || 'Testing TextractorCLI...') + '</span>';
             errorDetail.classList.add('hidden');
@@ -5690,35 +5660,46 @@
             if (form) form.remove();
         }
 
-        async function saveNewRegexFilter() {
-            const name = document.getElementById('regex-add-name').value.trim();
-            const pattern = document.getElementById('regex-add-pattern').value;
-            const replacement = document.getElementById('regex-add-replacement').value;
-            const isRegex = document.getElementById('regex-add-regex').checked;
-            const isCaseSensitive = document.getElementById('regex-add-case').checked;
+        // v3.13.105: extracted from saveNewRegexFilter/saveEditedRegexFilter
+        // — both read the same 5 fields (only the id prefix differs) and ran
+        // the identical pattern-required / regex-validity checks. Returns
+        // null (after showing the toast) when invalid, so callers can just
+        // `if (!form) return;`.
+        function readAndValidateRegexForm(prefix) {
+            const name = document.getElementById(prefix + '-name').value.trim();
+            const pattern = document.getElementById(prefix + '-pattern').value;
+            const replacement = document.getElementById(prefix + '-replacement').value;
+            const isRegex = document.getElementById(prefix + '-regex').checked;
+            const isCaseSensitive = document.getElementById(prefix + '-case').checked;
 
             if (!pattern) {
                 showToast(translate('regex_filter_error_no_pattern') || 'Pattern is required');
-                return;
+                return null;
             }
 
-            // Validate regex
             if (isRegex) {
                 try {
                     new RegExp(pattern);
                 } catch (e) {
                     showToast(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
-                    return;
+                    return null;
                 }
             }
 
+            return { name, pattern, replacement, isRegex, isCaseSensitive };
+        }
+
+        async function saveNewRegexFilter() {
+            const form = readAndValidateRegexForm('regex-add');
+            if (!form) return;
+
             // v3.11.33: Save immediately — adding a filter is a concrete action
             const result = await api.saveRegexFilter({
-                name: name || 'Custom Filter',
-                pattern,
-                replacement,
-                isRegex,
-                isCaseSensitive,
+                name: form.name || 'Custom Filter',
+                pattern: form.pattern,
+                replacement: form.replacement,
+                isRegex: form.isRegex,
+                isCaseSensitive: form.isCaseSensitive,
                 enabled: true
             });
 
@@ -5778,35 +5759,17 @@
         }
 
         async function saveEditedRegexFilter(id) {
-            const name = document.getElementById('regex-edit-name').value.trim();
-            const pattern = document.getElementById('regex-edit-pattern').value;
-            const replacement = document.getElementById('regex-edit-replacement').value;
-            const isRegex = document.getElementById('regex-edit-regex').checked;
-            const isCaseSensitive = document.getElementById('regex-edit-case').checked;
-
-            if (!pattern) {
-                showToast(translate('regex_filter_error_no_pattern') || 'Pattern is required');
-                return;
-            }
-
-            // Validate regex
-            if (isRegex) {
-                try {
-                    new RegExp(pattern);
-                } catch (e) {
-                    showToast(`${translate('regex_filter_error_invalid') || 'Invalid regex'}: ${e.message}`);
-                    return;
-                }
-            }
+            const form = readAndValidateRegexForm('regex-edit');
+            if (!form) return;
 
             // v3.11.33: Save immediately — editing a filter is a concrete action
             const result = await api.saveRegexFilter({
                 id,
-                name: name || 'Custom Filter',
-                pattern,
-                replacement,
-                isRegex,
-                isCaseSensitive,
+                name: form.name || 'Custom Filter',
+                pattern: form.pattern,
+                replacement: form.replacement,
+                isRegex: form.isRegex,
+                isCaseSensitive: form.isCaseSensitive,
                 isBuiltIn: false
             });
 
