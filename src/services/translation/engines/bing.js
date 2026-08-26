@@ -1,10 +1,72 @@
 /**
  * Bing Translator (Free) Engine
- * Uses Microsoft's Azure Cognitive Services token endpoint.
- * No API key required.
- * Updated: Uses edge auth token approach (most reliable free method).
+ * Uses Bing's web translator page (ttranslatev3 endpoint) with an anti-abuse
+ * token scraped from that page. No API key required.
+ *
+ * v3.13.102: rewritten after confirming both prior methods were broken.
+ * The Azure edge token endpoint (`edge.microsoft.com/translate/auth`) returns
+ * a real HTTP 404 — deprecated/moved on Microsoft's side, dropped entirely.
+ * The web method's token regexes expected the value in single quotes
+ * (`'...'`); the page has always used double quotes
+ * (`var params_AbusePreventionHelper = [<key>,"<token>",<ttlMs>]`), so the
+ * token never matched and every request silently fell through to
+ * `{"statusCode":205,"errorMessage":""}`. Verified against the live page.
  */
 const axios = require('axios');
+
+const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// Bing rejects bare 'zh' for both `from` and `to` (HTTP 200 body
+// {"statusCode":400}) — it needs the script-qualified locale. Verified live;
+// every other language in supportedLanguages below works with its bare code.
+const LANG_TO_BING = { zh: 'zh-Hans' };
+const BING_LANG_NORMALIZE = { 'zh-hans': 'zh', 'zh-hant': 'zh' };
+
+const AUTH_REGEX = /var\s+params_AbusePreventionHelper\s*=\s*\[\s*(\d+)\s*,\s*"([^"]+)"\s*,\s*(\d+)\s*\]/;
+
+/**
+ * Pure parsing helpers, split out of the class so scripts/test-bing-engine.js
+ * can pin the exact extraction/mapping logic against fixture HTML/JSON
+ * without a live network call or an axios mock.
+ */
+
+function mapLangToBing(lang) {
+  return LANG_TO_BING[lang] || lang;
+}
+
+function normalizeDetectedLang(code) {
+  if (!code) return null;
+  return BING_LANG_NORMALIZE[code.toLowerCase()] || code;
+}
+
+function parseAuthFromHtml(html) {
+  const igMatch = html.match(/"ig":"([^"]+)"/);
+  const iidMatch = html.match(/data-iid="([^"]+)"/);
+  const authMatch = html.match(AUTH_REGEX);
+
+  if (!igMatch || !authMatch) return null;
+
+  return {
+    ig: igMatch[1],
+    iid: iidMatch ? iidMatch[1] : 'translator.5023',
+    key: authMatch[1],
+    token: authMatch[2],
+    ttlMs: Number(authMatch[3])
+  };
+}
+
+function parseTranslateResponse(data) {
+  if (Array.isArray(data) && data[0]?.translations?.[0]?.text) {
+    return {
+      text: data[0].translations[0].text,
+      detectedLang: normalizeDetectedLang(data[0].detectedLanguage?.language || null)
+    };
+  }
+  if (data && typeof data === 'object' && 'statusCode' in data) {
+    return { rejected: true, statusCode: data.statusCode };
+  }
+  return null;
+}
 
 class BingEngine {
   constructor() {
@@ -15,177 +77,84 @@ class BingEngine {
       'auto', 'ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh',
       'ar', 'hi', 'th', 'vi', 'id', 'tr', 'nl', 'pl'
     ];
+    this._auth = null; // { ig, iid, token, key, expiresAt }
   }
 
   async translate(text, options = {}) {
     const { sourceLang = 'auto', targetLang = 'es' } = options;
     console.log(`[Bing] translate: sourceLang=${sourceLang}, targetLang=${targetLang}`);
 
-    // Method 1: Try Azure Cognitive Services token (most reliable)
-    try {
-      return await this._translateViaAzureToken(text, sourceLang, targetLang);
-    } catch (azureError) {
-      console.log(`[Bing] Azure token method failed: ${azureError.message}, trying web method...`);
+    const auth = await this._getAuth();
+    const from = sourceLang === 'auto' ? 'auto-detect' : mapLangToBing(sourceLang);
+    const to = mapLangToBing(targetLang);
 
-      // Method 2: Fallback to web scraping method
-      try {
-        return await this._translateViaWeb(text, sourceLang, targetLang);
-      } catch (webError) {
-        throw new Error(azureError.message || 'Bing translation failed');
-      }
-    }
-  }
-
-  async _translateViaAzureToken(text, sourceLang, targetLang) {
-    // Get an auth token from Microsoft Edge's translate auth endpoint
-    const authResponse = await axios.post(
-      'https://edge.microsoft.com/translate/auth',
-      null,
-      {
-        timeout: 8000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
-        }
-      }
-    );
-
-    const authToken = authResponse.data;
-    if (!authToken || typeof authToken !== 'string') {
-      throw new Error('Failed to get Bing auth token');
-    }
-
-    // Use the Azure Cognitive Services endpoint with the token
-    const params = {
-      'api-version': '3.0',
-      to: targetLang
-    };
-
-    // Only set 'from' if not auto-detect — Azure API does not accept 'from' for auto-detect
-    if (sourceLang !== 'auto') {
-      params.from = sourceLang;
-    }
-
-    const response = await axios.post(
-      'https://api.cognitive.microsofttranslator.com/translate',
-      [{ text: text }],
-      {
-        params,
-        timeout: 8000,
-        headers: {
-          'Authorization': `Bearer ${authToken}`,
-          'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0',
-          'Referer': 'https://www.bing.com/translator'
-        }
-      }
-    );
-
-    const data = response.data;
-    if (Array.isArray(data) && data[0]?.translations?.[0]?.text) {
-      return {
-        text: data[0].translations[0].text,
-        detectedLang: data[0].detectedLanguage?.language || null,
-        engine: this.name
-      };
-    }
-
-    throw new Error('Unexpected Bing Azure response format');
-  }
-
-  async _translateViaWeb(text, sourceLang, targetLang) {
-    // Fallback: Use Bing's web translator page directly
-    // First, get a token and IG/IID from the page
-    const pageResponse = await axios.get('https://www.bing.com/translator', {
-      timeout: 8000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
-      }
-    });
-
-    const html = pageResponse.data;
-    let ig = '';
-    let iid = 'translator.5021';
-    let token = '';
-    let tokenExpiry = 0;
-
-    // Extract IG parameter
-    const igMatch = html.match(/"ig":"([^"]+)"/);
-    if (igMatch) ig = igMatch[1];
-
-    // Extract IID parameter
-    const iidMatch = html.match(/data-iid="([^"]+)"/);
-    if (iidMatch) iid = iidMatch[1];
-
-    // Extract the abuse prevention token
-    const keyPatterns = [
-      /params_AbusePreventionHelper\s*=\s*\[.*?'([^']+)'/,
-      /params_AbusePreventionHelper\s*=\s*\[\s*'([^']+)'/,
-      /"AbusePreventionHelper".*?"([^"]{20,})"/
-    ];
-
-    for (const pattern of keyPatterns) {
-      const match = html.match(pattern);
-      if (match) {
-        token = match[1];
-        tokenExpiry = Date.now() + 540000; // 9 minutes
-        break;
-      }
-    }
-
-    const from = sourceLang === 'auto' ? '' : sourceLang;
-
-    const url = `https://www.bing.com/ttranslatev3?IG=${ig}&IID=${iid}&isVertical=1&`;
+    const url = `https://www.bing.com/ttranslatev3?IG=${auth.ig}&IID=${auth.iid}&isVertical=1&`;
     const body = new URLSearchParams({
-      fromLang: from || 'auto-detect',
-      to: targetLang,
-      text: text
+      fromLang: from,
+      to,
+      text,
+      token: auth.token,
+      key: auth.key
     });
-
-    if (token) {
-      body.append('token', token);
-      body.append('key', Date.now().toString());
-    }
 
     const response = await axios.post(url, body, {
       timeout: 8000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': USER_AGENT,
         'Content-Type': 'application/x-www-form-urlencoded',
         'Referer': 'https://www.bing.com/translator'
       }
     });
 
-    const data = response.data;
-
-    if (data) {
-      if (Array.isArray(data) && data[0]?.translations?.[0]?.text) {
-        return {
-          text: data[0].translations[0].text,
-          detectedLang: data[0].detectedLanguage?.language || null,
-          engine: this.name
-        };
-      }
-
-      if (data.translations?.[0]?.text) {
-        return {
-          text: data.translations[0].text,
-          detectedLang: data.detectedLanguage?.language || null,
-          engine: this.name
-        };
-      }
-
-      if (typeof data === 'string' && data.length > 0 && data.length < text.length * 3) {
-        return {
-          text: data,
-          detectedLang: null,
-          engine: this.name
-        };
-      }
+    const parsed = parseTranslateResponse(response.data);
+    if (parsed?.text) {
+      return { text: parsed.text, detectedLang: parsed.detectedLang, engine: this.name };
     }
 
-    throw new Error('Unexpected Bing web response format');
+    // A stale/invalid token doesn't error at the HTTP level — Bing replies
+    // 200 with {"statusCode":...,"errorMessage":""}. Drop the cached auth so
+    // the next attempt (pipeline retry or fallback) fetches a fresh one.
+    if (parsed?.rejected) {
+      this._auth = null;
+      throw new Error(`Bing rejected the request (statusCode ${parsed.statusCode})`);
+    }
+
+    throw new Error('Unexpected Bing response format');
+  }
+
+  async _getAuth() {
+    if (this._auth && Date.now() < this._auth.expiresAt) {
+      return this._auth;
+    }
+
+    const pageResponse = await axios.get('https://www.bing.com/translator', {
+      timeout: 8000,
+      headers: {
+        'User-Agent': USER_AGENT,
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
+
+    const parsed = parseAuthFromHtml(pageResponse.data);
+    if (!parsed) {
+      throw new Error('Could not extract Bing auth token from translator page');
+    }
+
+    this._auth = {
+      ig: parsed.ig,
+      iid: parsed.iid,
+      key: parsed.key,
+      token: parsed.token,
+      // Small safety margin so a call started just before the real expiry
+      // doesn't race a page whose token already rotated server-side.
+      expiresAt: Date.now() + parsed.ttlMs - 30000
+    };
+    return this._auth;
   }
 }
 
 module.exports = BingEngine;
+module.exports.mapLangToBing = mapLangToBing;
+module.exports.normalizeDetectedLang = normalizeDetectedLang;
+module.exports.parseAuthFromHtml = parseAuthFromHtml;
+module.exports.parseTranslateResponse = parseTranslateResponse;
