@@ -679,9 +679,16 @@
             // Update language selector options (native name + translated name)
             const FLAGS = { auto: '🌐', ja: '🇯🇵', en: '🇺🇸', es: '🇪🇸', zh: '🇨🇳', lzh: '📜', ko: '🇰🇷', ru: '🇷🇺', pt: '🇧🇷', fr: '🇫🇷', de: '🇩🇪', it: '🇮🇹', ar: '🇸🇦', th: '🇹🇭', vi: '🇻🇳', id: '🇮🇩', tr: '🇹🇷', nl: '🇳🇱', pl: '🇵🇱', uk: '🇺🇦', hi: '🇮🇳' };
             const NATIVE_NAMES = { auto: 'Auto-detect', ja: '日本語', en: 'English', es: 'Español', zh: '中文', lzh: '文言文', ko: '한국어', ru: 'Русский', pt: 'Português', fr: 'Français', de: 'Deutsch', it: 'Italiano', ar: 'العربية', th: 'ไทย', vi: 'Tiếng Việt', id: 'Bahasa Indonesia', tr: 'Türkçe', nl: 'Nederlands', pl: 'Polski', uk: 'Українська', hi: 'हिन्दी' };
+            // v3.13.107: Windows no renderiza los emoji de bandera compuestos
+            // (regional indicators) como bandera real — Segoe UI Emoji los
+            // muestra como las 2 letras del código de país sueltas, sin el
+            // look de bandera. En vez de dejar ese fallback feo del SO, en
+            // Windows mostramos directamente la sigla del idioma en mayúsculas.
+            const isWindows = api && api.platform === 'win32';
+            const NON_FLAG_CODES = new Set(['auto', 'lzh']); // 🌐/📜 no son banderas de país, no tienen el problema
             document.querySelectorAll('[data-i18n-lang]').forEach(opt => {
                 const code = opt.getAttribute('data-i18n-lang');
-                const flag = FLAGS[code] || '';
+                const flag = (isWindows && !NON_FLAG_CODES.has(code)) ? code.toUpperCase() : (FLAGS[code] || '');
                 if (code === 'auto') {
                     opt.textContent = flag + ' ' + (t.auto_detect || 'Auto-detect');
                 } else {

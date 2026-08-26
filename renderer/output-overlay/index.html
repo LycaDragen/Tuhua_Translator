@@ -178,6 +178,10 @@
                 'vi': '🇻🇳 VI', 'id': '🇮🇩 ID', 'tr': '🇹🇷 TR', 'nl': '🇳🇱 NL',
                 'pl': '🇵🇱 PL', 'uk': '🇺🇦 UK', 'hi': '🇮🇳 HI'
             };
+            // v3.13.107: en Windows, el emoji de bandera compuesto no
+            // renderiza como bandera (ver mismo fix en renderer.js) — se
+            // muestra sólo la sigla en mayúsculas, sin bandera rota.
+            const isWindows = overlay.platform === 'win32';
 
             /**
              * v3.9.8: Auto-resize the overlay window to fit the translation text.
@@ -279,7 +283,9 @@
                 currentOriginalText = data.originalText || '';
                 renderClickableText(data.text || '');
                 if (data.targetLang && langBadge) {
-                    langBadge.innerText = LANG_NAMES[data.targetLang] || data.targetLang.toUpperCase();
+                    langBadge.innerText = isWindows
+                        ? data.targetLang.toUpperCase()
+                        : (LANG_NAMES[data.targetLang] || data.targetLang.toUpperCase());
                 }
                 // Re-trigger animation
                 content.style.animation = 'none';
