@@ -29,10 +29,6 @@ class ProfileStore {
     return this.list().find((p) => p.id === id) || null;
   }
 
-  getByName(name) {
-    return this.list().find((p) => p.name === name) || null;
-  }
-
   getActiveId() {
     return this.store.get('activeProfileId', null);
   }

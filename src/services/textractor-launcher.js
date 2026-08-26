@@ -2356,37 +2356,6 @@ class TextractorLauncher extends EventEmitter {
   }
 
   /**
-   * Get all discovered hooks.
-   */
-  getHooks() {
-    const hooks = [];
-    for (const [key, hook] of this._hooks) {
-      const cleanPreview = this._cleanGameText(hook.lastText || '');
-      hooks.push({
-        key: hook.key,
-        name: hook.name,
-        displayName: hook.displayName || hook.name,
-        fullName: hook.fullName,
-        hookCode: hook.hookCode || '',
-        funcAddr: hook.funcAddr || '',
-        processName: hook.processName || '',
-        hookIndex: hook.hookIndex || 0,
-        isSystemHook: hook.isSystemHook || false,
-        lastText: cleanPreview.substring(0, 120),
-        rawLastText: hook.lastText ? hook.lastText.substring(0, 120) : '',
-        textCount: hook.textCount,
-        hasCJK: hook.hasCJK,
-        avgLength: hook.textCount > 0 ? Math.round(hook.totalTextLength / hook.textCount) : 0,
-        qualityPenalty: hook.qualityPenalty || 0,
-        // v3.13.23: exposes _autoSelectBestHook's scoring so the UI can show
-        // *why* a hook was picked, not just log it.
-        score: hook.textCount > 0 ? this._scoreHook(hook) : null
-      });
-    }
-    return hooks;
-  }
-
-  /**
    * Get the currently active hook key.
    */
   getActiveHookKey() {
@@ -2906,14 +2875,6 @@ class TextractorLauncher extends EventEmitter {
         finish(false, -1, 'Error launching: ' + err.message, 'hint_launch_error', { message: err.message });
       }
     });
-  }
-
-  /**
-   * Get the last detailed error information.
-   * Returns null if no error has occurred.
-   */
-  getLastError() {
-    return this._lastError;
   }
 
   /**
@@ -3817,8 +3778,6 @@ class TextractorLauncher extends EventEmitter {
     }
   }
 
-  getOutput() { return this._outputBuffer.join('\n'); }
-  clearOutput() { this._outputBuffer = []; }
   getProcessPid() { return this.process ? this.process.pid : null; }
   isConfigured() { return !!this.cliPath; }
 

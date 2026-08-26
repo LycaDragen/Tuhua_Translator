@@ -264,10 +264,6 @@ class OpenAICompatEngine {
     this.apiKey = key;
   }
 
-  setModel(model) {
-    this.model = model;
-  }
-
   setBaseUrl(url) {
     this.baseUrl = url;
   }

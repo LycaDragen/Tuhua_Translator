@@ -206,13 +206,6 @@ class PaddleModelManager {
   }
 
   /**
-   * Check if onnxruntime-node is available
-   */
-  isRuntimeAvailable() {
-    return ort !== null;
-  }
-
-  /**
    * Check if the detection model and the Chinese (default) recognition model are downloaded.
    * v3.13.04: Other language models are checked separately via isRecModelDownloaded().
    */
@@ -722,14 +715,6 @@ class PaddleModelManager {
     return this._activeRecLang;
   }
 
-  /**
-   * Check if models are loaded and ready for inference
-   */
-  isReady() {
-    return this._initialized && this._detSession &&
-           (this._recSessions['zh'] || this._recSessions[this._activeRecLang]) &&
-           (this._dictionaries['zh'] || this._dictionaries[this._activeRecLang]);
-  }
 
   /**
    * Release all ONNX sessions

@@ -26,7 +26,7 @@
 const Store = require('electron-store');
 const crypto = require('crypto');
 const log = require('electron-log');
-const { combinedSimilarity, findBestMatch } = require('./fuzzy-matcher');
+const { findBestMatch } = require('./fuzzy-matcher');
 
 // v3.13.6x (LLM engine overhaul, Fase 7d): 'mt' entries are not reused by
 // an 'llm' lookup — a plain literal-MT translation is a real quality
@@ -350,18 +350,6 @@ class TranslationMemory {
 
   setEnabled(enabled) {
     this.enabled = enabled;
-  }
-
-  /**
-   * v3.11.25: Configure fuzzy matching at runtime.
-   * @param {boolean} enabled
-   * @param {number} threshold - 0..1 similarity threshold
-   */
-  setFuzzyConfig(enabled, threshold) {
-    this.fuzzyEnabled = enabled;
-    if (threshold !== undefined) {
-      this.fuzzyThreshold = Math.max(0.5, Math.min(1.0, threshold));
-    }
   }
 
   /**

@@ -1299,13 +1299,6 @@ class TranslationPipeline extends EventEmitter {
       this.translationMemory.setEnabled(newSettings.enableTranslationMemory !== false);
     }
   }
-
-  /**
-   * Reset all engine instances (e.g., when switching API keys)
-   */
-  resetEngines() {
-    this.engines = {};
-  }
 }
 
 module.exports = TranslationPipeline;

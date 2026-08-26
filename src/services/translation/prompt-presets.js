@@ -79,10 +79,6 @@ const PROMPT_PRESETS = [
 // install and "select Balanced" always produce byte-identical results.
 const DEFAULT_TEMPLATE = BALANCED_TEMPLATE;
 
-function getPreset(id) {
-  return PROMPT_PRESETS.find((p) => p.id === id) || null;
-}
-
 /**
  * Returns the preset id whose template text is byte-identical to `text`,
  * or 'custom' if it matches none of them (including the empty string,
@@ -119,7 +115,6 @@ function seedPromptTemplateFromLegacySystemPrompt(settings) {
 module.exports = {
   PROMPT_PRESETS,
   DEFAULT_TEMPLATE,
-  getPreset,
   matchPresetId,
   seedPromptTemplateFromLegacySystemPrompt
 };

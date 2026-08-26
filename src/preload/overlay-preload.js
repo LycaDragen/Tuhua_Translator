@@ -27,7 +27,6 @@ const api = {
 
   // Capture area actions (used by capture-area overlay)
   ocrCapture: () => ipcRenderer.invoke('ocr-capture'),
-  ocrCloseCaptureArea: () => ipcRenderer.invoke('ocr-close-capture-area'),
   ocrToggleScan: () => ipcRenderer.invoke('ocr-toggle-scan'),
 
   // v3.9.7: Output overlay auto-resize
@@ -58,9 +57,7 @@ const api = {
     ipcRenderer.on('word-prompt-context', handler);
     return () => ipcRenderer.removeListener('word-prompt-context', handler);
   },
-  saveGlossaryEntry: (entry, scope) => ipcRenderer.invoke('save-glossary', { entry, scope }),
-
-  platform: process.platform
+  saveGlossaryEntry: (entry, scope) => ipcRenderer.invoke('save-glossary', { entry, scope })
 };
 
 contextBridge.exposeInMainWorld('tuhuaOverlay', api);

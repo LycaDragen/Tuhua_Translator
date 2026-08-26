@@ -371,14 +371,6 @@ class WindowManager {
   }
 
   /**
-   * v3.13.07: Check if the output overlay is currently visible.
-   * @returns {boolean}
-   */
-  isOutputOverlayVisible() {
-    return this.outputOverlay && !this.outputOverlay.isDestroyed() && this.outputOverlay.isVisible();
-  }
-
-  /**
    * Clear the content of the output overlay window
    */
   clearOverlayContent() {
@@ -472,15 +464,6 @@ class WindowManager {
       this.captureArea.showInactive();
       // v3.13.04: Re-assert alwaysOnTop when showing
       this.captureArea.setAlwaysOnTop(true, 'screen-saver');
-    }
-  }
-
-  /**
-   * Hide the capture area window
-   */
-  hideCaptureArea() {
-    if (this.captureArea && !this.captureArea.isDestroyed()) {
-      this.captureArea.hide();
     }
   }
 

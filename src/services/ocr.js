@@ -309,13 +309,6 @@ class OcrService extends EventEmitter {
   }
 
   /**
-   * v3.13.01: Delete PaddleOCR model files to free disk space
-   */
-  async deletePaddleModels() {
-    await this._paddleEngine.deleteModels();
-  }
-
-  /**
    * v3.13.16: Forward detection/recognition option overrides to the PaddleOCR
    * engine (e.g. { enhance: true } for the Phase 1 median-denoise + auto-invert
    * pass on recognition crops — see PaddleOCREngine._options and
@@ -829,10 +822,6 @@ class OcrService extends EventEmitter {
     if (tessLang === this._language && this._ocrEngine !== 'paddle') return;
     log.info(`[OCR] Changing language from ${this._language} to ${tessLang}`);
     await this.initialize(lang);
-  }
-
-  setChangeThreshold(threshold) {
-    this._changeThreshold = Math.max(0, Math.min(100, threshold));
   }
 
   /**

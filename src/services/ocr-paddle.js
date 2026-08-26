@@ -50,7 +50,7 @@ try {
   // Will be handled by PaddleModelManager
 }
 
-const { PaddleModelManager, getRecModelKeyForLang, REC_MODELS } = require('./paddle-models');
+const { PaddleModelManager, getRecModelKeyForLang } = require('./paddle-models');
 const { preprocessForDetection, preprocessForRecognition, cropRegion, isVerticalText, rotate90CCW } = require('./paddle-preprocess');
 const { decodeDetection, decodeRecognition, detectScript, filterFuriganaBoxes } = require('./paddle-postprocess');
 
@@ -149,14 +149,6 @@ class PaddleOCREngine extends EventEmitter {
     if (prevLang !== this._sourceLang) {
       log.info(`[PaddleOCR] Source language changed: ${prevLang} → ${this._sourceLang}`);
     }
-  }
-
-  /**
-   * v3.13.04: Get available (downloaded) recognition models
-   * @returns {string[]} Array of model keys like ['zh', 'ko']
-   */
-  getDownloadedModels() {
-    return this._modelManager.getDownloadedRecModels();
   }
 
   /**

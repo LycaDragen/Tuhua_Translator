@@ -573,10 +573,6 @@ class IpcHandlers {
     });
 
     // ===== TextractorCLI =====
-    ipcMain.handle('textractor-validate-cli', async (event, cliPath) => {
-      if (typeof cliPath !== 'string') return { valid: false, message: 'Invalid path' };
-      return this.textractorLauncher.validatePath(cliPath);
-    });
 
     // v3.13.8x (settings UX audit, Fase 5, second pass): the "Textractor"
     // path field is `readonly` (only "Examinar" or an auto-detect can set
@@ -861,10 +857,6 @@ class IpcHandlers {
       };
     });
 
-    ipcMain.handle('textractor-cli-output', async () => {
-      return this.textractorLauncher.getOutput();
-    });
-
     ipcMain.handle('textractor-select-hook', async (event, hookKey) => {
       this.textractorLauncher.selectHook(hookKey || null);
       return { success: true, activeHookKey: this.textractorLauncher.getActiveHookKey() };
@@ -1049,12 +1041,6 @@ class IpcHandlers {
       if (typeof id !== 'string') return { success: false, error: 'Invalid ID' };
       const updated = this.regexFilter.toggle(id, enabled);
       return { success: !!updated, entry: updated };
-    });
-
-    ipcMain.handle('reorder-regex-filters', (event, orderedIds) => {
-      if (!Array.isArray(orderedIds)) return { success: false, error: 'Invalid order' };
-      this.regexFilter.reorder(orderedIds);
-      return { success: true };
     });
 
     ipcMain.handle('test-regex-filter', (event, text, filterId) => {
@@ -1449,10 +1435,6 @@ class IpcHandlers {
       };
     });
 
-    ipcMain.handle('get-active-profile', () => {
-      return this.profileStore.getActiveId();
-    });
-
     // ===== API Key Validation =====
     ipcMain.handle('validate-api-key', async (event, { engine, apiKey, endpoint, provider }) => {
       try {
@@ -1627,53 +1609,6 @@ class IpcHandlers {
       }
     });
 
-    // ===== Connection Test =====
-    ipcMain.handle('test-connection', async (event, { host, port }) => {
-      return new Promise((resolve) => {
-        const net = require('net');
-        const socket = new net.Socket();
-        socket.setTimeout(3000);
-        socket.on('connect', () => {
-          socket.destroy();
-          resolve({ success: true, message: 'Connection successful' });
-        });
-        socket.on('timeout', () => {
-          socket.destroy();
-          resolve({ success: false, message: 'Connection timed out' });
-        });
-        socket.on('error', (err) => {
-          socket.destroy();
-          resolve({ success: false, message: err.message });
-        });
-        socket.connect(port, host);
-      });
-    });
-
-    // ===== Font Family Auto-Detection =====
-    ipcMain.handle('detect-font-family', (event, { sourceLang }) => {
-      const FONT_MAP = {
-        'ja': "'Meiryo', 'MS Gothic', 'Noto Sans JP', sans-serif",
-        'zh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', sans-serif",
-        'lzh': "'Noto Sans SC', 'Microsoft YaHei', 'MingLiu', serif",
-        'ko': "'Noto Sans KR', 'Malgun Gothic', sans-serif",
-        'th': "'Tahoma', 'Noto Sans Thai', sans-serif",
-        'vi': "'Tahoma', 'Noto Sans', sans-serif",
-        'ar': "'Tahoma', 'Noto Sans Arabic', sans-serif",
-        'hi': "'Tahoma', 'Noto Sans Devanagari', sans-serif",
-        'ru': "'Segoe UI', 'Noto Sans', sans-serif",
-        'auto': "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif"
-      };
-      const defaultFont = "'Segoe UI', 'Noto Sans JP', 'Noto Sans SC', sans-serif";
-      const font = FONT_MAP[sourceLang] || defaultFont;
-      return { fontFamily: font, language: sourceLang };
-    });
-
-    // ===== Manual Translation =====
-    ipcMain.on('manual-translate', (event, text) => {
-      if (typeof text !== 'string' || text.length === 0) return;
-      this._handleText(text);
-    });
-
     // v3.13.6x (Fase 9 testing follow-up): one shared channel for the
     // overlay's new "↻" toolbar button AND the Ctrl+Shift+R global
     // shortcut (fixed here too — see _retranslateCurrent's own comment
@@ -1764,15 +1699,6 @@ class IpcHandlers {
       }
     });
 
-    ipcMain.handle('ocr-status', async () => {
-      return this.ocrService.getStatus();
-    });
-
-    ipcMain.handle('ocr-close-capture-area', async () => {
-      this.windowManager.closeCaptureArea();
-      return { success: true };
-    });
-
     // v3.9.6: Pause/resume OCR scanning from capture area overlay.
     // This ONLY controls the auto-capture scanning loop — it does NOT
     // affect the main Tuhua ▶ Activo toggle (which controls translation).
@@ -1794,11 +1720,6 @@ class IpcHandlers {
         console.log('[OCR] Scan resumed from capture area overlay');
         return { success: true, scanning: true };
       }
-    });
-
-    ipcMain.handle('get-displays', async () => {
-      const { screen } = require('electron');
-      return screen.getAllDisplays();
     });
 
     // v3.9.7: Output overlay auto-resize.
@@ -1948,20 +1869,6 @@ class IpcHandlers {
       }
     });
 
-    ipcMain.handle('xuat-set-port', async (event, port) => {
-      if (typeof port !== 'number' || port < 1024 || port > 65535) {
-        return { success: false, error: 'Port must be between 1024 and 65535' };
-      }
-      this.store.set({ ...this.store.get(), xuatPort: port });
-      if (this.xuatServer && this.xuatServer._running) {
-        await this.xuatServer.reconfigure(port);
-      } else if (this.xuatServer) {
-        this.xuatServer.port = port;
-      }
-      console.log(`[XUAT] Port set to ${port}`);
-      return { success: true, port };
-    });
-
     // Test XUAT endpoint by making a self-request
     ipcMain.handle('xuat-test-endpoint', async () => {
       try {
@@ -2038,34 +1945,6 @@ class IpcHandlers {
         return { success: false, error: err.message, logPath: '', logContent: '' };
       }
     });
-  }
-
-  /**
-   * Ensure the XUAT HTTP server is running on the specified port.
-   * v3.11.3: Simplified — the serial queue in xuat-server handles
-   * all race conditions and retry logic internally.
-   *
-   * If already running on the same port, do nothing.
-   * If running on a different port, reconfigure.
-   * If not running, start it.
-   *
-   * @param {number} port
-   * @returns {Promise<void>}
-   */
-  async _ensureXuatServerRunning(port) {
-    if (!this.xuatServer) {
-      throw new Error('XUAT server not initialized');
-    }
-    if (this.xuatServer._running) {
-      // Already running — only reconfigure if port changed
-      if (this.xuatServer.port !== port) {
-        await this.xuatServer.reconfigure(port);
-      }
-    } else {
-      // Not running — set port and start
-      this.xuatServer.port = port;
-      await this.xuatServer.start();
-    }
   }
 
   /**
@@ -2607,17 +2486,17 @@ class IpcHandlers {
       'import-glossary', 'export-glossary', 'browse-save-json', 'browse-open-json',
       'get-history', 'clear-history', 'export-history', 'clear-context',
       'get-profiles', 'save-profile', 'create-profile', 'delete-profile', 'load-profile',
-      'get-active-profile', 'rename-profile', 'duplicate-profile',
-      'validate-api-key', 'test-connection', 'detect-font-family',
-      'ocr-capture', 'ocr-start', 'ocr-stop', 'ocr-status',
-      'ocr-close-capture-area', 'ocr-toggle-scan', 'get-displays',
-      'textractor-validate-cli', 'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
+      'rename-profile', 'duplicate-profile',
+      'validate-api-key',
+      'ocr-capture', 'ocr-start', 'ocr-stop',
+      'ocr-toggle-scan',
+      'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
       'list-game-processes', 'inspect-game', 'set-profile-game', 'find-profile-by-title', 'scan-known-games', 'get-textractor-auto-detect-result',
       'open-docs-link',
-      'textractor-kill', 'textractor-cli-status', 'textractor-cli-output',
+      'textractor-kill', 'textractor-cli-status',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
-      'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game', 'xuat-set-port',
+      'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game',
       'xuat-test-endpoint', 'xuat-update-language', 'xuat-clear-cache',
       // v3.11.27: VNDB glossary import
       'vndb-search', 'vndb-import',
@@ -2625,7 +2504,7 @@ class IpcHandlers {
       'deepl-fetch-features',
       // v3.11.30: Regex text filter
       'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
-      'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',
+      'toggle-regex-filter', 'test-regex-filter', 'reset-regex-filters',
       // v3.13.21: HOOK cleaning step settings
       'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
       'reset-hook-cleaning-steps',
@@ -2633,7 +2512,6 @@ class IpcHandlers {
       'set-ocr-engine', 'get-ocr-engine-status'
     ];
     channels.forEach(ch => ipcMain.removeHandler(ch));
-    ipcMain.removeAllListeners('manual-translate');
     ipcMain.removeAllListeners('get-app-version');
     ipcMain.removeAllListeners('overlay-word-context-menu');
     ipcMain.removeAllListeners('request-retranslate');

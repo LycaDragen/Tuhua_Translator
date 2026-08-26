@@ -6,7 +6,7 @@
  *           When OCR mode is active, pressing the hotkey performs
  *           an immediate capture without going to the UI.
  */
-const { globalShortcut, BrowserWindow } = require('electron');
+const { globalShortcut } = require('electron');
 
 class ShortcutManager {
   constructor(windowManager, pipeline, textractor, clipboardWatcher, ocrService) {

@@ -30,20 +30,13 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'create-profile',
   'delete-profile',
   'load-profile',
-  'get-active-profile',
   'rename-profile',
   'duplicate-profile',
   'ocr-capture',
   'ocr-start',
   'ocr-stop',
-  'ocr-status',
-  'ocr-close-capture-area',
   'ocr-toggle-scan',
-  'get-displays',
-  'test-connection',
   'validate-api-key',
-  'detect-font-family',
-  'textractor-validate-cli',
   'textractor-browse-cli',
   'textractor-clear-cli-path',
   'list-game-processes',
@@ -56,12 +49,11 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'textractor-launch',
   'textractor-kill',
   'textractor-cli-status',
-  'textractor-cli-output',
   'textractor-select-hook',
   'textractor-test-cli',
   'get-debug-logs',
   'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',
-  'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game', 'xuat-set-port',
+  'xuat-select-game', 'xuat-detect-game', 'xuat-install-in-game',
   'xuat-test-endpoint',
   'xuat-update-language', 'xuat-clear-cache',
   // v3.11.27: VNDB glossary import
@@ -70,7 +62,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'deepl-fetch-features',
   // v3.11.30: Regex text filter
   'get-regex-filters', 'save-regex-filter', 'delete-regex-filter',
-  'toggle-regex-filter', 'reorder-regex-filters', 'test-regex-filter', 'reset-regex-filters',
+  'toggle-regex-filter', 'test-regex-filter', 'reset-regex-filters',
   // v3.13.21: HOOK cleaning step settings
   'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
   'reset-hook-cleaning-steps',
@@ -79,7 +71,6 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
-  'manual-translate',
   // v3.13.6x (Fase 9 testing follow-up): fixes Ctrl+Shift+R, which fired
   // shortcut-pressed{action:'retranslate'} since it was registered but
   // handleShortcut() in renderer.js never had a case for it — the
@@ -114,7 +105,6 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'translation-error',
   'shortcut-pressed',
   'ocr-status',
-  'ocr-text',
   'ocr-engine-fallback',
   'ocr-engine-advice',
   'xuat-status',
@@ -238,14 +228,11 @@ const api = {
     if (typeof id !== 'string') throw new Error('Invalid profile id');
     return secureInvoke('load-profile', id);
   },
-  getActiveProfile: () => secureInvoke('get-active-profile'),
 
   // OCR
   ocrCapture: () => secureInvoke('ocr-capture'),
   ocrStart: () => secureInvoke('ocr-start'),
   ocrStop: () => secureInvoke('ocr-stop'),
-  ocrStatus: () => secureInvoke('ocr-status'),
-  ocrCloseCaptureArea: () => secureInvoke('ocr-close-capture-area'),
   // v3.13.01: OCR engine selection
   setOcrEngine: (engine) => {
     if (typeof engine !== 'string' || (engine !== 'tesseract' && engine !== 'paddle')) {
@@ -254,22 +241,8 @@ const api = {
     return secureInvoke('set-ocr-engine', engine);
   },
   getOcrEngineStatus: () => secureInvoke('get-ocr-engine-status'),
-  getDisplays: () => secureInvoke('get-displays'),
 
-  // Translation
-  manualTranslate: (text) => {
-    if (typeof text !== 'string') throw new Error('Text must be a string');
-    secureSend('manual-translate', text);
-  },
   requestRetranslate: () => secureSend('request-retranslate'),
-
-  // Connection test
-  testConnection: (host, port) => {
-    if (typeof host !== 'string' || typeof port !== 'number') {
-      throw new Error('Invalid host or port');
-    }
-    return secureInvoke('test-connection', { host, port });
-  },
 
   // API Key validation
   // v3.13.58 (Fase 3): `provider` is new — which llm-providers.js entry to
@@ -281,17 +254,7 @@ const api = {
     return secureInvoke('validate-api-key', { engine, apiKey: apiKey || '', endpoint: endpoint || '', provider: provider || '' });
   },
 
-  // Font family detection
-  detectFontFamily: (sourceLang) => {
-    if (typeof sourceLang !== 'string') throw new Error('Invalid language');
-    return secureInvoke('detect-font-family', { sourceLang });
-  },
-
   // TextractorCLI controls
-  textractorValidateCli: (cliPath) => {
-    if (typeof cliPath !== 'string') throw new Error('Invalid CLI path');
-    return secureInvoke('textractor-validate-cli', cliPath);
-  },
   textractorBrowseCli: () => secureInvoke('textractor-browse-cli'),
   // v3.13.8x (Fase 5, second pass): clears the saved path and immediately
   // re-runs auto-detection — see the handler's own doc comment.
@@ -335,7 +298,6 @@ const api = {
   },
   textractorKill: () => secureInvoke('textractor-kill'),
   textractorCliStatus: () => secureInvoke('textractor-cli-status'),
-  textractorCliOutput: () => secureInvoke('textractor-cli-output'),
   textractorSelectHook: (hookKey) => secureInvoke('textractor-select-hook', hookKey),
   textractorTestCli: (cliPath) => {
     if (typeof cliPath !== 'string') throw new Error('Invalid CLI path');
@@ -364,7 +326,6 @@ const api = {
 
   // OCR events
   onOcrStatus: (callback) => secureOn('ocr-status', callback),
-  onOcrText: (callback) => secureOn('ocr-text', callback),
   // v3.13.01-fix: PaddleOCR fallback notification
   onOcrEngineFallback: (callback) => secureOn('ocr-engine-fallback', callback),
   // v3.13.79 (Fase 3, round-3 plan): proactive suggestion to try Paddle
@@ -381,7 +342,6 @@ const api = {
   xuatSelectGame: () => secureInvoke('xuat-select-game'),
   xuatDetectGame: (exePath) => secureInvoke('xuat-detect-game', exePath),
   xuatInstallInGame: (exePath, port) => secureInvoke('xuat-install-in-game', { exePath, port }),
-  xuatSetPort: (port) => secureInvoke('xuat-set-port', port),
   xuatTestEndpoint: () => secureInvoke('xuat-test-endpoint'),
   xuatUpdateLanguage: (sourceLang, targetLang) => {
     if (typeof sourceLang !== 'string' || typeof targetLang !== 'string') {
@@ -428,10 +388,6 @@ const api = {
     if (typeof id !== 'string') throw new Error('Invalid filter ID');
     if (typeof enabled !== 'boolean') throw new Error('Enabled must be boolean');
     return secureInvoke('toggle-regex-filter', id, enabled);
-  },
-  reorderRegexFilters: (orderedIds) => {
-    if (!Array.isArray(orderedIds)) throw new Error('Invalid order array');
-    return secureInvoke('reorder-regex-filters', orderedIds);
   },
   testRegexFilter: (text, filterId) => {
     if (typeof text !== 'string') throw new Error('Invalid text');

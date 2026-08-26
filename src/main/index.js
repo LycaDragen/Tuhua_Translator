@@ -7,7 +7,6 @@
 const { app, BrowserWindow, Menu } = require('electron');
 const Store = require('electron-store');
 const log = require('electron-log');
-const os = require('os');
 const path = require('path');
 
 const WindowManager = require('./window-manager');

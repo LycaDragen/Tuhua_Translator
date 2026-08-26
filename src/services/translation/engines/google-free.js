@@ -44,42 +44,6 @@ class GoogleFreeEngine {
       'auto', 'ja', 'en', 'es', 'ru', 'pt', 'fr', 'de', 'it', 'ko', 'zh',
       'ar', 'hi', 'th', 'vi', 'id', 'tr', 'nl', 'pl', 'uk'
     ];
-    this.token = null;
-    this.tokenExpiry = 0;
-  }
-
-  async _getToken() {
-    if (this.token && Date.now() < this.tokenExpiry) {
-      return this.token;
-    }
-
-    try {
-      const response = await axios.get('https://translate.google.com', {
-        timeout: 5000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept-Language': 'en-US,en;q=0.9'
-        }
-      });
-
-      // Try to extract the RPC token (TKK) from the page
-      const tkkMatch = response.data.match(/tkk:'([^']+)'/);
-      if (tkkMatch) {
-        this.token = tkkMatch[1];
-      } else {
-        // Fallback: use a timestamp-based token
-        const hours = Math.floor(Date.now() / 3600000);
-        this.token = `${hours}`;
-      }
-      this.tokenExpiry = Date.now() + 3600000; // 1 hour
-      return this.token;
-    } catch (e) {
-      // If token fetch fails, use timestamp-based fallback
-      const hours = Math.floor(Date.now() / 3600000);
-      this.token = `${hours}`;
-      this.tokenExpiry = Date.now() + 3600000;
-      return this.token;
-    }
   }
 
   /**

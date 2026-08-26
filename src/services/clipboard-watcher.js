@@ -50,10 +50,6 @@ class ClipboardWatcher extends EventEmitter {
     this.emit('status', 'stopped');
   }
 
-  getLastText() {
-    return this.lastText;
-  }
-
   setInterval(ms) {
     this.interval = Math.max(200, ms); // Minimum 200ms
     if (this.isWatching) {

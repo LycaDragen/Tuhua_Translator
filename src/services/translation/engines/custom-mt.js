@@ -119,9 +119,6 @@ class CustomMTEngine {
     };
   }
 
-  updateConfig(config) {
-    this.config = { ...this.config, ...config };
-  }
 }
 
 module.exports = CustomMTEngine;
