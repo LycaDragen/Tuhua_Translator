@@ -684,11 +684,15 @@
             // muestra como las 2 letras del código de país sueltas, sin el
             // look de bandera. En vez de dejar ese fallback feo del SO, en
             // Windows mostramos directamente la sigla del idioma en mayúsculas.
+            // v3.13.110: 🌐 (auto) y 📜 (lzh) SÍ renderizan bien en Windows
+            // (no son banderas compuestas), pero dejarlos como emoji mientras
+            // el resto pasa a sigla generaba una mezcla inconsistente — Lyca
+            // pidió todo-bandera o todo-sigla, nunca mitad y mitad. Ahora
+            // isWindows convierte los 21 códigos por igual, sin excepción.
             const isWindows = api && api.platform === 'win32';
-            const NON_FLAG_CODES = new Set(['auto', 'lzh']); // 🌐/📜 no son banderas de país, no tienen el problema
             document.querySelectorAll('[data-i18n-lang]').forEach(opt => {
                 const code = opt.getAttribute('data-i18n-lang');
-                const flag = (isWindows && !NON_FLAG_CODES.has(code)) ? code.toUpperCase() : (FLAGS[code] || '');
+                const flag = isWindows ? code.toUpperCase() : (FLAGS[code] || '');
                 if (code === 'auto') {
                     opt.textContent = flag + ' ' + (t.auto_detect || 'Auto-detect');
                 } else {
@@ -5443,10 +5447,14 @@
                     // v3.13.109: EBUSY/EPERM/UNKNOWN en un copyfile casi
                     // siempre significa que Windows tiene el DLL abierto —
                     // en la práctica, el juego (o BepInEx ya cargado en él)
-                    // sigue corriendo. El mensaje crudo del SO no lo decía.
+                    // sigue corriendo. v3.13.110: el mensaje crudo del SO
+                    // (ruta completa de origen/destino) no le sirve al
+                    // usuario — se reemplaza entero, no se le agrega nada
+                    // encima. El texto crudo sigue en el log (main process)
+                    // para diagnóstico.
                     const looksLikeFileLock = /EBUSY|EPERM|UNKNOWN.*copyfile/i.test(rawError);
                     const friendlyError = looksLikeFileLock
-                        ? rawError + ' — cerrá el juego por completo e intentá de nuevo (el archivo sigue en uso).'
+                        ? 'El juego sigue abierto — cerralo por completo e intentá de nuevo.'
                         : rawError;
                     document.getElementById('xuat-install-status').textContent = 'Error: ' + friendlyError;
                     document.getElementById('xuat-install-bar').style.width = '0%';
