@@ -195,10 +195,43 @@ const BUILT_IN_FILTERS = [
   }
 ];
 
+// v3.13.111 (Ronda 4e): compiled RegExp objects, cached by (pattern,flags)
+// content rather than by filter id — a filter's pattern/flags are the only
+// thing that determines the compiled result, so this stays correct across
+// edits without needing explicit invalidation, and is shared across every
+// RegexFilterService instance (there's only ever one in practice, but this
+// doesn't assume that). Reusing a global-flag RegExp across `.replace()`
+// calls on different strings is safe: per spec, `[Symbol.replace]` resets
+// `lastIndex` to 0 itself when `global` is true — verified in Node before
+// relying on it (see scripts/test-regex-filter.js if a bench exists).
+const _compiledRegexCache = new Map();
+function getCompiledRegex(pattern, flags) {
+  const key = flags + ' ' + pattern;
+  let re = _compiledRegexCache.get(key);
+  if (!re) {
+    re = new RegExp(pattern, flags);
+    _compiledRegexCache.set(key, re);
+  }
+  return re;
+}
+
+// Languages without spaces between words (LunaTranslator-style) — module
+// level so apply() doesn't rebuild this Set on every dialogue line.
+const NO_SPACE_LANGS = new Set(['ja', 'zh', 'cht', 'lzh', 'ko']);
+
 class RegexFilterService {
   constructor() {
     this.store = new Store({ name: 'regex-filters' });
+    // v3.13.111 (Ronda 4e, same fix as cache.js/translation-memory.js —
+    // Ronda 4a): read once, mutate in memory, single _persist() write.
+    // getEnabled() used to trigger a full store.get() (disk read) on
+    // EVERY apply() call — once per dialogue line while the game runs.
+    this._entries = this.store.get('entries', []);
     this._ensureBuiltInFilters();
+  }
+
+  _persist() {
+    this.store.set('entries', this._entries);
   }
 
   /**
@@ -206,7 +239,7 @@ class RegexFilterService {
    * New built-in filters added in updates will be merged in.
    */
   _ensureBuiltInFilters() {
-    const entries = this.store.get('entries', []);
+    const entries = this._entries;
 
     // Find existing built-in IDs
     const existingBuiltInIds = new Set(
@@ -257,7 +290,7 @@ class RegexFilterService {
     }
 
     if (modified) {
-      this.store.set('entries', entries);
+      this._persist();
     }
   }
 
@@ -265,7 +298,7 @@ class RegexFilterService {
    * Get all filters (built-in + custom), sorted by execution order.
    */
   getAll() {
-    const entries = this.store.get('entries', []);
+    const entries = this._entries;
     return entries.sort((a, b) => (a.order || 0) - (b.order || 0));
   }
 
@@ -280,15 +313,13 @@ class RegexFilterService {
    * Get a single filter by ID.
    */
   getById(id) {
-    const entries = this.store.get('entries', []);
-    return entries.find(e => e.id === id) || null;
+    return this._entries.find(e => e.id === id) || null;
   }
 
   /**
    * Add a new custom filter.
    */
   add(entry) {
-    const entries = this.store.get('entries', []);
     const newEntry = {
       id: 'custom-' + crypto.randomUUID(),
       name: entry.name || '',
@@ -302,8 +333,8 @@ class RegexFilterService {
       order: entry.order !== undefined ? entry.order : this._nextOrder(),
       description: entry.description || ''
     };
-    entries.push(newEntry);
-    this.store.set('entries', entries);
+    this._entries.push(newEntry);
+    this._persist();
     return newEntry;
   }
 
@@ -312,7 +343,7 @@ class RegexFilterService {
    * Built-in filters can only have their `enabled` state changed.
    */
   update(id, updates) {
-    const entries = this.store.get('entries', []);
+    const entries = this._entries;
     const idx = entries.findIndex(e => e.id === id);
     if (idx < 0) return null;
 
@@ -331,7 +362,7 @@ class RegexFilterService {
       entries[idx] = { ...existing, ...updates, id: existing.id, isBuiltIn: false };
     }
 
-    this.store.set('entries', entries);
+    this._persist();
     return entries[idx];
   }
 
@@ -339,13 +370,12 @@ class RegexFilterService {
    * Delete a custom filter. Built-in filters cannot be deleted.
    */
   delete(id) {
-    const entries = this.store.get('entries', []);
-    const entry = entries.find(e => e.id === id);
+    const entry = this._entries.find(e => e.id === id);
     if (!entry) return false;
     if (entry.isBuiltIn) return false; // Cannot delete built-in
 
-    const filtered = entries.filter(e => e.id !== id);
-    this.store.set('entries', filtered);
+    this._entries = this._entries.filter(e => e.id !== id);
+    this._persist();
     return true;
   }
 
@@ -361,7 +391,7 @@ class RegexFilterService {
    */
   reorder(orderedIds) {
     if (!Array.isArray(orderedIds)) return false;
-    const entries = this.store.get('entries', []);
+    const entries = this._entries;
     const orderMap = {};
     orderedIds.forEach((id, idx) => { orderMap[id] = idx * 10; });
     for (const entry of entries) {
@@ -369,7 +399,7 @@ class RegexFilterService {
         entry.order = orderMap[entry.id];
       }
     }
-    this.store.set('entries', entries);
+    this._persist();
     return true;
   }
 
@@ -396,15 +426,17 @@ class RegexFilterService {
     }
 
     if (filter.isRegex) {
-      // Regex mode
+      // Regex mode — v3.13.111 (Ronda 4e): compiled+cached instead of a
+      // fresh `new RegExp()` per line per filter (was the 2nd-costliest
+      // hot-path finding after the store reads, per Lyca's approval order).
       const flags = filter.isCaseSensitive ? 'g' : 'gi';
-      const regex = new RegExp(filter.pattern, flags);
+      const regex = getCompiledRegex(filter.pattern, flags);
       return text.replace(regex, replacement);
     } else {
       // Literal string mode — escape the pattern for safe regex use
       const escaped = filter.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const flags = filter.isCaseSensitive ? 'g' : 'gi';
-      const regex = new RegExp(escaped, flags);
+      const regex = getCompiledRegex(escaped, flags);
       // For literal mode, escape $ in replacement to prevent backreference interpretation
       const safeReplacement = replacement.replace(/\$/g, '$$$$');
       return text.replace(regex, safeReplacement);
@@ -426,8 +458,6 @@ class RegexFilterService {
   apply(text, srcLang) {
     if (!text || typeof text !== 'string') return { text: text || '', appliedCount: 0, skipped: [] };
 
-    // Languages without spaces between words (LunaTranslator-style)
-    const NO_SPACE_LANGS = new Set(['ja', 'zh', 'cht', 'lzh', 'ko']);
     const isNoSpaceLang = NO_SPACE_LANGS.has((srcLang || '').toLowerCase());
 
     const enabledFilters = this.getEnabled();
@@ -496,8 +526,7 @@ class RegexFilterService {
    * Get the next available order number for a new custom filter.
    */
   _nextOrder() {
-    const entries = this.store.get('entries', []);
-    const maxOrder = entries.reduce((max, e) => Math.max(max, e.order || 0), 0);
+    const maxOrder = this._entries.reduce((max, e) => Math.max(max, e.order || 0), 0);
     return maxOrder + 10;
   }
 
@@ -506,7 +535,8 @@ class RegexFilterService {
    */
   replaceAll(newEntries) {
     if (!Array.isArray(newEntries)) return;
-    this.store.set('entries', newEntries);
+    this._entries = newEntries;
+    this._persist();
     this._ensureBuiltInFilters();
   }
 
@@ -514,8 +544,8 @@ class RegexFilterService {
    * Reset all custom filters and restore built-in defaults.
    */
   resetToDefaults() {
-    const entries = BUILT_IN_FILTERS.map(f => ({ ...f }));
-    this.store.set('entries', entries);
+    this._entries = BUILT_IN_FILTERS.map(f => ({ ...f }));
+    this._persist();
   }
 }
 

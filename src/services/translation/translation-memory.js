@@ -111,6 +111,17 @@ class TranslationMemory {
         order: []      // LRU order (most recent last)
       }
     });
+
+    // v3.13.111 (Ronda 4a, same fix as cache.js — see its constructor
+    // comment for the full explanation of why electron-store's get()/set()
+    // were each a full-file readFileSync/writeFileSync): read once here,
+    // mutate in memory, single _persist() write per mutating call.
+    this._entries = this.store.get('entries', {});
+    this._order = this.store.get('order', []);
+  }
+
+  _persist() {
+    this.store.set({ entries: this._entries, order: this._order });
   }
 
   // v3.13.6x (Fase 7d): `profileId` namespaces the key — before this, a
@@ -138,8 +149,8 @@ class TranslationMemory {
     if (!this.enabled) return null;
 
     const key = this._makeKey(text, srcLang, targetLang, profileId);
-    const entries = this.store.get('entries', {});
-    const order = this.store.get('order', []);
+    const entries = this._entries;
+    const order = this._order;
 
     const entry = entries[key];
     if (!entry) return null;
@@ -151,8 +162,7 @@ class TranslationMemory {
       delete entries[key];
       const idx = order.indexOf(key);
       if (idx !== -1) order.splice(idx, 1);
-      this.store.set('entries', entries);
-      this.store.set('order', order);
+      this._persist();
       this._fuzzyIndexDirty = true;
       return null;
     }
@@ -165,7 +175,7 @@ class TranslationMemory {
     if (idx !== -1) {
       order.splice(idx, 1);
       order.push(key);
-      this.store.set('order', order);
+      this._persist();
     }
 
     return entry;
@@ -291,8 +301,8 @@ class TranslationMemory {
     if (!this.enabled) return;
 
     const key = this._makeKey(text, srcLang, targetLang, profileId);
-    const entries = this.store.get('entries', {});
-    const order = this.store.get('order', []);
+    const entries = this._entries;
+    const order = this._order;
 
     if (entries[key]) {
       entries[key] = {
@@ -330,22 +340,22 @@ class TranslationMemory {
       }
     }
 
-    this.store.set('entries', entries);
-    this.store.set('order', order);
+    this._persist();
 
     // Mark fuzzy index as dirty — needs rebuild on next fuzzy lookup
     this._fuzzyIndexDirty = true;
   }
 
   clear() {
-    this.store.set('entries', {});
-    this.store.set('order', []);
+    this._entries = {};
+    this._order = [];
+    this._persist();
     this._fuzzyIndex = null;
     this._fuzzyIndexDirty = true;
   }
 
   size() {
-    return this.store.get('order', []).length;
+    return this._order.length;
   }
 
   setEnabled(enabled) {
@@ -358,7 +368,7 @@ class TranslationMemory {
    * Called lazily when fuzzy lookup is requested and the index is dirty.
    */
   _rebuildFuzzyIndex() {
-    const entries = this.store.get('entries', {});
+    const entries = this._entries;
     this._fuzzyIndex = new Map();
 
     for (const key of Object.keys(entries)) {
@@ -398,7 +408,7 @@ class TranslationMemory {
    * they are re-translated and stored with sourceText.
    */
   getStats() {
-    const entries = this.store.get('entries', {});
+    const entries = this._entries;
     let withSourceText = 0;
     let withoutSourceText = 0;
     for (const key of Object.keys(entries)) {

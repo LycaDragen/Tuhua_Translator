@@ -19,6 +19,27 @@ class TranslationCache {
         order: []      // LRU order (most recent last)
       }
     });
+
+    // v3.13.111 (Ronda 4a): electron-store's get()/set() each do a full
+    // readFileSync+JSON.parse (resp. writeFileSync) of the ENTIRE store
+    // file — verified against node_modules/conf's source, `get store()`
+    // re-reads from disk on every access, there's no in-memory cache
+    // underneath. Every get()/set() call below used to hit disk twice
+    // (entries + order) — per dialogue line, with cache.js AND
+    // translation-memory.js both doing this, that was ~10 synchronous
+    // disk reads + 4 atomic writes on the main process, per line, while
+    // the game is running. Holding entries/order in memory (read once
+    // here, written back with a single _persist() per mutation) cuts that
+    // to zero reads and at most one write per call.
+    this._entries = this.store.get('entries', {});
+    this._order = this.store.get('order', []);
+  }
+
+  // Single atomic write for both keys — electron-store's set(object) reads
+  // the file once, merges, and writes once (vs. two separate set() calls,
+  // which would each do their own read+write of the whole file).
+  _persist() {
+    this.store.set({ entries: this._entries, order: this._order });
   }
 
   // v3.13.6x (LLM engine overhaul, Fase 7c): `variant` is a 5th key
@@ -44,8 +65,8 @@ class TranslationCache {
 
   get(text, srcLang, targetLang, engine, variant = '') {
     const key = this._makeKey(text, srcLang, targetLang, engine, variant);
-    const entries = this.store.get('entries', {});
-    const order = this.store.get('order', []);
+    const entries = this._entries;
+    const order = this._order;
 
     const entry = entries[key];
     if (!entry) return null;
@@ -55,8 +76,7 @@ class TranslationCache {
       delete entries[key];
       const idx = order.indexOf(key);
       if (idx !== -1) order.splice(idx, 1);
-      this.store.set('entries', entries);
-      this.store.set('order', order);
+      this._persist();
       return null;
     }
 
@@ -65,7 +85,7 @@ class TranslationCache {
     if (idx !== -1) {
       order.splice(idx, 1);
       order.push(key);
-      this.store.set('order', order);
+      this._persist();
     }
 
     return entry.translation;
@@ -73,8 +93,8 @@ class TranslationCache {
 
   set(text, srcLang, targetLang, engine, translation, variant = '') {
     const key = this._makeKey(text, srcLang, targetLang, engine, variant);
-    const entries = this.store.get('entries', {});
-    const order = this.store.get('order', []);
+    const entries = this._entries;
+    const order = this._order;
 
     // If already exists, update
     if (entries[key]) {
@@ -93,17 +113,17 @@ class TranslationCache {
       }
     }
 
-    this.store.set('entries', entries);
-    this.store.set('order', order);
+    this._persist();
   }
 
   clear() {
-    this.store.set('entries', {});
-    this.store.set('order', []);
+    this._entries = {};
+    this._order = [];
+    this._persist();
   }
 
   size() {
-    return this.store.get('order', []).length;
+    return this._order.length;
   }
 }
 
