@@ -1668,6 +1668,23 @@ class IpcHandlers {
         this.ocrService.setOcrEngine(engine);
         this.store.set('ocrEngine', engine);
         console.log(`[Tuhua] OCR engine set to: ${engine}`);
+        // v3.13.115: setOcrEngine() above only flips OcrService's internal
+        // flag — it never (re)initializes the worker/session for the newly
+        // selected engine. If OCR was already running, the next capture
+        // threw "OCR worker not initialized. Call initialize() first."
+        // (Tesseract's recognize() checks `this._worker`, never created if
+        // the session started on Paddle) until something else happened to
+        // call initialize() again — reproduced live by Lyca switching
+        // paddle→tesseract mid-session (session90.log). _startOcrCapture()
+        // already pairs setOcrEngine()+initialize() for the INITIAL start;
+        // do the same here for a LIVE switch. initialize() is idempotent
+        // (_initializePaddle/_initializeTesseract both early-return if the
+        // target engine is already ready), so this is a no-op cost when
+        // nothing actually needs to change.
+        if (this._ocrActive) {
+          const settings = this.store.get();
+          await this.ocrService.initialize(settings.sourceLang || 'ja');
+        }
         return { success: true, engine: this.ocrService.getOcrEngine() };
       } catch (err) {
         console.error('[Tuhua] Error setting OCR engine:', err.message);

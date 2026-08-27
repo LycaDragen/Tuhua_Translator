@@ -405,36 +405,46 @@ app.whenReady().then(() => {
   ipcHandlers.register();
 
   // v3.13.07: Improved startup overlay state management.
-  // Set _translationActive based on saved settings, then ensure overlay
-  // visibility matches the state: hidden when paused OR in XUAT mode.
-  if (settings.translationActive === false) {
-    ipcHandlers._translationActive = false;
-    windowManager.hideOutputOverlay();
-    windowManager.clearOverlayContent();
-    log.info('Starting in paused mode — overlays hidden');
-  } else if (settings.inputMethod === 'xuat') {
+  // v3.13.115: Lyca reported Tuhua always launching "Active" if it was
+  // active when last closed — because ONLY OCR (v3.13.48) forced a paused
+  // startup; Textractor/Clipboard just restored whatever translationActive
+  // was persisted. Two real symptoms from that gap: (1) the app comes up
+  // translating immediately, before the user is ready; (2) the output
+  // overlay window can fail to actually become visible on a "start
+  // active" launch — nothing in this startup path ever calls
+  // windowManager.showOutputOverlay() (only hideOutputOverlay(), in the
+  // other branches below), so it relied on Electron's implicit show:true
+  // default, which real Windows focus/z-order quirks around
+  // transparent/alwaysOnTop windows can silently defeat. The FIX for both
+  // is the same: never start "active" at all, for any input method that
+  // isn't XUAT — matching the OCR treatment Lyca already confirmed working,
+  // generalized per his explicit ask ("siempre que Tuhua se cierre y se
+  // vuelva a abrir debe iniciar pausado").
+  //
+  // XUAT is the one deliberate exception, unchanged: its translation runs
+  // through XUnity.AutoTranslator hitting xuat-server.js's own HTTP
+  // endpoint directly, completely independent of `_translationActive` —
+  // that flag has zero effect on whether XUAT actually translates, it only
+  // controls Tuhua's own overlay/badge display. Forcing it to show
+  // "Paused" here would just be misleading UI while XUAT keeps working
+  // exactly the same underneath.
+  if (settings.inputMethod === 'xuat') {
     ipcHandlers._translationActive = true;
     windowManager.hideOutputOverlay();
     windowManager.clearOverlayContent();
     log.info('Starting in XUAT mode — overlay hidden (XUAT renders in-game)');
-  } else if (settings.inputMethod === 'ocr') {
-    // v3.13.48: OCR always starts paused, regardless of the persisted
-    // translationActive flag — real bug: a user who left Tuhua "Active"
-    // in a DIFFERENT input method, then switched to OCR and closed the
-    // app, would relaunch straight into OCR still marked active. OCR
-    // needs its capture region repositioned every session (the game
-    // window isn't guaranteed to be in the same place), so silently
-    // staying "active" risks capturing/translating whatever happens to
-    // be under a stale region before the user gets a chance to
-    // reposition it. store.set (not just the in-memory flag) so the
-    // renderer's own get-settings call — which happens later, once the
-    // window has loaded — reflects the same paused state instead of
-    // showing a misleading "Active" toggle.
+  } else {
+    // store.set (not just the in-memory flag) so the renderer's own
+    // get-settings call — which happens later, once the window has
+    // loaded — reflects the same paused state instead of showing a
+    // misleading "Active" toggle.
     ipcHandlers._translationActive = false;
-    store.set('translationActive', false);
+    if (settings.translationActive !== false) {
+      store.set('translationActive', false);
+    }
     windowManager.hideOutputOverlay();
     windowManager.clearOverlayContent();
-    log.info('Starting in OCR mode — forced to paused; position the capture area, then press ▶ Activo');
+    log.info(`Starting in ${settings.inputMethod || 'textractor'} mode — forced to paused; press ▶ Activo to begin`);
   }
 
   // Connect Textractor text events to translation pipeline
