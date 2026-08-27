@@ -4,7 +4,7 @@
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Electron](https://img.shields.io/badge/Electron-28-blue.svg)](https://www.electronjs.org/)
-[![Version](https://img.shields.io/badge/version-3.13.18-emerald.svg)]()
+[![Version](https://img.shields.io/badge/version-3.13.120-emerald.svg)]()
 
 ---
 
@@ -35,9 +35,13 @@ Ve a la sección [Releases](https://github.com/LycaDragen/Tuhua_Translator/relea
 |---|---|---|
 | Windows | `.exe` (NSIS) | Instalador con opción de directorio personalizado |
 | Linux | `.AppImage` | Portable, no requiere instalación |
-| macOS | `.dmg` | Arrastra a Aplicaciones |
+| macOS | `.dmg` | Sólo Apple Silicon (M1/M2/M3/M4) — arrastra a Aplicaciones |
+
+> **Los instaladores no están firmados** (todavía no hay certificado de desarrollador). Windows va a mostrar un aviso de SmartScreen ("Más información" → "Ejecutar de todas formas") y macOS va a bloquear la apertura con Gatekeeper la primera vez (clic derecho → "Abrir"). Es esperado — el código es público, podés revisarlo en este mismo repo.
 
 ### Desde el código fuente
+
+El proyecto usa [pnpm](https://pnpm.io/) (el lockfile del repo es `pnpm-lock.yaml`):
 
 ```bash
 # Clonar el repositorio
@@ -45,15 +49,15 @@ git clone https://github.com/LycaDragen/Tuhua_Translator.git
 cd Tuhua_Translator
 
 # Instalar dependencias
-npm install
+pnpm install
 
 # Ejecutar en modo desarrollo
-npm run dev
+pnpm run dev
 
 # Construir para tu plataforma
-npm run build:win    # Windows
-npm run build:linux  # Linux
-npm run build:mac    # macOS
+pnpm run build:win    # Windows
+pnpm run build:linux  # Linux
+pnpm run build:mac    # macOS (arm64, requiere macOS real o CI)
 ```
 
 ---
