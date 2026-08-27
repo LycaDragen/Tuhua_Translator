@@ -1,0 +1,33 @@
+name: Build macOS DMG
+
+# No se puede generar el .dmg desde WSL (onnxruntime-node no tiene
+# binario para darwin/x64 y electron-builder --mac necesita macOS real
+# para firmar/empaquetar). Disparo manual porque todavía no hay
+# release automatizado — sólo produce el artefacto para probarlo.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-mac:
+    runs-on: macos-14 # Apple Silicon (arm64) — único arch soportado, ver mac.arch en package.json
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run build:mac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tuhua-translator-mac-arm64
+          path: dist/*.dmg
+          retention-days: 14
