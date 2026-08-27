@@ -12,6 +12,7 @@ const { parseProcessListJson } = require('../services/game-process-list');
 const { inspectGame } = require('../services/game-inspect');
 const { buildGameRecord, matchRunningProcesses, normalizeExePath, compareTitles } = require('../services/game-identity');
 const { runAutoDetectAndPersist } = require('../services/textractor-path-detect');
+const { computeCaptureCropRect } = require('../services/capture-geometry');
 
 const XuatInstaller = require('../services/xuat-installer');
 const VndbService = require('../services/vndb');
@@ -1663,34 +1664,13 @@ class IpcHandlers {
     });
 
     // v3.13.01: Set OCR engine (tesseract or paddle)
-    ipcMain.handle('set-ocr-engine', async (_event, engine) => {
-      try {
-        this.ocrService.setOcrEngine(engine);
-        this.store.set('ocrEngine', engine);
-        console.log(`[Tuhua] OCR engine set to: ${engine}`);
-        // v3.13.115: setOcrEngine() above only flips OcrService's internal
-        // flag — it never (re)initializes the worker/session for the newly
-        // selected engine. If OCR was already running, the next capture
-        // threw "OCR worker not initialized. Call initialize() first."
-        // (Tesseract's recognize() checks `this._worker`, never created if
-        // the session started on Paddle) until something else happened to
-        // call initialize() again — reproduced live by Lyca switching
-        // paddle→tesseract mid-session (session90.log). _startOcrCapture()
-        // already pairs setOcrEngine()+initialize() for the INITIAL start;
-        // do the same here for a LIVE switch. initialize() is idempotent
-        // (_initializePaddle/_initializeTesseract both early-return if the
-        // target engine is already ready), so this is a no-op cost when
-        // nothing actually needs to change.
-        if (this._ocrActive) {
-          const settings = this.store.get();
-          await this.ocrService.initialize(settings.sourceLang || 'ja');
-        }
-        return { success: true, engine: this.ocrService.getOcrEngine() };
-      } catch (err) {
-        console.error('[Tuhua] Error setting OCR engine:', err.message);
-        return { success: false, error: err.message };
-      }
-    });
+    // v3.13.116: extracted to _handleSetOcrEngine() (below) so the
+    // reinitialize-when-active logic can be pinned by a test bank
+    // (scripts/test-ocr-engine-switch.js) via
+    // IpcHandlers.prototype._handleSetOcrEngine.call(fakeThis, engine) —
+    // same pattern glossary-merge.js's bench already uses for
+    // GlossaryService.prototype._applyEntry, no real Electron/IPC needed.
+    ipcMain.handle('set-ocr-engine', async (_event, engine) => this._handleSetOcrEngine(engine));
 
     // v3.13.01: Get OCR engine status
     ipcMain.handle('get-ocr-engine-status', async () => {
@@ -2328,28 +2308,28 @@ class IpcHandlers {
       // where the crop rectangle (computed from the WRONG assumed size)
       // landed outside/misaligned with the real thumbnail.
       //
-      // Fix: derive the crop rectangle from the thumbnail's ACTUAL returned
-      // size, scaled against the display's logical size — correct
-      // regardless of what size Electron actually hands back, and still
-      // avoids the wasted resize()-to-same-size v3.13.112 set out to cut.
+      // v3.13.116: crop math extracted to capture-geometry.js so the exact
+      // regression scenario (a thumbnail size mismatch) is pinned by
+      // scripts/test-ocr-capture-geometry.js — this class of bug shipped
+      // once already because nothing exercised it outside manual Windows
+      // testing. Also tightened here: the old inline version only clamped
+      // width/height, which could still go negative if cropX/cropY
+      // themselves landed past the thumbnail's real bounds (an even more
+      // extreme mismatch than what broke Lyca's session); the extracted
+      // version clamps x/y first, then width/height off the clamped
+      // origin, so width/height can never be negative.
       const thumbSize = thumbnail.getSize();
-      const actualScaleX = thumbSize.width / screenWidth;
-      const actualScaleY = thumbSize.height / screenHeight;
-
-      // Crop to the capture area bounds, but SKIP the title bar area (28px at top).
-      // The title bar has "OCR" label and is not part of the text being scanned.
-      const titleBarHeight = 28;
-      const cropX = Math.round(bounds.x * actualScaleX);
-      const cropY = Math.round((bounds.y + titleBarHeight) * actualScaleY);
-      const cropWidth = Math.round(bounds.width * actualScaleX);
-      const cropHeight = Math.round((bounds.height - titleBarHeight) * actualScaleY);
-
-      return thumbnail.crop({
-        x: cropX,
-        y: cropY,
-        width: Math.min(cropWidth, thumbSize.width - cropX),
-        height: Math.min(cropHeight, thumbSize.height - cropY)
+      const titleBarHeight = 28; // capture area's own title bar — not game content
+      const cropRect = computeCaptureCropRect({
+        bounds,
+        titleBarHeight,
+        screenWidth,
+        screenHeight,
+        thumbWidth: thumbSize.width,
+        thumbHeight: thumbSize.height
       });
+
+      return thumbnail.crop(cropRect);
     } catch (err) {
       console.error('[OCR] Screen capture error:', err.message);
       return null;
@@ -2406,6 +2386,43 @@ class IpcHandlers {
 
     const changePercent = (changedPixels / sampleCount) * 100;
     return changePercent >= 5; // same 5% default ocr.js's _changeThreshold used
+  }
+
+  /**
+   * v3.13.01: switch the OCR engine (tesseract/paddle). v3.13.116:
+   * extracted from the 'set-ocr-engine' IPC handler for testability.
+   *
+   * v3.13.115: setOcrEngine() only flips OcrService's internal flag — it
+   * never (re)initializes the worker/session for the newly selected
+   * engine. If OCR was already running, the next capture threw "OCR
+   * worker not initialized. Call initialize() first." (Tesseract's
+   * recognize() checks `this._worker`, never created if the session
+   * started on Paddle) until something else happened to call
+   * initialize() again — reproduced live by Lyca switching
+   * paddle→tesseract mid-session (session90.log). _startOcrCapture()
+   * (below) already pairs setOcrEngine()+initialize() for the INITIAL
+   * start; this does the same for a LIVE switch. initialize() is
+   * idempotent (_initializePaddle/_initializeTesseract both early-return
+   * if the target engine is already ready), so calling it when nothing
+   * actually needs to change is a no-op, not wasted work — deliberately
+   * NOT called at all when OCR isn't running (`!this._ocrActive`), so
+   * picking an engine from Settings while on Textractor/Clipboard/XUAT
+   * doesn't eagerly load PaddleOCR's runtime or download models.
+   */
+  async _handleSetOcrEngine(engine) {
+    try {
+      this.ocrService.setOcrEngine(engine);
+      this.store.set('ocrEngine', engine);
+      console.log(`[Tuhua] OCR engine set to: ${engine}`);
+      if (this._ocrActive) {
+        const settings = this.store.get();
+        await this.ocrService.initialize(settings.sourceLang || 'ja');
+      }
+      return { success: true, engine: this.ocrService.getOcrEngine() };
+    } catch (err) {
+      console.error('[Tuhua] Error setting OCR engine:', err.message);
+      return { success: false, error: err.message };
+    }
   }
 
   /**
