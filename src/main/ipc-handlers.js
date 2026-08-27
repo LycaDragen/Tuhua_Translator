@@ -2297,14 +2297,35 @@ class IpcHandlers {
         return null;
       }
 
+      // v3.13.114: FIX for a real regression from v3.13.112 (Ronda 4d) —
+      // confirmed by Lyca on real Windows (garbled/empty OCR, a Tesseract
+      // crash reading a malformed capture, PaddleOCR detecting a degenerate
+      // 32x32 input). Root cause, straight from Electron's own docs
+      // (electron.d.ts, DesktopCapturerSource#thumbnail): "There is no
+      // guarantee that the size of the thumbnail is the same as the
+      // thumbnailSize... The actual size depends on the scale of the screen
+      // or window." v3.13.112 removed the resize() call assuming
+      // `thumbnail` already came back at exactly screenWidth*scaleFactor ×
+      // screenHeight*scaleFactor — true on the single-display WSLg setup
+      // this was verified against, false on Lyca's real Windows machine,
+      // where the crop rectangle (computed from the WRONG assumed size)
+      // landed outside/misaligned with the real thumbnail.
+      //
+      // Fix: derive the crop rectangle from the thumbnail's ACTUAL returned
+      // size, scaled against the display's logical size — correct
+      // regardless of what size Electron actually hands back, and still
+      // avoids the wasted resize()-to-same-size v3.13.112 set out to cut.
+      const thumbSize = thumbnail.getSize();
+      const actualScaleX = thumbSize.width / screenWidth;
+      const actualScaleY = thumbSize.height / screenHeight;
+
       // Crop to the capture area bounds, but SKIP the title bar area (28px at top).
       // The title bar has "OCR" label and is not part of the text being scanned.
       const titleBarHeight = 28;
-      const cropX = Math.round(bounds.x * scaleFactor);
-      const cropY = Math.round((bounds.y + titleBarHeight) * scaleFactor);
-      const cropWidth = Math.round(bounds.width * scaleFactor);
-      const cropHeight = Math.round((bounds.height - titleBarHeight) * scaleFactor);
-      const thumbSize = thumbnail.getSize();
+      const cropX = Math.round(bounds.x * actualScaleX);
+      const cropY = Math.round((bounds.y + titleBarHeight) * actualScaleY);
+      const cropWidth = Math.round(bounds.width * actualScaleX);
+      const cropHeight = Math.round((bounds.height - titleBarHeight) * actualScaleY);
 
       return thumbnail.crop({
         x: cropX,
