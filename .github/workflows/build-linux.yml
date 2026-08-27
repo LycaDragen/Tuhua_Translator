@@ -1,0 +1,32 @@
+name: Build Linux AppImage
+
+# Complementa build-mac.yml — mismo patrón, runner nativo por plataforma.
+# Disparo manual porque todavía no hay release automatizado — sólo
+# produce el artefacto (AppImage) para probarlo/subirlo a mano.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # pnpm 11.x requires Node >=22.13 (needs node:sqlite)
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run build:linux
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tuhua-translator-linux-x64
+          path: dist/*.AppImage
+          retention-days: 14

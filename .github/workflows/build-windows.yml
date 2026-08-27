@@ -1,0 +1,32 @@
+name: Build Windows Installer
+
+# Complementa build-mac.yml — mismo patrón, runner nativo por plataforma.
+# Disparo manual porque todavía no hay release automatizado — sólo
+# produce el artefacto (instalador NSIS) para probarlo/subirlo a mano.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # pnpm 11.x requires Node >=22.13 (needs node:sqlite)
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run build:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tuhua-translator-windows-x64
+          path: dist/*.exe
+          retention-days: 14
