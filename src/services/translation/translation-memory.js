@@ -163,7 +163,10 @@ class TranslationMemory {
       const idx = order.indexOf(key);
       if (idx !== -1) order.splice(idx, 1);
       this._persist();
-      this._fuzzyIndexDirty = true;
+      // v3.13.112 (Ronda 4b): incremental removal instead of a dirty flag
+      // — see set()'s comment for why marking dirty here would force the
+      // next fuzzy lookup to rebuild the whole index for one entry.
+      this._removeFromFuzzyIndex(key, entry);
       return null;
     }
 
@@ -304,8 +307,9 @@ class TranslationMemory {
     const entries = this._entries;
     const order = this._order;
 
+    let newEntry;
     if (entries[key]) {
-      entries[key] = {
+      newEntry = {
         sourceText: text,   // v3.11.25: Store plain text for fuzzy matching
         srcLang,
         tgtLang: targetLang,
@@ -316,11 +320,12 @@ class TranslationMemory {
         engineClass: engineClass || entries[key].engineClass,
         variant: variant || entries[key].variant
       };
+      entries[key] = newEntry;
       const idx = order.indexOf(key);
       if (idx !== -1) order.splice(idx, 1);
       order.push(key);
     } else {
-      entries[key] = {
+      newEntry = {
         sourceText: text,   // v3.11.25: Store plain text for fuzzy matching
         srcLang,
         tgtLang: targetLang,
@@ -331,19 +336,67 @@ class TranslationMemory {
         engineClass,
         variant
       };
+      entries[key] = newEntry;
       order.push(key);
 
       // Evict oldest if over max size
       while (order.length > this.maxSize) {
         const oldestKey = order.shift();
+        const evicted = entries[oldestKey];
         delete entries[oldestKey];
+        this._removeFromFuzzyIndex(oldestKey, evicted);
       }
     }
 
     this._persist();
 
-    // Mark fuzzy index as dirty — needs rebuild on next fuzzy lookup
-    this._fuzzyIndexDirty = true;
+    // v3.13.112 (Ronda 4b): patch the fuzzy index for just this one entry
+    // instead of marking the whole thing dirty. Marking dirty here used to
+    // mean the NEXT dialogue line's fuzzy lookup always rebuilt the entire
+    // index from scratch — every line's set() invalidated it right before
+    // the following line's getFuzzy() needed it, so "lazy rebuild" was lazy
+    // in name only; in practice it ran on almost every line. Skipped when
+    // the index hasn't been built yet at all (`_fuzzyIndex === null`) —
+    // the first fuzzy lookup after startup still does one real full build.
+    if (this._fuzzyIndex) {
+      this._upsertFuzzyIndex(key, newEntry);
+    }
+  }
+
+  _fuzzyLangKey(entry) {
+    return `${entry.srcLang || 'auto'}|||${entry.tgtLang || 'es'}|||${entry.profileId || ''}`;
+  }
+
+  _upsertFuzzyIndex(key, entry) {
+    if (!entry.sourceText) return; // same guard _rebuildFuzzyIndex uses (pre-v3.11.25 entries)
+    const langKey = this._fuzzyLangKey(entry);
+    let bucket = this._fuzzyIndex.get(langKey);
+    if (!bucket) {
+      bucket = [];
+      this._fuzzyIndex.set(langKey, bucket);
+    }
+    const candidate = {
+      _key: key,
+      text: entry.sourceText,
+      translation: entry.translation,
+      engineClass: entry.engineClass || '',
+      variant: entry.variant || '',
+      originalEngine: entry.originalEngine || ''
+    };
+    const idx = bucket.findIndex((c) => c._key === key);
+    if (idx !== -1) {
+      bucket[idx] = candidate;
+    } else {
+      bucket.push(candidate);
+    }
+  }
+
+  _removeFromFuzzyIndex(key, entry) {
+    if (!this._fuzzyIndex || !entry) return;
+    const bucket = this._fuzzyIndex.get(this._fuzzyLangKey(entry));
+    if (!bucket) return;
+    const idx = bucket.findIndex((c) => c._key === key);
+    if (idx !== -1) bucket.splice(idx, 1);
   }
 
   clear() {
@@ -379,11 +432,16 @@ class TranslationMemory {
       // (unlike engineClass — see getFuzzy's comment for why that one has
       // to stay a post-filter) — a lookup for profile A must never even
       // SEE profile B's candidates, symmetric in both directions.
-      const langKey = `${entry.srcLang || 'auto'}|||${entry.tgtLang || 'es'}|||${entry.profileId || ''}`;
+      const langKey = this._fuzzyLangKey(entry);
       if (!this._fuzzyIndex.has(langKey)) {
         this._fuzzyIndex.set(langKey, []);
       }
       this._fuzzyIndex.get(langKey).push({
+        // v3.13.112 (Ronda 4b): `_key` lets set()/_getEntry() patch this
+        // exact candidate in place afterwards (_upsertFuzzyIndex /
+        // _removeFromFuzzyIndex) instead of rebuilding the whole index —
+        // see set()'s comment for why that used to run on nearly every line.
+        _key: key,
         text: entry.sourceText,
         translation: entry.translation,
         engineClass: entry.engineClass || '',

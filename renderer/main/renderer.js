@@ -472,12 +472,20 @@
             window._lastSettings = settings;
 
             // OCR settings - restore OCR engine selector from saved settings
-            // v3.13.01: Load OCR engine status (Tesseract/PaddleOCR availability)
             if (settings.ocrEngine) {
                 const ocrEngineSelect = document.getElementById('ocr-engine-select');
                 if (ocrEngineSelect) ocrEngineSelect.value = settings.ocrEngine;
             }
-            loadOcrEngineStatus();
+            // v3.13.112 (Ronda 4c): this used to call loadOcrEngineStatus()
+            // unconditionally right here — which checks PaddleOCR
+            // availability, which loads onnxruntime-node (a few hundred MB
+            // native binding) — on EVERY app launch, regardless of the
+            // saved input method. setInputMethod() below already calls
+            // loadOcrEngineStatus() itself, but only `if (method === 'ocr')`
+            // — that's the one and only place this status is actually
+            // needed at startup. Removed the unconditional call here so a
+            // Textractor/XUAT/Clipboard user's launch no longer pays for
+            // PaddleOCR's native binding at all.
 
             // Translation active toggle - restore from saved settings
             if (settings.translationActive !== undefined) {

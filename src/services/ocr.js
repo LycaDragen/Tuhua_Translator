@@ -180,8 +180,6 @@ class OcrService extends EventEmitter {
     this._isBusy = false;
     this._captureTimeout = null;
     this._isAutoCapturing = false;
-    this._lastImageData = null;
-    this._changeThreshold = 5;
     // v3.13.77 (Stage 4, OCR-refinement round): replaces the old
     // `_preprocessing` shape ({grayscale, threshold, thresholdValue,
     // contrast, contrastValue}), which was almost entirely cosmetic —
@@ -880,18 +878,21 @@ class OcrService extends EventEmitter {
       if (!this._isAutoCapturing) return;
 
       try {
+        // v3.13.112 (Ronda 4d): change-detection (previously this class's
+        // own _hasSignificantChange(), comparing sampled bytes of an
+        // already-PNG-encoded buffer — offsets in compressed data don't
+        // correspond to pixels, and toPNG() paid its cost even when the
+        // frame was about to be discarded as unchanged) now happens
+        // upstream, in ipc-handlers.js's _captureScreenRegionForAutoCapture,
+        // against the raw bitmap before it's ever encoded to PNG.
+        // `_captureFn` returning null covers BOTH "capture failed" and
+        // "frame unchanged" — same handling either way, nothing to OCR.
         const imageBuffer = await this._captureFn();
         if (!imageBuffer) {
           this._scheduleNextCapture();
           return;
         }
 
-        if (this._lastImageData && !this._hasSignificantChange(imageBuffer)) {
-          this._scheduleNextCapture();
-          return;
-        }
-
-        this._lastImageData = imageBuffer;
         await this.recognize(imageBuffer);
       } catch (err) {
         log.error('[OCR] Auto-capture error:', err.message);
@@ -907,7 +908,6 @@ class OcrService extends EventEmitter {
       this._captureTimeout = null;
     }
     this._isAutoCapturing = false;
-    this._lastImageData = null;
     this._lastEmittedText = '';
     // v3.13.79 (Fase 3): the engine-advice window/flag are scoped to one
     // auto-capture session — a fresh session (new game, new capture region)
@@ -957,28 +957,6 @@ class OcrService extends EventEmitter {
       paddleAvailable: PaddleOCREngine.isAvailable(),
       paddleStatus: this._paddleEngine.getStatus()
     };
-  }
-
-  _hasSignificantChange(newImage) {
-    if (!this._lastImageData) return true;
-
-    const oldLen = this._lastImageData.length;
-    const newLen = newImage.length;
-
-    if (Math.abs(oldLen - newLen) > oldLen * 0.05) return true;
-
-    const sampleCount = 200;
-    let changedPixels = 0;
-    const step = Math.max(1, Math.floor(Math.min(oldLen, newLen) / sampleCount));
-
-    for (let i = 0; i < Math.min(oldLen, newLen); i += step) {
-      if (this._lastImageData[i] !== newImage[i]) {
-        changedPixels++;
-      }
-    }
-
-    const changePercent = (changedPixels / sampleCount) * 100;
-    return changePercent >= this._changeThreshold;
   }
 
   /**

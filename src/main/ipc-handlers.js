@@ -2240,6 +2240,28 @@ class IpcHandlers {
    * @returns {Promise<Buffer|null>} PNG image buffer of the captured region
    */
   async _captureScreenRegion() {
+    const cropped = await this._captureScreenRegionImage();
+    if (!cropped) return null;
+    return Buffer.from(cropped.toPNG());
+  }
+
+  /**
+   * v3.13.112 (Ronda 4d): the capture+crop guts of _captureScreenRegion(),
+   * split out so the auto-capture loop (_captureScreenRegionForAutoCapture
+   * below) can look at the raw NativeImage BEFORE paying for a PNG encode —
+   * every other caller (manual "capture now" button, Ctrl+Shift+S hotkey)
+   * goes through _captureScreenRegion() above and always gets a real PNG,
+   * unaffected by this split.
+   *
+   * Also drops the `resize()` call the old code ran here: `thumbnailSize`
+   * passed to desktopCapturer.getSources() below already requests EXACTLY
+   * screenWidth*scaleFactor × screenHeight*scaleFactor — resizing the
+   * thumbnail to that same size was a full-frame copy (~15MB at 2560×1440)
+   * that changed nothing. Cropping straight from `thumbnail` instead.
+   *
+   * @returns {Promise<Electron.NativeImage|null>}
+   */
+  async _captureScreenRegionImage() {
     try {
       const bounds = this.windowManager.getCaptureAreaBounds();
       if (!bounds) {
@@ -2282,27 +2304,70 @@ class IpcHandlers {
       const cropY = Math.round((bounds.y + titleBarHeight) * scaleFactor);
       const cropWidth = Math.round(bounds.width * scaleFactor);
       const cropHeight = Math.round((bounds.height - titleBarHeight) * scaleFactor);
+      const thumbSize = thumbnail.getSize();
 
-      // Resize the full screenshot and crop it
-      const resized = thumbnail.resize({
-        width: Math.round(screenWidth * scaleFactor),
-        height: Math.round(screenHeight * scaleFactor)
-      });
-
-      const cropped = resized.crop({
+      return thumbnail.crop({
         x: cropX,
         y: cropY,
-        width: Math.min(cropWidth, resized.getSize().width - cropX),
-        height: Math.min(cropHeight, resized.getSize().height - cropY)
+        width: Math.min(cropWidth, thumbSize.width - cropX),
+        height: Math.min(cropHeight, thumbSize.height - cropY)
       });
-
-      // Convert to PNG buffer
-      const pngBuffer = cropped.toPNG();
-      return Buffer.from(pngBuffer);
     } catch (err) {
       console.error('[OCR] Screen capture error:', err.message);
       return null;
     }
+  }
+
+  /**
+   * v3.13.112 (Ronda 4d): capture path used ONLY by the auto-capture loop
+   * (_startOcrAutoCapture below). Compares on the raw, uncompressed bitmap
+   * — moved here from ocr.js's old _hasSignificantChange(), which compared
+   * sampled bytes of the already-PNG-encoded buffer. That was wrong on two
+   * counts: PNG's DEFLATE compression means byte offset N carries no fixed
+   * relationship to pixel N (so the sampling loop wasn't really sampling
+   * pixels), and toPNG() itself ran every ~3.5s cycle even when the result
+   * was about to be thrown away as "unchanged" — real, wasted CPU on a
+   * timer that fires the whole time a game is running. Returns null on an
+   * unchanged frame, same contract ocr.js's loop already handles for a
+   * failed capture (see _scheduleNextCapture's `if (!imageBuffer)` guard) —
+   * so no image ever reaches OCR recognition, and toPNG() is only paid for
+   * once we already know the frame is going to be used.
+   * @returns {Promise<Buffer|null>}
+   */
+  async _captureScreenRegionForAutoCapture() {
+    const cropped = await this._captureScreenRegionImage();
+    if (!cropped) return null;
+
+    const bitmap = cropped.toBitmap();
+    if (this._lastCaptureBitmap && !this._bitmapHasSignificantChange(this._lastCaptureBitmap, bitmap)) {
+      return null;
+    }
+    this._lastCaptureBitmap = bitmap;
+    return Buffer.from(cropped.toPNG());
+  }
+
+  /**
+   * v3.13.112 (Ronda 4d): same sampled-stride comparison ocr.js's
+   * _hasSignificantChange() used to do, just fed real pixel bytes (a
+   * NativeImage bitmap — raw BGRA, no compression) instead of a PNG
+   * buffer, so the offsets it samples actually correspond to pixel data.
+   * @private
+   */
+  _bitmapHasSignificantChange(oldBitmap, newBitmap) {
+    const oldLen = oldBitmap.length;
+    const newLen = newBitmap.length;
+    if (Math.abs(oldLen - newLen) > oldLen * 0.05) return true;
+
+    const sampleCount = 200;
+    let changedPixels = 0;
+    const step = Math.max(1, Math.floor(Math.min(oldLen, newLen) / sampleCount));
+
+    for (let i = 0; i < Math.min(oldLen, newLen); i += step) {
+      if (oldBitmap[i] !== newBitmap[i]) changedPixels++;
+    }
+
+    const changePercent = (changedPixels / sampleCount) * 100;
+    return changePercent >= 5; // same 5% default ocr.js's _changeThreshold used
   }
 
   /**
@@ -2476,8 +2541,12 @@ class IpcHandlers {
     // mid-session interval swap, which startAutoCapture()'s own setTimeout
     // chain (see ocr.js) doesn't support.
     const intervalMs = this.store.get('ocrCaptureIntervalMs', 3500);
+    // v3.13.112 (Ronda 4d): _captureScreenRegionForAutoCapture(), not the
+    // plain _captureScreenRegion() — see its own comment for why (skips
+    // the PNG encode entirely on unchanged frames, compares real pixels).
+    this._lastCaptureBitmap = null;
     this.ocrService.startAutoCapture(async () => {
-      return await this._captureScreenRegion();
+      return await this._captureScreenRegionForAutoCapture();
     }, intervalMs);
   }
 

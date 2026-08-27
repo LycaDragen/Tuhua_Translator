@@ -43,11 +43,26 @@
 const EventEmitter = require('events');
 const log = require('electron-log');
 
+// v3.13.112 (Ronda 4c): `require('onnxruntime-node')` used to run at
+// module load time, unconditionally — dlopen'ing a native binding of a few
+// hundred MB on EVERY app launch, even for a user who only ever uses
+// Tesseract (the default engine). ocr.js requires this file unconditionally
+// at startup (via index.js), so the cost was paid before the user had made
+// any OCR-engine choice at all. Deferred to first real use (isAvailable()/
+// initialize(), called only once the user actually picks PaddleOCR),
+// memoized so the deferred require only ever runs once.
 let ort = null;
-try {
-  ort = require('onnxruntime-node');
-} catch (e) {
-  // Will be handled by PaddleModelManager
+let _ortLoadAttempted = false;
+function getOrt() {
+  if (!_ortLoadAttempted) {
+    _ortLoadAttempted = true;
+    try {
+      ort = require('onnxruntime-node');
+    } catch (e) {
+      // Will be handled by PaddleModelManager
+    }
+  }
+  return ort;
 }
 
 const { PaddleModelManager, getRecModelKeyForLang } = require('./paddle-models');
@@ -134,7 +149,7 @@ class PaddleOCREngine extends EventEmitter {
    * Check if the PaddleOCR engine is available (onnxruntime-node installed)
    */
   static isAvailable() {
-    return ort !== null;
+    return getOrt() !== null;
   }
 
   /**
@@ -166,7 +181,7 @@ class PaddleOCREngine extends EventEmitter {
       return;
     }
 
-    if (!ort) {
+    if (!getOrt()) {
       throw new Error('onnxruntime-node is not installed. PaddleOCR requires onnxruntime-node.');
     }
 

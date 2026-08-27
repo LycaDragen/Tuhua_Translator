@@ -63,13 +63,24 @@ const http = require('http');
 const { app } = require('electron');
 const log = require('electron-log');
 
-// Try to load onnxruntime-node — graceful degradation if not available
+// v3.13.112 (Ronda 4c): same fix as ocr-paddle.js — the require() below
+// used to run at module load time unconditionally (dlopen of a few hundred
+// MB native binding on every app startup, even when the user only ever
+// uses Tesseract). Deferred to first real use, memoized. See loadSessions()
+// below, the sole gate every other method that touches `ort` sits behind.
 let ort = null;
-try {
-  ort = require('onnxruntime-node');
-} catch (e) {
-  log.warn('[PaddleOCR] onnxruntime-node not available:', e.message);
-  log.warn('[PaddleOCR] PaddleOCR engine will not be available. Falling back to Tesseract.');
+let _ortLoadAttempted = false;
+function getOrt() {
+  if (!_ortLoadAttempted) {
+    _ortLoadAttempted = true;
+    try {
+      ort = require('onnxruntime-node');
+    } catch (e) {
+      log.warn('[PaddleOCR] onnxruntime-node not available:', e.message);
+      log.warn('[PaddleOCR] PaddleOCR engine will not be available. Falling back to Tesseract.');
+    }
+  }
+  return ort;
 }
 
 // ─── Language-specific model definitions ─────────────────────────────────────
@@ -440,7 +451,7 @@ class PaddleModelManager {
    * @param {object} options - Session options
    */
   async loadSessions(options = {}) {
-    if (!ort) {
+    if (!getOrt()) {
       throw new Error('onnxruntime-node is not available');
     }
 
