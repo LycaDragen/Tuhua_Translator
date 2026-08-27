@@ -658,7 +658,7 @@
                     </div>
                     <!-- Install in Game -->
                     <div class="space-y-2">
-                        <button onclick="installXuat()" class="w-full px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition flex items-center justify-center gap-2">
+                        <button id="xuat-install-btn" onclick="installXuat()" class="w-full px-3 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
                             🎮 <span data-i18n="xuat_install_btn">Instalar XUAT en un Juego</span>
                         </button>
                         <p class="text-xs text-gray-400 text-center" data-i18n="xuat_install_desc">Selecciona el .exe del juego Unity y Tuhua instalará automáticamente todo lo necesario.</p>

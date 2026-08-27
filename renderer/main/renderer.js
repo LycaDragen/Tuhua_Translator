@@ -5391,7 +5391,18 @@
             }
         }
 
+        // v3.13.109: sin este flag, clickear el botón varias veces (ej.
+        // reintentar creyendo que el anterior falló) disparaba varios
+        // runFullInstall() en paralelo escribiendo a la misma carpeta del
+        // juego — causa real de instalaciones corruptas verificada con
+        // session87.log. El botón se deshabilita mientras dura la llamada.
+        let xuatInstalling = false;
+
         async function installXuat() {
+            if (xuatInstalling) return;
+            xuatInstalling = true;
+            const btnEl = document.getElementById('xuat-install-btn');
+            if (btnEl) btnEl.disabled = true;
             try {
                 const result = await api.xuatSelectGame();
                 if (!result || result.canceled || !result.filePath) return;
@@ -5428,13 +5439,25 @@
                         document.getElementById('xuat-install-progress').classList.add('hidden');
                     }, 3000);
                 } else {
-                    document.getElementById('xuat-install-status').textContent = 'Error: ' + (installResult.error || 'Instalación fallida');
+                    const rawError = installResult.error || 'Instalación fallida';
+                    // v3.13.109: EBUSY/EPERM/UNKNOWN en un copyfile casi
+                    // siempre significa que Windows tiene el DLL abierto —
+                    // en la práctica, el juego (o BepInEx ya cargado en él)
+                    // sigue corriendo. El mensaje crudo del SO no lo decía.
+                    const looksLikeFileLock = /EBUSY|EPERM|UNKNOWN.*copyfile/i.test(rawError);
+                    const friendlyError = looksLikeFileLock
+                        ? rawError + ' — cerrá el juego por completo e intentá de nuevo (el archivo sigue en uso).'
+                        : rawError;
+                    document.getElementById('xuat-install-status').textContent = 'Error: ' + friendlyError;
                     document.getElementById('xuat-install-bar').style.width = '0%';
-                    showToast('Error al instalar XUAT: ' + (installResult.error || 'Desconocido'));
+                    showToast('Error al instalar XUAT: ' + friendlyError);
                 }
             } catch (err) {
                 showToast('Error: ' + err.message);
                 document.getElementById('xuat-install-progress').classList.add('hidden');
+            } finally {
+                xuatInstalling = false;
+                if (btnEl) btnEl.disabled = false;
             }
         }
 
