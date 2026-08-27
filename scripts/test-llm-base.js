@@ -23,7 +23,8 @@ const { LLMRefusalError, LLMPassthroughError } = require(path.join('..', 'src', 
 const { renderPromptTemplate } = require(path.join('..', 'src', 'services', 'translation', 'prompt-template.js'));
 const { DEFAULT_TEMPLATE } = require(path.join('..', 'src', 'services', 'translation', 'prompt-presets.js'));
 
-const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
+const { makeCheckRegistry, run } = require('./lib/bench.js');
+const { check, CHECKS } = makeCheckRegistry();
 
 // v3.13.59 (Fase 4): the default prompt is now a rendered TEMPLATE
 // (prompt-presets.js's DEFAULT_TEMPLATE), not a static string — computed
@@ -68,16 +69,6 @@ function responseWith(content, finishReason = 'stop') {
   return { data: { choices: [{ message: { content }, finish_reason: finishReason }] } };
 }
 
-function parseArgs(argv) {
-  const args = { quiet: false };
-  for (const a of argv) if (a === '--quiet') args.quiet = true;
-  return args;
-}
-
-const CHECKS = [];
-function check(id, fn, note) {
-  CHECKS.push({ id, fn, note });
-}
 
 // ─── auth header: sent only when there's a key to send ─────────────────
 check('openai-sends-bearer-header-when-key-present', async () => {
@@ -492,32 +483,4 @@ check('aborting-mid-request-actually-cancels-the-real-http-call', async () => {
   return { pass, actual: { serverSawRequest, errorCode: threw?.code } };
 }, 'Proves cancellation is real, not just a forwarded option nobody reads — the request must have actually reached the server AND the promise must reject with ERR_CANCELED once aborted, against a live socket.');
 
-async function run() {
-  const args = parseArgs(process.argv.slice(2));
-  const results = [];
-  for (const c of CHECKS) {
-    let outcome;
-    try {
-      outcome = await c.fn();
-    } catch (e) {
-      outcome = { pass: false, error: e.message };
-    }
-    results.push({ id: c.id, note: c.note, ...outcome });
-  }
-
-  console.log(`${C.bold}llm-base.js bench${C.reset} — ${results.length} case(s)\n`);
-  let passed = 0;
-  for (const r of results) {
-    const mark = r.pass ? `${C.green}PASS${C.reset}` : `${C.red}FAIL${C.reset}`;
-    console.log(`${mark}  ${r.id}`);
-    if (r.pass) passed++;
-    if (!args.quiet && !r.pass) {
-      console.log(`      ${C.dim}${JSON.stringify(r, null, 2).split('\n').join('\n      ')}${C.reset}`);
-    }
-  }
-
-  console.log(`\n${C.bold}Overall${C.reset}  ${passed === results.length ? C.green : C.red}${passed}/${results.length}${C.reset}`);
-  process.exit(passed === results.length ? 0 : 1);
-}
-
-run();
+run("llm-base.js bench", CHECKS);

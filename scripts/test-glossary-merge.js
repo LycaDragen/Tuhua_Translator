@@ -17,7 +17,8 @@ const path = require('path');
 const { conflictKey, mergeGlossaryLayers } = require(path.join('..', 'src', 'services', 'translation', 'glossary-merge.js'));
 const GlossaryService = require(path.join('..', 'src', 'services', 'translation', 'glossary.js'));
 
-const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
+const { makeCheckRegistry, run } = require('./lib/bench.js');
+const { check, CHECKS } = makeCheckRegistry();
 const proto = GlossaryService.prototype;
 
 function applyAll(text, entries) {
@@ -28,19 +29,9 @@ function applyAll(text, entries) {
   return result;
 }
 
-function parseArgs(argv) {
-  const args = { quiet: false };
-  for (const a of argv) if (a === '--quiet') args.quiet = true;
-  return args;
-}
-
 const entry = (source, target, mode = 'exact', enabled = true) =>
   ({ id: `${source}-${mode}`, source, target, mode, enabled, createdAt: 1 });
 
-const CHECKS = [];
-function check(id, fn, note) {
-  CHECKS.push({ id, fn, note });
-}
 
 // ─── conflictKey ────────────────────────────────────────────────────────
 check('conflict-key-differs-by-mode', () => {
@@ -144,31 +135,4 @@ check('end-to-end-case-insensitive-and-regex-modes-both-apply', () => {
   return { pass: result === 'Hola, the gato is here', actual: result };
 });
 
-function run() {
-  const args = parseArgs(process.argv.slice(2));
-  const results = CHECKS.map((c) => {
-    let outcome;
-    try {
-      outcome = c.fn();
-    } catch (e) {
-      outcome = { pass: false, error: e.message };
-    }
-    return { id: c.id, note: c.note, ...outcome };
-  });
-
-  console.log(`${C.bold}glossary-merge.js bench${C.reset} — ${results.length} case(s)\n`);
-  let passed = 0;
-  for (const r of results) {
-    const mark = r.pass ? `${C.green}PASS${C.reset}` : `${C.red}FAIL${C.reset}`;
-    console.log(`${mark}  ${r.id}`);
-    if (r.pass) passed++;
-    if (!args.quiet && !r.pass) {
-      console.log(`      ${C.dim}${JSON.stringify(r, null, 2).split('\n').join('\n      ')}${C.reset}`);
-    }
-  }
-
-  console.log(`\n${C.bold}Overall${C.reset}  ${passed === results.length ? C.green : C.red}${passed}/${results.length}${C.reset}`);
-  process.exit(passed === results.length ? 0 : 1);
-}
-
-run();
+run("glossary-merge.js bench", CHECKS);

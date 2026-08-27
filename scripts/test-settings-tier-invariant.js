@@ -26,13 +26,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m', yellow: '\x1b[33m' };
-
-function parseArgs(argv) {
-  const args = { quiet: false };
-  for (const a of argv) if (a === '--quiet') args.quiet = true;
-  return args;
-}
+const { makeEagerCheckRegistry } = require('./lib/bench.js');
+const { check, report } = makeEagerCheckRegistry();
 
 const htmlPath = path.join(__dirname, '..', 'renderer', 'main', 'index.html');
 const jsPath = path.join(__dirname, '..', 'renderer', 'main', 'renderer.js');
@@ -88,20 +83,6 @@ function extractGetElementByIdIds(fnBody) {
   return ids;
 }
 
-const results = [];
-let passCount = 0;
-let failCount = 0;
-
-function check(name, fn, note) {
-  let result;
-  try {
-    result = fn();
-  } catch (e) {
-    result = { pass: false, actual: `threw: ${e.message}` };
-  }
-  results.push({ name, note, ...result });
-  if (result.pass) passCount++; else failCount++;
-}
 
 // ─── Build the three sets ───────────────────────────────────────────────
 const tierAIds = extractImmediateIds(html);
@@ -158,15 +139,4 @@ check('known-non-input-tier-a-controls-are-not-gathered', () => {
   return { pass: wronglyGathered.length === 0, actual: wronglyGathered };
 }, 'uiLanguage (#lang-select) auto-saves via changeLanguage() and is not an <input>/<select> inside either gather function by construction — confirms it never regresses into being staged too.');
 
-// ─── Summary ─────────────────────────────────────────────────────────────
-const args = parseArgs(process.argv.slice(2));
-for (const r of results) {
-  const status = r.pass ? `${C.green}PASS${C.reset}` : `${C.red}FAIL${C.reset}`;
-  console.log(`${status}  ${r.name}`);
-  if (!r.pass || !args.quiet) {
-    if (r.note) console.log(`  ${C.dim}${r.note}${C.reset}`);
-    if (!r.pass) console.log(`  ${C.yellow}actual:${C.reset}`, JSON.stringify(r.actual));
-  }
-}
-console.log(`\n${C.bold}Overall${C.reset}  ${failCount === 0 ? C.green : C.red}${passCount}/${results.length}${C.reset}`);
-process.exit(failCount === 0 ? 0 : 1);
+report();

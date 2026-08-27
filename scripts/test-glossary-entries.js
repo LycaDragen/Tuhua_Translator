@@ -12,18 +12,8 @@
 const path = require('path');
 const glossaryEntries = require(path.join('..', 'src', 'services', 'translation', 'glossary-entries.js'));
 
-const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
-
-function parseArgs(argv) {
-  const args = { quiet: false };
-  for (const a of argv) if (a === '--quiet') args.quiet = true;
-  return args;
-}
-
-const CHECKS = [];
-function check(id, fn, note) {
-  CHECKS.push({ id, fn, note });
-}
+const { makeCheckRegistry, run } = require('./lib/bench.js');
+const { check, CHECKS } = makeCheckRegistry();
 
 check('generate-id-uniqueness', () => {
   const ids = new Set(Array.from({ length: 100 }, () => glossaryEntries.generateId()));
@@ -159,31 +149,4 @@ check('same-primitives-work-identically-for-a-global-store-list-and-a-plain-prof
   return { pass, actual: { globalList, profileList } };
 });
 
-function run() {
-  const args = parseArgs(process.argv.slice(2));
-  const results = CHECKS.map((c) => {
-    let outcome;
-    try {
-      outcome = c.fn();
-    } catch (e) {
-      outcome = { pass: false, error: e.message };
-    }
-    return { id: c.id, note: c.note, ...outcome };
-  });
-
-  console.log(`${C.bold}glossary-entries.js bench${C.reset} — ${results.length} case(s)\n`);
-  let passed = 0;
-  for (const r of results) {
-    const mark = r.pass ? `${C.green}PASS${C.reset}` : `${C.red}FAIL${C.reset}`;
-    console.log(`${mark}  ${r.id}`);
-    if (r.pass) passed++;
-    if (!args.quiet && !r.pass) {
-      console.log(`      ${C.dim}${JSON.stringify(r, null, 2).split('\n').join('\n      ')}${C.reset}`);
-    }
-  }
-
-  console.log(`\n${C.bold}Overall${C.reset}  ${passed === results.length ? C.green : C.red}${passed}/${results.length}${C.reset}`);
-  process.exit(passed === results.length ? 0 : 1);
-}
-
-run();
+run("glossary-entries.js bench", CHECKS);

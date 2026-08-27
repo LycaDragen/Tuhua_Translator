@@ -27,18 +27,8 @@ const {
   seedProviderKeysFromLegacyOpenAIKey
 } = require(path.join('..', 'src', 'services', 'translation', 'llm-providers.js'));
 
-const C = { reset: '\x1b[0m', bold: '\x1b[1m', dim: '\x1b[2m', green: '\x1b[32m', red: '\x1b[31m' };
-
-function parseArgs(argv) {
-  const args = { quiet: false };
-  for (const a of argv) if (a === '--quiet') args.quiet = true;
-  return args;
-}
-
-const CHECKS = [];
-function check(id, fn, note) {
-  CHECKS.push({ id, fn, note });
-}
+const { makeCheckRegistry, run } = require('./lib/bench.js');
+const { check, CHECKS } = makeCheckRegistry();
 
 // ─── table shape ──────────────────────────────────────────────────────────
 check('cloud-provider-ids-are-unique', () => {
@@ -169,31 +159,4 @@ check('migration-does-not-touch-a-configured-provider-keys-map', () => {
   return { pass: result === null, actual: result };
 }, 'A user who has already set up a different provider (and never had an openaiKey used) must not have it silently reintroduced.');
 
-function run() {
-  const args = parseArgs(process.argv.slice(2));
-  const results = CHECKS.map((c) => {
-    let outcome;
-    try {
-      outcome = c.fn();
-    } catch (e) {
-      outcome = { pass: false, error: e.message };
-    }
-    return { id: c.id, note: c.note, ...outcome };
-  });
-
-  console.log(`${C.bold}llm-providers.js bench${C.reset} — ${results.length} case(s)\n`);
-  let passed = 0;
-  for (const r of results) {
-    const mark = r.pass ? `${C.green}PASS${C.reset}` : `${C.red}FAIL${C.reset}`;
-    console.log(`${mark}  ${r.id}`);
-    if (r.pass) passed++;
-    if (!args.quiet && !r.pass) {
-      console.log(`      ${C.dim}${JSON.stringify(r, null, 2).split('\n').join('\n      ')}${C.reset}`);
-    }
-  }
-
-  console.log(`\n${C.bold}Overall${C.reset}  ${passed === results.length ? C.green : C.red}${passed}/${results.length}${C.reset}`);
-  process.exit(passed === results.length ? 0 : 1);
-}
-
-run();
+run("llm-providers.js bench", CHECKS);
