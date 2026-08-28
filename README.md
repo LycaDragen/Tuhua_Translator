@@ -15,11 +15,11 @@ Tuhua Translator es una aplicación de escritorio gratuita y de código abierto 
 ### ✨ Características principales
 
 - **4 métodos de entrada**: Textractor, Portapapeles, OCR y XUAT (XUnity.AutoTranslator)
-- **7 motores de traducción**: Google Translate (gratis), Bing (gratis), DeepL, OpenAI/GPT, Local LLM, LibreTranslate y Custom MT
-- **Overlay transparente**: Traducciones superpuestas sobre la ventana del juego
-- **Glosario personalizable**: Define traducciones específicas para nombres y términos
+- **7 motores de traducción**: Google Translate (gratis), Bing (gratis), DeepL, OpenAI (7 proveedores cloud vía este mismo motor: OpenAI, OpenRouter, DeepSeek, Google Gemini, Anthropic, Groq, Custom), Local LLM, LibreTranslate y Custom MT
+- **Overlay transparente**: Traducciones superpuestas sobre la ventana del juego, con overlay de entrada para escribir texto manualmente
+- **Glosario personalizable**: Traducciones específicas para nombres y términos, con importación automática de personajes desde [VNDB](https://vndb.org/)
 - **Memoria de traducción**: Caché inteligente con fuzzy matching para diálogos repetitivos
-- **Perfiles por juego**: Configuraciones independientes para cada juego
+- **Perfiles por juego**: Glosario, ajustes de traducción y memoria independientes para cada juego
 - **8 idiomas de interfaz**: Español, English, 日本語, 中文, Русский, Português, Italiano, Français
 - **Tema oscuro/claro**: Interfaz adaptable a tu preferencia
 
@@ -70,7 +70,7 @@ Conecta con [Textractor](https://github.com/Artikash/Textractor) para extraer te
 - Extrae texto de la memoria del proceso del juego
 - Soporte para hooks personalizados
 - Auto-detección de hooks al lanzar juegos
-- Puerto configurable (por defecto: 9251)
+- Puerto fijo (9251) para el Modo Manual TCP — no hay campo en la interfaz para cambiarlo
 
 ### 📋 Portapapeles
 Monitorea el portapapeles del sistema y traduce automáticamente cualquier texto copiado. Ideal para juegos que permiten copiar texto.
@@ -80,7 +80,7 @@ Captura una región de la pantalla y detecta el texto directamente de la imagen.
 
 - **Motor por defecto: Tesseract.js** — corre sin descargas adicionales, sin depender de un binario nativo opcional (`onnxruntime-node`)
 - **PaddleOCR (PP-OCRv5) disponible como motor alternativo** — modelo unificado chino+japonés (kanji, kana, texto simplificado y tradicional) más un modelo dedicado para coreano, corriendo 100% local vía ONNX Runtime, sin necesidad de Python ni conexión a internet tras la primera descarga de modelos. Recomendado para japonés/chino/coreano, o cuando la escena tiene mucho ruido visual detrás del texto
-- **Detección automática de idioma** (`auto`): identifica japonés/chino/coreano por el texto reconocido y cambia de modelo sin intervención (ambos motores)
+- **Detección automática de idioma** (`auto`): con Tesseract alterna entre inglés, japonés y coreano según el texto reconocido (nunca activa el modelo chino); con PaddleOCR usa un modelo unificado chino+japonés y sólo cambia a un modelo dedicado si detecta coreano
 - **Filtrado geométrico de furigana** (motor PaddleOCR): descarta automáticamente las lecturas kana pequeñas que aparecen sobre el kanji, para que no contaminen el texto a traducir
 - Soporte para texto vertical (縦書き) con detección y rotación automática (motor PaddleOCR)
 - Captura manual o automática (intervalo configurable)
@@ -102,18 +102,16 @@ Integra con [XUnity.AutoTranslator](https://github.com/bbepis/XUnity.AutoTransla
 | 🌐 Google Translate | Gratuito | No | Web scraping, sin límite oficial |
 | 🔍 Bing Translator | Gratuito | No | Web scraping, sin límite oficial |
 | 💎 DeepL API | Oficial | Sí | Alta calidad, soporta formalidad |
-| 🧠 OpenAI / GPT | Oficial | Sí | Traducción contextual con IA |
-| 🤖 Local LLM | Local | No | Ollama / LM Studio, 100% offline |
-| 🏠 LibreTranslate | Self-hosted | Opcional | Open source, privacidad total |
+| 🧠 OpenAI (LLM cloud) | Oficial | Sí | Un solo motor, 7 proveedores seleccionables: OpenAI, OpenRouter, DeepSeek, Google Gemini, Anthropic, Groq, Custom |
+| 🤖 Local LLM | Local | No | LM Studio, Ollama, llama.cpp o KoboldCpp, 100% offline |
+| 🏠 LibreTranslate | Self-hosted | No | Open source, privacidad total |
 | ⚙️ Custom MT | Personalizado | Opcional | Cualquier endpoint compatible |
 
 ### DeepL: Formalidad
-Con DeepL puedes controlar el nivel de formalidad de la traducción, ideal para japonés (keigo/casual):
+Con DeepL puedes controlar el nivel de formalidad de la traducción, ideal para japonés (keigo/casual). Es un ajuste por perfil:
 - Por defecto
 - Preferir formal
 - Preferir informal
-- Siempre formal
-- Siempre informal
 
 ### Documentación técnica
 
@@ -129,7 +127,7 @@ Con DeepL puedes controlar el nivel de formalidad de la traducción, ideal para 
 El glosario te permite definir traducciones personalizadas para nombres de personajes, términos específicos del juego y jerga que los motores de traducción no manejan bien.
 
 - Soporte para expresiones regulares
-- Prioridad configurable por entrada
+- Importación automática de nombres de personajes desde [VNDB](https://vndb.org/)
 - Aplicación automática antes de la traducción
 - Importar/Exportar en formato JSON
 
@@ -150,9 +148,13 @@ La memoria de traducción almacena pares de traducciones previas y los reutiliza
 
 | Atajo | Acción |
 |---|---|
-| `Ctrl+Shift+T` | Activar/Pausar traducción |
-| `Ctrl+Shift+O` | Mostrar/Ocultar overlay |
-| `Ctrl+Shift+C` | Activar/Desactivar click-through |
+| `Ctrl+Shift+L` | Mostrar/Ocultar la ventana principal |
+| `Ctrl+Shift+E` | Mostrar/Ocultar overlay |
+| `Ctrl+Shift+M` | Activar/Desactivar click-through |
+| `Ctrl+Shift+R` | Retraducir manualmente (útil en modo Portapapeles) |
+| `Ctrl+Shift+O` | Ciclar la opacidad del overlay |
+| `Ctrl+Shift+S` | Captura de OCR inmediata (sólo con OCR activo) |
+| `Ctrl+Shift+D` | Abrir/cerrar las herramientas de desarrollo (DevTools) |
 
 ---
 
@@ -183,15 +185,28 @@ tuhua-translator/
 │   └── services/                # Servicios del backend
 │       ├── clipboard-watcher.js
 │       ├── ocr.js
+│       ├── ocr-paddle.js
 │       ├── textractor.js
 │       ├── textractor-launcher.js
 │       ├── xuat-server.js
 │       ├── xuat-installer.js
+│       ├── vndb.js              # Importación de personajes desde VNDB
+│       ├── game-engine-detect.js
+│       ├── profiles/            # Perfiles por juego
+│       │   ├── profile-schema.js
+│       │   ├── profile-store.js
+│       │   └── profile-migrations.js
 │       └── translation/
 │           ├── pipeline.js      # Orquestador central
 │           ├── cache.js         # Caché LRU persistente
 │           ├── translation-memory.js
-│           ├── glossary.js
+│           ├── context-memory.js
+│           ├── glossary-entries.js
+│           ├── glossary-merge.js
+│           ├── glossary-prompt.js
+│           ├── deepl-glossary-sync.js
+│           ├── llm-providers.js # Los 7 proveedores del motor OpenAI/LLM
+│           ├── prompt-presets.js
 │           └── engines/         # Motores de traducción
 │               ├── google-free.js
 │               ├── bing.js
@@ -207,6 +222,8 @@ tuhua-translator/
 │   │   ├── i18n.js
 │   │   └── assets/
 │   ├── output-overlay/          # Overlay de traducción
+│   ├── input-overlay/           # Overlay para texto manual
+│   ├── word-save-prompt/        # Guardado rápido de términos al glosario
 │   └── capture-area/            # Área de captura OCR
 ├── package.json
 ├── LICENSE
@@ -232,7 +249,7 @@ Si encuentras un bug, por favor abre un [Issue](https://github.com/LycaDragen/Tu
 - Descripción del problema
 - Pasos para reproducirlo
 - Tu sistema operativo y versión de Tuhua Translator
-- Logs (disponibles desde el botón de Debug en la interfaz)
+- Logs (últimas 100 líneas, copiables al portapapeles con el botón **Logs** de la interfaz)
 
 ---
 
