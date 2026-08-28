@@ -22,6 +22,7 @@ Tuhua Translator es una aplicación de escritorio gratuita y de código abierto 
 - **Perfiles por juego**: Glosario, ajustes de traducción y memoria independientes para cada juego
 - **8 idiomas de interfaz**: Español, English, 日本語, 中文, Русский, Português, Italiano, Français
 - **Tema oscuro/claro**: Interfaz adaptable a tu preferencia
+- **Buscador de actualizaciones**: Avisa cuando hay una versión nueva y la instala desde la app (Windows/Linux), sin descargar nada sin tu permiso
 
 ---
 
@@ -38,6 +39,17 @@ Ve a la sección [Releases](https://github.com/LycaDragen/Tuhua_Translator/relea
 | macOS | `.dmg` | Sólo Apple Silicon (M1/M2/M3/M4) — arrastra a Aplicaciones |
 
 > **Los instaladores no están firmados** (todavía no hay certificado de desarrollador). Windows va a mostrar un aviso de SmartScreen ("Más información" → "Ejecutar de todas formas") y macOS va a bloquear la apertura con Gatekeeper la primera vez (clic derecho → "Abrir"). Es esperado — el código es público, podés revisarlo en este mismo repo.
+
+### Actualizaciones
+
+Tuhua avisa solo cuando hay una versión nueva: consulta GitHub 30 segundos después de abrir y muestra un aviso en la pestaña **Configuración** (el número de versión de la barra superior también se pone en ámbar con `↑`). **Nunca descarga ni instala nada sin que hagas clic** — podés descargar, ver los cambios, o ignorar esa versión concreta.
+
+- En **Windows y Linux** la descarga y la instalación ocurren dentro de la app.
+- En **macOS** sólo avisa y abre la página de descarga: Apple exige un certificado de firma de pago para permitir auto-actualización.
+
+También podés buscar manualmente y apagar el chequeo automático desde **Configuración → Avanzado → Actualizaciones**.
+
+> **Si venís de una versión `3.13.x`**: el buscador no te va a ofrecer la `1.0.1` ni las siguientes, porque `1.0.1` es un número menor que `3.13.120` (la numeración se reinició a semver real, ver [CHANGELOG.md](CHANGELOG.md)). Instalá la última versión a mano una sola vez y a partir de ahí las actualizaciones funcionan solas.
 
 ### Desde el código fuente
 
