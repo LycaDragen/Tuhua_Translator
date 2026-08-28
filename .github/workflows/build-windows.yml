@@ -1,10 +1,29 @@
 name: Build Windows Installer
 
 # Complementa build-mac.yml — mismo patrón, runner nativo por plataforma.
-# Disparo manual porque todavía no hay release automatizado — sólo
-# produce el artefacto (instalador NSIS) para probarlo/subirlo a mano.
+#
+# Dos disparos:
+#   - workflow_dispatch: sólo produce el artefacto, para probarlo.
+#   - push de un tag v*: además PUBLICA al release (draft) de GitHub.
+#
+# v1.0.1: el disparo por tag existe porque el auto-updater lo necesita.
+# electron-updater no lee la lista de assets del release: descarga
+# `latest.yml`, que electron-builder genera SÓLO al publicar, y que dice el
+# nombre exacto del instalador y su sha512. Subir los binarios a mano (el
+# flujo anterior) deja al updater sin ese archivo, y encima omite los
+# `.blockmap` que habilitan la descarga diferencial.
+#
+# IMPORTANTE: no renombrar los assets a mano después de publicar. El `path:`
+# de latest.yml tiene que coincidir byte a byte con el nombre del asset, y
+# GitHub convierte los espacios del nombre en puntos — por eso `artifactName`
+# en package.json usa ${name} (tuhua-translator), no ${productName}.
 on:
   workflow_dispatch: {}
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # necesario para que GITHUB_TOKEN pueda subir los assets
 
 jobs:
   build-windows:
@@ -23,10 +42,19 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm run build:win
+      - name: Build (publica sólo si el disparo fue un tag)
+        run: pnpm run ${{ github.ref_type == 'tag' && 'build:win:publish' || 'build:win' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Se mantiene en ambos casos: en el disparo manual es la única salida, y
+      # en el disparo por tag es la red de seguridad si la publicación falla a
+      # mitad de camino.
       - uses: actions/upload-artifact@v4
         with:
           name: tuhua-translator-windows-x64
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*.blockmap
+            dist/latest.yml
           retention-days: 14

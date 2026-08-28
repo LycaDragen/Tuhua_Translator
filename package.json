@@ -1,6 +1,6 @@
 {
   "name": "tuhua-translator",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "productName": "Tuhua Translator",
   "description": "Tuhua Translator - Open Source Visual Novel Translator",
   "main": "src/main/index.js",
@@ -12,6 +12,8 @@
     "build:win": "electron-builder --win --publish never",
     "build:linux": "electron-builder --linux --publish never",
     "build:mac": "electron-builder --mac --arm64 --publish never",
+    "build:win:publish": "electron-builder --win --publish always",
+    "build:linux:publish": "electron-builder --linux --publish always",
     "rebuild": "electron-builder install-app-deps",
     "test:hook-cleaning": "node scripts/test-hook-cleaning.js",
     "test:stdout-decoding": "node scripts/test-stdout-decoding.js",
@@ -47,7 +49,6 @@
     "test:ocr-capture-geometry": "node scripts/test-ocr-capture-geometry.js",
     "test:ocr-engine-switch": "node scripts/test-ocr-engine-switch.js"
   },
-
   "author": {
     "name": "Lyca",
     "email": "sebaguerra6@gmail.com"
@@ -81,8 +82,9 @@
   ],
   "dependencies": {
     "axios": "^1.7.0",
-    "electron-store": "^8.1.0",
     "electron-log": "^5.1.0",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.8.9",
     "tesseract.js": "^5.0.0"
   },
   "optionalDependencies": {
@@ -98,6 +100,7 @@
     "directories": {
       "output": "dist"
     },
+    "artifactName": "${name}-${version}-${os}-${arch}.${ext}",
     "files": [
       "src/**/*",
       "renderer/**/*",
@@ -111,7 +114,9 @@
       "**/node_modules/tesseract.js-core/**"
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "icon": "renderer/main/assets/Tuhua.ico",
       "files": [
         "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
@@ -119,7 +124,9 @@
       ]
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "icon": "renderer/main/assets/icon-1024.png",
       "category": "Utility",
       "files": [
@@ -128,7 +135,14 @@
       ]
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["arm64"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
       "icon": "renderer/main/assets/icon-1024.png",
       "files": [
         "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
@@ -143,7 +157,8 @@
     "publish": {
       "provider": "github",
       "owner": "LycaDragen",
-      "repo": "Tuhua_Translator"
+      "repo": "Tuhua_Translator",
+      "releaseType": "draft"
     }
   }
 }

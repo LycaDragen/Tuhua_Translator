@@ -67,7 +67,10 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
   'reset-hook-cleaning-steps',
   // v3.13.01: PaddleOCR engine selection
-  'set-ocr-engine', 'get-ocr-engine-status'
+  'set-ocr-engine', 'get-ocr-engine-status',
+  // v1.0.1: auto-updater
+  'update-check', 'update-download', 'update-install',
+  'update-open-release', 'update-skip-version'
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
@@ -110,7 +113,10 @@ const ALLOWED_RECEIVE_CHANNELS = new Set([
   'xuat-status',
   'xuat-install-progress',
   'xuat-game-connected',
-  'xuat-translation-request'
+  'xuat-translation-request',
+  // v1.0.1: auto-updater
+  'update-status',
+  'update-download-progress'
 ]);
 
 /**
@@ -408,6 +414,16 @@ const api = {
     return secureInvoke('set-hook-cleaning-cjk-only', id, cjkOnly);
   },
   resetHookCleaningSteps: () => secureInvoke('reset-hook-cleaning-steps'),
+
+  // v1.0.1: auto-updater. Ninguno lleva argumentos a propósito — la versión,
+  // la URL del release y si se puede auto-instalar los decide el main.
+  checkForUpdate: () => secureInvoke('update-check'),
+  downloadUpdate: () => secureInvoke('update-download'),
+  installUpdate: () => secureInvoke('update-install'),
+  openReleasePage: () => secureInvoke('update-open-release'),
+  skipUpdateVersion: () => secureInvoke('update-skip-version'),
+  onUpdateStatus: (callback) => secureOn('update-status', callback),
+  onUpdateDownloadProgress: (callback) => secureOn('update-download-progress', callback),
 
   // Platform info
   platform: process.platform,

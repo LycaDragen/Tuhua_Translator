@@ -178,6 +178,19 @@
                 renderOcrEngineAdvice();
             });
 
+            // v1.0.1: auto-updater. Sticky por el mismo motivo que los avisos
+            // de arriba (sobrevive un repintado por cambio de idioma), y el
+            // canal es replayable, así que un reload lo recupera solo.
+            api.onUpdateStatus((data) => {
+                _lastUpdateStatus = data;
+                if (data && data.state !== 'downloading') _updateProgressPercent = 0;
+                renderUpdateBanner();
+            });
+            api.onUpdateDownloadProgress((p) => {
+                _updateProgressPercent = (p && p.percent) || 0;
+                renderUpdateBanner();
+            });
+
             // XUAT events
             // v3.11.2: Pass error data to updateXuatStatus for proper error display
             api.onXuatStatus((data) => {
@@ -432,6 +445,13 @@
             // call's real job is the toast, see its own doc comment.
             handleTextractorAutoDetectResult(await api.getTextractorAutoDetectResult());
             if (settings.manualTextractorMode) document.getElementById('manual-textractor-mode').checked = settings.manualTextractorMode;
+            // v1.0.1: SIN el guard `if (settings.x)` que usa la línea de
+            // arriba — ese patrón nunca DESMARCA un checkbox, y como este
+            // default es true, el toggle sería imposible de apagar: se
+            // apagaría, se guardaría bien, y volvería a aparecer encendido
+            // en el próximo arranque.
+            const autoUpdEl = document.getElementById('auto-check-updates');
+            if (autoUpdEl) autoUpdEl.checked = settings.autoCheckUpdates !== false;
             // v3.13.8x (settings UX audit): stopped restoring a persisted
             // gamePid — a PID from a previous session is never valid for
             // this one (every process gets a new PID on launch), so it was
@@ -761,6 +781,10 @@
             // v3.13.79: same reason — the OCR-engine advisory's text is
             // also computed, not [data-i18n].
             renderOcrEngineAdvice();
+            // v1.0.1: idem — el banner de actualización interpola
+            // {version}/{current}/{percent}/{error}, así que sin esto queda
+            // congelado en el idioma del primer pintado.
+            renderUpdateBanner();
 
             // v3.13.40: same reason as recomputeBadge() above — the
             // profile cards' default-name label and "Default" badge are
@@ -4957,6 +4981,11 @@
         // switch repaint" reasoning as _lastEngineAdvice above, separate
         // variable because it's a different event/section entirely.
         let _lastOcrEngineAdvice = null;
+        // v1.0.1: último estado del updater + progreso de descarga. El
+        // progreso va aparte porque llega ~20 veces por segundo por un canal
+        // distinto (no replayable) y no debe pisar el resto del estado.
+        let _lastUpdateStatus = null;
+        let _updateProgressPercent = 0;
 
         function onHookSelected(hookKey) {
             // Send the hook selection to the backend
@@ -5187,6 +5216,178 @@
             const box = document.getElementById('ocr-engine-advice');
             if (box) box.classList.add('hidden');
             _lastOcrEngineAdvice = null;
+        }
+
+        // ===== UPDATES (v1.0.1) =====
+        // Un solo render para los 7 estados. Los textos se arman acá (no con
+        // data-i18n) porque todos interpolan variables — por eso
+        // changeLanguage() vuelve a llamar esta función.
+        //
+        // El split de macOS es status.canAutoInstall, NO api.platform: el
+        // renderer no sabe de plataformas, y ese mismo flag cubre además el
+        // dev run y el AppImage extraído/no-escribible.
+        const UPDATE_BANNER_STYLES = {
+            blue: 'p-2.5 rounded-lg border space-y-1.5 bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-400',
+            emerald: 'p-2.5 rounded-lg border space-y-1.5 bg-emerald-50 dark:bg-emerald-900/20 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-400',
+            amber: 'p-2.5 rounded-lg border space-y-1.5 bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400'
+        };
+
+        function _updateBtn(labelKey, fallback, handler, tone) {
+            const t = translations[currentLang] || translations['en'];
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.textContent = t[labelKey] || fallback;
+            btn.className = tone === 'primary'
+                ? 'flex-1 text-[9px] font-bold px-2 py-1 rounded text-white transition bg-blue-600 hover:bg-blue-500'
+                : tone === 'primary-emerald'
+                    ? 'flex-1 text-[9px] font-bold px-2 py-1 rounded text-white transition bg-emerald-600 hover:bg-emerald-500'
+                    : 'flex-1 text-[9px] font-medium px-2 py-1 rounded border border-current opacity-80 hover:opacity-100 transition';
+            btn.onclick = handler;
+            return btn;
+        }
+
+        function renderUpdateBanner() {
+            const box = document.getElementById('update-banner');
+            const textEl = document.getElementById('update-banner-text');
+            const noteEl = document.getElementById('update-banner-note');
+            const actions = document.getElementById('update-banner-actions');
+            const progWrap = document.getElementById('update-progress-wrap');
+            const progBar = document.getElementById('update-progress-bar');
+            if (!box || !textEl || !noteEl || !actions || !progWrap) return;
+
+            const t = translations[currentLang] || translations['en'];
+            const s = _lastUpdateStatus;
+            const badge = document.getElementById('app-version-badge');
+
+            const hide = () => {
+                box.classList.add('hidden');
+                // Revertir el badge del navbar a su estilo normal.
+                if (badge) {
+                    badge.className = 'text-[9px] font-mono text-emerald-500/70 bg-emerald-500/10 px-1.5 py-0.5 rounded ml-1.5';
+                    badge.textContent = api.version ? 'v' + api.version : '';
+                    badge.removeAttribute('title');
+                }
+            };
+
+            // 'checking' no pinta banner: el feedback vive en el botón de
+            // Configuración. Un banner "buscando..." es ruido puro.
+            if (!s || s.state === 'idle' || s.state === 'up-to-date' || s.state === 'checking') { hide(); return; }
+            // Un error del chequeo automático no se muestra: alguien sin
+            // internet al arrancar no merece una caja de error. El servicio
+            // sólo emite state:'error' cuando el chequeo fue manual.
+            if (s.state === 'error' && !s.error) { hide(); return; }
+
+            actions.replaceChildren();
+            noteEl.classList.add('hidden');
+            progWrap.classList.add('hidden');
+
+            if (s.state === 'available') {
+                box.className = UPDATE_BANNER_STYLES.blue;
+                textEl.textContent = (t.update_banner_available || 'Version {version} is available (you have {current}).')
+                    .replace('{version}', s.version || '?')
+                    .replace('{current}', s.currentVersion || '?');
+                if (s.canAutoInstall) {
+                    actions.appendChild(_updateBtn('update_btn_download', 'Descargar', downloadUpdateNow, 'primary'));
+                } else {
+                    actions.appendChild(_updateBtn('update_btn_download_external', 'Descargar desde GitHub', openReleasePage, 'primary'));
+                    noteEl.textContent = t.update_manual_install_note || '';
+                    noteEl.classList.remove('hidden');
+                }
+                actions.appendChild(_updateBtn('update_btn_notes', 'Ver cambios', openReleasePage));
+                actions.appendChild(_updateBtn('update_btn_skip', 'Ignorar esta versión', skipUpdateVersion));
+            } else if (s.state === 'downloading') {
+                box.className = UPDATE_BANNER_STYLES.blue;
+                textEl.textContent = (t.update_downloading || 'Downloading {version}… {percent}%')
+                    .replace('{version}', s.version || '?')
+                    .replace('{percent}', String(_updateProgressPercent));
+                progWrap.classList.remove('hidden');
+                if (progBar) progBar.style.width = _updateProgressPercent + '%';
+                // Sin botones a propósito: electron-updater no expone un
+                // cancel limpio, y ofrecer uno que no se puede honrar es peor
+                // que no ofrecerlo.
+            } else if (s.state === 'downloaded') {
+                box.className = UPDATE_BANNER_STYLES.emerald;
+                textEl.textContent = (t.update_ready_title || 'Version {version} is ready to install.')
+                    .replace('{version}', s.version || '?');
+                noteEl.textContent = t.update_ready_note || '';
+                noteEl.classList.remove('hidden');
+                actions.appendChild(_updateBtn('update_btn_install', 'Reiniciar e instalar', installUpdateNow, 'primary-emerald'));
+                actions.appendChild(_updateBtn('update_btn_later', 'Más tarde', dismissUpdateBanner));
+            } else if (s.state === 'error') {
+                // Ámbar, nunca rojo: en esta app el rojo está reservado para
+                // acciones destructivas (showConfirm).
+                box.className = UPDATE_BANNER_STYLES.amber;
+                textEl.textContent = (t.update_error || "Couldn't check for updates: {error}")
+                    .replace('{error}', s.error || '');
+                actions.appendChild(_updateBtn('update_btn_retry', 'Reintentar', checkForUpdatesManually, 'primary'));
+                actions.appendChild(_updateBtn('update_btn_dismiss', 'Descartar', dismissUpdateBanner));
+            }
+
+            box.classList.remove('hidden');
+
+            // El banner vive en la pestaña Configuración; el badge del navbar
+            // es lo único visible desde Glosario/Historial/Perfiles.
+            if (badge && (s.state === 'available' || s.state === 'downloaded')) {
+                badge.className = 'text-[9px] font-mono text-amber-600 dark:text-amber-400 bg-amber-500/10 px-1.5 py-0.5 rounded ml-1.5 cursor-default';
+                badge.textContent = (api.version ? 'v' + api.version : '') + ' ↑';
+                badge.title = (t.update_badge_title || 'Update available: {version}').replace('{version}', s.version || '');
+            }
+        }
+
+        async function checkForUpdatesManually() {
+            const btn = document.getElementById('update-check-btn');
+            const btnText = document.getElementById('update-check-btn-text');
+            const t = translations[currentLang] || translations['en'];
+            if (btn) btn.disabled = true;
+            if (btnText) btnText.textContent = t.update_checking || 'Checking…';
+            try {
+                const res = await api.checkForUpdate();
+                const status = res && res.status;
+                if (status) {
+                    _lastUpdateStatus = status;
+                    renderUpdateBanner();
+                    if (status.state === 'up-to-date') {
+                        showToast((t.update_none_toast || "You're on the latest version ({current}).")
+                            .replace('{current}', status.currentVersion || ''));
+                    }
+                }
+            } finally {
+                if (btn) btn.disabled = false;
+                if (btnText) btnText.textContent = t.update_check_btn || 'Buscar actualizaciones';
+            }
+        }
+
+        async function downloadUpdateNow() {
+            const res = await api.downloadUpdate();
+            if (res && !res.success) {
+                const t = translations[currentLang] || translations['en'];
+                showToast((t.update_download_failed || 'Download failed: {error}').replace('{error}', res.error || ''));
+            }
+        }
+
+        function installUpdateNow() { api.installUpdate(); }
+        function openReleasePage() { api.openReleasePage(); }
+
+        async function skipUpdateVersion() {
+            const t = translations[currentLang] || translations['en'];
+            const version = _lastUpdateStatus && _lastUpdateStatus.version;
+            const res = await api.skipUpdateVersion();
+            if (res && res.success) {
+                showToast((t.update_skipped_toast || 'Version {version} ignored.')
+                    .replace('{version}', version || ''));
+            }
+        }
+
+        // Sólo oculta el banner en esta sesión — no persiste nada. Para no
+        // volver a ver una versión está "Ignorar esta versión", que sí
+        // persiste en settings.
+        function dismissUpdateBanner() {
+            _lastUpdateStatus = null;
+            renderUpdateBanner();
+        }
+
+        function toggleAutoCheckUpdates(enabled) {
+            api.saveSettings({ autoCheckUpdates: enabled });
         }
 
         // ===== HELPERS =====

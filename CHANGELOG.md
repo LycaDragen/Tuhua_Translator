@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.0.1] — buscador de actualizaciones
+
+### Nuevo
+
+- **Aviso de versión nueva.** Tuhua consulta GitHub 30 segundos después de abrir (o cuando
+  apretás **Configuración → Avanzado → Buscar actualizaciones**) y, si hay una versión más
+  nueva, muestra un aviso. Nada se descarga ni se instala sin que hagas clic: se puede
+  descargar, ver los cambios, o ignorar esa versión concreta — si ignorás la 1.0.2 y sale la
+  1.0.3, te vuelve a avisar.
+- En **Windows y Linux** la actualización se descarga e instala desde la propia app. En
+  **macOS** sólo avisa y abre la página de descarga: Apple exige una firma de código de pago
+  para permitir auto-actualización, y Tuhua no la tiene.
+- El chequeo automático se puede apagar en Configuración → Avanzado.
+
+### Arreglado
+
+- **Los instaladores de `v3.13.120` no abrían** (`Cannot find module 'conf'`). El empaquetador
+  no incluía las dependencias transitivas por cómo pnpm arma `node_modules`; se corrigió con
+  `nodeLinker: hoisted`. Los assets de ese release ya fueron reemplazados por versiones
+  funcionales.
+
+### Nota para quien venga de la 3.13.x
+
+Si instalaste Tuhua antes de este release y tu versión aparece como `3.13.120`, el buscador de
+actualizaciones **no** te va a ofrecer la 1.0.1, porque `1.0.1` es un número menor que
+`3.13.120` (ver la entrada de 1.0.0 sobre el reinicio del versionado). Hay que reinstalar a
+mano una vez desde [Releases](https://github.com/LycaDragen/Tuhua_Translator/releases); a
+partir de ahí las actualizaciones funcionan solas.
+
 ## [1.0.0] — reinicio del esquema de versionado
 
 A partir de esta versión, Tuhua Translator usa [Semantic Versioning](https://semver.org/lang/es/)

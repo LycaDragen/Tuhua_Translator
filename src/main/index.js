@@ -26,6 +26,7 @@ const HookCleaningSettingsService = require('../services/hook-cleaning-settings'
 const llmProviders = require('../services/translation/llm-providers');
 const promptPresets = require('../services/translation/prompt-presets');
 const { runAutoDetectAndPersist } = require('../services/textractor-path-detect');
+const UpdateChecker = require('../services/update-checker');
 
 // Configure logging
 // v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
@@ -63,6 +64,7 @@ let xuatServer;
 let regexFilter;
 let hookCleaningSettings;
 let profileStore;
+let updateChecker;
 
 app.whenReady().then(() => {
   // v3.13.40: removes Electron's default File/Edit/View/Window/Help menu
@@ -179,7 +181,16 @@ app.whenReady().then(() => {
       // v3.13.8x (settings UX audit): exposed in the modal's Avanzado
       // category. Matches the 3500ms default _startOcrAutoCapture() has
       // used since v3.9.9 — see ipc-handlers.js.
-      ocrCaptureIntervalMs: 3500
+      ocrCaptureIntervalMs: 3500,
+      // v1.0.1 (auto-updater): globales, NO perfil-scoped — a qué versión de
+      // Tuhua apunta el usuario no tiene nada que ver con qué juego está
+      // traduciendo. Verificado contra PROFILE_SCOPED_SETTING_KEYS
+      // (profiles/profile-schema.js): ninguna de las dos está ahí, así que
+      // profileToSettings() no las pisa al cambiar de perfil.
+      autoCheckUpdates: true,
+      // Versión EXACTA que el usuario eligió ignorar (no un "mínimo"): si
+      // ignora 1.0.2 y sale 1.0.3, tiene que volver a avisar.
+      skippedUpdateVersion: ''
     }
   });
 
@@ -401,7 +412,12 @@ app.whenReady().then(() => {
   // after it's actually ready to receive IPC (pull, not push, sidesteps
   // the startup-race class of bug the badge-replay mechanism elsewhere in
   // this app had to work around).
-  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings, profileStore, textractorAutoDetectResult);
+  // v1.0.1 (auto-updater): se construye ANTES de IpcHandlers porque es uno de
+  // sus parámetros. El forwarding de sus eventos al renderer y el chequeo de
+  // arranque van más abajo, cuando la ventana principal ya existe.
+  updateChecker = new UpdateChecker(store);
+
+  ipcHandlers = new IpcHandlers(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcuts, hookCleaningSettings, profileStore, textractorAutoDetectResult, updateChecker);
   ipcHandlers.register();
 
   // v3.13.07: Improved startup overlay state management.
@@ -578,6 +594,19 @@ app.whenReady().then(() => {
     // The IPC handlers already send status on start/stop success/failure
   });
 
+  // v1.0.1 (auto-updater): el forwarding vive acá, UNA sola vez — nunca
+  // dentro de un handler IPC. El updater es un singleton de larga vida, así
+  // que registrar sus listeners por invocación (como hace xuat-install-in-game,
+  // que puede permitírselo porque construye un installer nuevo cada vez)
+  // acumularía un listener por cada click en Descargar.
+  updateChecker.on('status', (status) => {
+    windowManager.sendToMainWindow('update-status', status);
+  });
+  updateChecker.on('progress', (progress) => {
+    windowManager.sendToMainWindow('update-download-progress', progress);
+  });
+  updateChecker.scheduleStartupCheck();
+
   log.info('Tuhua Translator initialized successfully');
 });
 
@@ -602,6 +631,9 @@ app.on('will-quit', () => {
   if (ocrService) ocrService.terminate();
   if (xuatServer) xuatServer.forceStop();
   if (tray) tray.destroy();
+  // v1.0.1: limpia el setTimeout del chequeo de arranque — sin esto, cerrar
+  // Tuhua dentro de los primeros 30s dispara un check durante el shutdown.
+  if (updateChecker) updateChecker.dispose();
 
   log.info('Cleanup complete');
 });

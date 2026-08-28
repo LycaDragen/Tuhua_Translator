@@ -37,7 +37,14 @@ const RENDERER_BASE = path.join(__dirname, '..', '..', 'renderer');
 const REPLAYABLE_CHANNELS = new Set([
   'textractor-status',
   'textractor-cli-status-changed',
-  'xuat-status'
+  'xuat-status',
+  // v1.0.1: "existe la versión X" es estado, no un evento discreto — sigue
+  // siendo verdad después de un reload, y el listener sólo repinta un banner
+  // (sin toast, sin efecto lateral), así que replayearlo es idempotente. Su
+  // progreso de descarga, en cambio, NO está acá: es exactamente el caso que
+  // el comentario de arriba prohíbe, y el mismo split que xuat-status /
+  // xuat-install-progress ya hacen.
+  'update-status'
 ]);
 
 class WindowManager {

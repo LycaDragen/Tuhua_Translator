@@ -1,10 +1,24 @@
 name: Build Linux AppImage
 
 # Complementa build-mac.yml — mismo patrón, runner nativo por plataforma.
-# Disparo manual porque todavía no hay release automatizado — sólo
-# produce el artefacto (AppImage) para probarlo/subirlo a mano.
+#
+# Dos disparos:
+#   - workflow_dispatch: sólo produce el artefacto, para probarlo.
+#   - push de un tag v*: además PUBLICA al release (draft) de GitHub.
+#
+# v1.0.1: ver el comentario largo en build-windows.yml — el disparo por tag
+# existe porque el auto-updater necesita `latest-linux.yml`, que electron-builder
+# genera sólo al publicar, y los `.blockmap` que van con él.
+#
+# IMPORTANTE: no renombrar los assets a mano después de publicar (el `path:`
+# de latest-linux.yml tiene que coincidir byte a byte con el nombre del asset).
 on:
   workflow_dispatch: {}
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # necesario para que GITHUB_TOKEN pueda subir los assets
 
 jobs:
   build-linux:
@@ -23,10 +37,16 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm run build:linux
+      - name: Build (publica sólo si el disparo fue un tag)
+        run: pnpm run ${{ github.ref_type == 'tag' && 'build:linux:publish' || 'build:linux' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: tuhua-translator-linux-x64
-          path: dist/*.AppImage
+          path: |
+            dist/*.AppImage
+            dist/*.blockmap
+            dist/latest-linux.yml
           retention-days: 14

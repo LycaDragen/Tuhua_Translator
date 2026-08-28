@@ -4,6 +4,17 @@ name: Build macOS DMG
 # binario para darwin/x64 y electron-builder --mac necesita macOS real
 # para firmar/empaquetar). Disparo manual porque todavía no hay
 # release automatizado — sólo produce el artefacto para probarlo.
+#
+# v1.0.1: este workflow deliberadamente NO publica (a diferencia de
+# build-windows.yml y build-linux.yml, que sí lo hacen al pushear un tag).
+# No es pereza: publicar generaría un `latest-mac.yml` apuntando al .dmg,
+# y electron-updater en macOS (MacUpdater) espera un .zip — buscaría un
+# asset que no existe y fallaría de una forma difícil de diagnosticar.
+# Hoy nadie lo lee, porque en macOS Tuhua usa la rama "sólo aviso"
+# (src/services/update-checker.js consulta la API de GitHub directamente),
+# ya que Squirrel.Mac rechaza actualizaciones sin firma de Apple. Si algún
+# día se compra el certificado de Apple Developer, ESTE es el archivo que
+# hay que cambiar, junto con el modo del updater.
 on:
   workflow_dispatch: {}
 

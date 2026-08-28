@@ -98,7 +98,7 @@ function mainT(store, key) {
 }
 
 class IpcHandlers {
-  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings, profileStore, textractorAutoDetectResult) {
+  constructor(store, pipeline, glossary, regexFilter, windowManager, textractor, clipboardWatcher, textractorLauncher, ocrService, xuatServer, shortcutManager, hookCleaningSettings, profileStore, textractorAutoDetectResult, updateChecker) {
     this.store = store;
     this.pipeline = pipeline;
     this.glossary = glossary;
@@ -141,6 +141,14 @@ class IpcHandlers {
     // ready, without index.js having to push an IPC event that could race
     // the main window's own readiness.
     this._textractorAutoDetectResult = textractorAutoDetectResult || null;
+
+    // v1.0.1 (auto-updater). Este constructor ya tiene 15 parámetros
+    // posicionales, que es señal de que pide un objeto de opciones (fuera de
+    // alcance acá, pero vale anotarlo): agregar un argumento en la llamada de
+    // index.js y olvidarlo en esta firma falla EN SILENCIO — todos los
+    // handlers devolverían {success:false} sin explicación. Por eso cada
+    // handler de update chequea explícitamente que esto exista.
+    this.updateChecker = updateChecker || null;
   }
 
   /**
@@ -1948,6 +1956,43 @@ class IpcHandlers {
         return { success: false, error: err.message, logPath: '', logContent: '' };
       }
     });
+
+    // ===== Updates (v1.0.1) =====
+    // El servicio decide TODO: qué versión hay, si se puede auto-instalar, y
+    // a qué URL apunta "Ver cambios". El renderer nunca manda una versión ni
+    // una URL — mismo criterio que open-docs-link: no se expone una primitiva
+    // de abrir-URL-arbitraria al renderer.
+
+    ipcMain.handle('update-check', async () => {
+      if (!this.updateChecker) return { success: false, error: 'update-checker-unavailable' };
+      const status = await this.updateChecker.check({ manual: true });
+      return { success: true, status };
+    });
+
+    ipcMain.handle('update-download', async () => {
+      if (!this.updateChecker) return { success: false, error: 'update-checker-unavailable' };
+      // Devuelve al ARRANCAR la descarga, no al terminarla — el progreso
+      // viaja por el canal update-download-progress.
+      return this.updateChecker.download();
+    });
+
+    ipcMain.handle('update-install', async () => {
+      if (!this.updateChecker) return { success: false, error: 'update-checker-unavailable' };
+      // install() hace el quitAndInstall dentro de un setImmediate: llamarlo
+      // sincrónico acá dejaría esta promesa sin resolver para siempre, porque
+      // la app se cierra antes de que el handler retorne.
+      return this.updateChecker.install();
+    });
+
+    ipcMain.handle('update-open-release', async () => {
+      if (!this.updateChecker) return { success: false, error: 'update-checker-unavailable' };
+      return this.updateChecker.openReleasePage();
+    });
+
+    ipcMain.handle('update-skip-version', async () => {
+      if (!this.updateChecker) return { success: false, error: 'update-checker-unavailable' };
+      return this.updateChecker.skipCurrent();
+    });
   }
 
   /**
@@ -2639,7 +2684,10 @@ class IpcHandlers {
       'get-hook-cleaning-steps', 'toggle-hook-cleaning-step', 'set-hook-cleaning-cjk-only',
       'reset-hook-cleaning-steps',
       // v3.13.01: PaddleOCR engine selection
-      'set-ocr-engine', 'get-ocr-engine-status'
+      'set-ocr-engine', 'get-ocr-engine-status',
+      // v1.0.1: auto-updater
+      'update-check', 'update-download', 'update-install',
+      'update-open-release', 'update-skip-version'
     ];
     channels.forEach(ch => ipcMain.removeHandler(ch));
     ipcMain.removeAllListeners('get-app-version');

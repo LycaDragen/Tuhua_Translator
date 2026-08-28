@@ -252,6 +252,24 @@
             <!-- ===== SETTINGS TAB ===== -->
             <div id="tab-settings" class="flex-1 overflow-y-auto scrollbar-thin p-5 space-y-6 fade-in">
 
+                <!-- Update banner (v1.0.1) — primero de todo: es lo único
+                     acá que puede estar desactualizando la app entera.
+                     Sin data-i18n en el texto ni en los botones a propósito:
+                     todos interpolan {version}/{current}/{percent}/{error} en
+                     runtime, así que los pinta renderUpdateBanner() y
+                     changeLanguage() la vuelve a llamar — mismo motivo y mismo
+                     patrón que #engine-advice. -->
+                <div id="update-banner" class="hidden p-2.5 rounded-lg border space-y-1.5">
+                    <p id="update-banner-text" class="text-xs leading-relaxed"></p>
+                    <p id="update-banner-note" class="hidden text-[10px] opacity-80 leading-relaxed"></p>
+                    <div id="update-progress-wrap" class="hidden">
+                        <div class="w-full h-1.5 rounded-full bg-gray-200 dark:bg-dark-600 overflow-hidden">
+                            <div id="update-progress-bar" class="h-full bg-blue-500 transition-all duration-200" style="width:0%"></div>
+                        </div>
+                    </div>
+                    <div id="update-banner-actions" class="flex gap-2"></div>
+                </div>
+
                 <!-- Game (auto-configuración de juegos, v3.13.85) —
                      deliberately BEFORE "Método de Entrada" and OUTSIDE
                      #textractor-port-section: setInputMethod() hides that
@@ -1550,6 +1568,29 @@
                                 <span class="text-[10px] text-gray-400" data-i18n="xuat_port">Puerto</span>
                                 <input type="number" id="xuat-port" value="8419" min="1024" max="65535" class="w-20 p-1.5 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs text-center" onchange="markUnsaved('modal')">
                                 <span class="text-[9px] text-gray-500">XUAT</span>
+                            </div>
+                            <!-- Updates (v1.0.1). Tier A (data-immediate): es
+                                 un toggle binario sin nada que "aplicar" en
+                                 conjunto, y queda pegado a #manual-textractor-mode
+                                 que ya es Tier A — dos toggles adyacentes con
+                                 semánticas de guardado distintas es justo la
+                                 inconsistencia que la auditoría v3.13.8x sacó.
+                                 El botón de abajo es una ACCIÓN, no un setting:
+                                 no lleva data-immediate ni lo lee
+                                 applySettingsModal(), a propósito. -->
+                            <div class="border-t border-gray-200 dark:border-dark-600 pt-3 space-y-3">
+                                <span class="text-xs font-medium" data-i18n="update_section_title">Actualizaciones</span>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs" data-i18n="update_auto_check_label">Buscar actualizaciones al iniciar</span>
+                                    <label class="relative inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" id="auto-check-updates" data-immediate="true" onchange="toggleAutoCheckUpdates(this.checked)" class="sr-only peer" checked>
+                                        <div class="w-9 h-5 bg-gray-300 dark:bg-dark-600 peer-checked:bg-emerald-500 rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-transform peer-checked:after:translate-x-full"></div>
+                                    </label>
+                                </div>
+                                <p class="text-xs text-gray-400 -mt-2" data-i18n="update_auto_check_help">Consulta GitHub 30 segundos después de abrir. Nunca se descarga ni se instala nada sin que hagas clic.</p>
+                                <button type="button" id="update-check-btn" onclick="checkForUpdatesManually()" class="text-[10px] font-medium px-2.5 py-1.5 rounded border border-gray-300 dark:border-dark-600 hover:bg-gray-100 dark:hover:bg-dark-700 transition">
+                                    <span id="update-check-btn-text" data-i18n="update_check_btn">Buscar actualizaciones</span>
+                                </button>
                             </div>
                         </div>
                     </div>
