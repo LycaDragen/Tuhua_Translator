@@ -101,7 +101,6 @@
     "files": [
       "src/**/*",
       "renderer/**/*",
-      "node_modules/**/*",
       "package.json",
       "!node_modules/onnxruntime-node/bin/napi-v6/*/*/*providers_cuda*",
       "!node_modules/onnxruntime-node/bin/napi-v6/*/*/*providers_tensorrt*"
