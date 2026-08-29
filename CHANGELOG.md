@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.2] — arreglos de atajos
+
+### Arreglado
+
+- **`Ctrl+Shift+O` no hacía nada.** El atajo estaba registrado y emitía su evento, pero el
+  renderer nunca tuvo una rama para manejarlo, así que ciclar la opacidad del overlay jamás
+  funcionó. Ahora sí, y muestra la opacidad resultante en un aviso. (Mismo defecto que le pasó
+  antes a `Ctrl+Shift+R`.)
+
+### Cambiado
+
+- **Las listas de atajos ahora coinciden.** La Guía de Inicio de la app mostraba 4 atajos, el
+  código registraba 7 y la documentación mostraba otra cosa. Las tres muestran los mismos 6
+  atajos de usuario; `Ctrl+Shift+D` (DevTools) queda fuera por ser de desarrollo.
+- Se aclaró qué hace `Ctrl+Shift+R` frente a `Ctrl+Shift+S`: el primero vuelve a traducir el
+  texto que ya está en pantalla, el segundo toma una captura de OCR nueva (y sólo aplica en modo
+  OCR). Se veían iguales al probarlos si la pantalla no había cambiado.
+
 ## [1.0.1] — buscador de actualizaciones
 
 ### Nuevo

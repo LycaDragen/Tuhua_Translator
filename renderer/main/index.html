@@ -1056,12 +1056,20 @@
                      instead of shaving the threshold closer to a breakage
                      point that already had none. -->
                 <div class="mt-6 bg-white dark:bg-dark-800 p-3 rounded-xl border border-gray-200 dark:border-dark-700 text-left">
-                    <span class="text-[10px] font-bold text-gray-400 uppercase">Shortcuts</span>
+                    <span class="text-[10px] font-bold text-gray-400 uppercase" data-i18n="shortcuts_title">Atajos</span>
                     <div id="shortcuts-grid" class="grid gap-x-3 gap-y-1 mt-2 text-[10px]">
-                        <div class="flex justify-between"><span class="text-gray-500">Main Window</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+L</kbd></div>
-                        <div class="flex justify-between"><span class="text-gray-500">Overlays</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+E</kbd></div>
-                        <div class="flex justify-between"><span class="text-gray-500">Click-Through</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+M</kbd></div>
-                        <div class="flex justify-between"><span class="text-gray-500">Retranslate</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+R</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500" data-i18n="shortcut_main_window">Ventana principal</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+L</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500" data-i18n="shortcut_overlays">Overlays</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+E</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500" data-i18n="shortcut_click_through">Atravesar clics</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+M</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500" data-i18n="shortcut_retranslate">Retraducir</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+R</kbd></div>
+                        <!-- v1.0.2: esta lista mostraba 4 de los 7 atajos que
+                             shortcuts.js registra, y el README y tuhua.lyca.dev
+                             mostraban otra cosa — tres listas que no coincidían.
+                             Ahora las tres muestran los mismos 6 de usuario.
+                             Ctrl+Shift+D (DevTools) se omite a propósito: es de
+                             desarrollo, no le sirve al usuario final. -->
+                        <div class="flex justify-between"><span class="text-gray-500" data-i18n="shortcut_opacity">Opacidad</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+O</kbd></div>
+                        <div class="flex justify-between"><span class="text-gray-500" data-i18n="shortcut_ocr_capture">Capturar OCR</span><kbd class="bg-gray-100 dark:bg-dark-700 px-1.5 py-0.5 rounded font-mono">Ctrl+Shift+S</kbd></div>
                     </div>
                 </div>
             </div>

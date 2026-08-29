@@ -1899,7 +1899,35 @@
                 // ipc-handlers.js's _retranslateCurrent) — same action the
                 // overlay's new "↻" toolbar button triggers.
                 api.requestRetranslate();
+            } else if (data.action === 'cycle-opacity') {
+                // v1.0.2: mismo bug que el de 'retranslate' de acá arriba, y
+                // por la misma razón — el atajo se registraba en shortcuts.js
+                // y emitía el evento, pero esta rama no existía, así que
+                // Ctrl+Shift+O nunca hizo nada. Reportado por Lyca probando
+                // los atajos documentados.
+                cycleOverlayOpacity();
             }
+        }
+
+        // Cicla la opacidad del overlay en pasos. Reusa el mismo camino que el
+        // slider de Configuración (saveOverlayImmediate -> save-settings, que
+        // ya empuja un update-style al overlay vivo), en vez de tocar el
+        // overlay por separado: así el slider y el atajo nunca se desincronizan.
+        const OPACITY_STEPS = [100, 85, 70, 55, 40];
+        function cycleOverlayOpacity() {
+            const range = document.getElementById('opacity-range');
+            if (!range) return;
+            const current = parseInt(range.value, 10);
+            // El valor guardado puede no ser exactamente un paso (el slider es
+            // continuo), así que se busca el primer paso estrictamente menor y
+            // se vuelve al principio al pasarse.
+            const next = OPACITY_STEPS.find(v => v < current) ?? OPACITY_STEPS[0];
+            range.value = next;
+            const label = document.getElementById('opacity-val');
+            if (label) label.innerText = next + '%';
+            saveOverlayImmediate();
+            const t = translations[currentLang] || translations['en'];
+            showToast((t.overlay_opacity_toast || 'Overlay opacity: {percent}%').replace('{percent}', next));
         }
 
         // ===== FONT FAMILY =====

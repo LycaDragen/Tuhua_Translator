@@ -4,7 +4,7 @@
 
 [![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Electron](https://img.shields.io/badge/Electron-28-blue.svg)](https://www.electronjs.org/)
-[![Version](https://img.shields.io/badge/version-1.0.0-emerald.svg)]()
+[![Version](https://img.shields.io/github/v/release/LycaDragen/Tuhua_Translator?color=emerald&label=version)](https://github.com/LycaDragen/Tuhua_Translator/releases/latest)
 
 ---
 
@@ -163,10 +163,9 @@ La memoria de traducción almacena pares de traducciones previas y los reutiliza
 | `Ctrl+Shift+L` | Mostrar/Ocultar la ventana principal |
 | `Ctrl+Shift+E` | Mostrar/Ocultar overlay |
 | `Ctrl+Shift+M` | Activar/Desactivar click-through |
-| `Ctrl+Shift+R` | Retraducir manualmente (útil en modo Portapapeles) |
+| `Ctrl+Shift+R` | Volver a traducir el texto que ya está en pantalla, sin capturarlo de nuevo |
 | `Ctrl+Shift+O` | Ciclar la opacidad del overlay |
 | `Ctrl+Shift+S` | Captura de OCR inmediata (sólo con OCR activo) |
-| `Ctrl+Shift+D` | Abrir/cerrar las herramientas de desarrollo (DevTools) |
 
 ---
 
