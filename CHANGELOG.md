@@ -6,8 +6,8 @@
 
 - **`Ctrl+Shift+O` no hacía nada.** El atajo estaba registrado y emitía su evento, pero el
   renderer nunca tuvo una rama para manejarlo, así que ciclar la opacidad del overlay jamás
-  funcionó. Ahora sí, y muestra la opacidad resultante en un aviso. (Mismo defecto que le pasó
-  antes a `Ctrl+Shift+R`.)
+  funcionó. Ahora sí: la opacidad cicla entre 100/85/70/55/40 y el slider de Configuración se
+  mueve con ella. (Mismo defecto que le pasó antes a `Ctrl+Shift+R`.)
 
 ### Cambiado
 

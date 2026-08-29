@@ -1926,8 +1926,12 @@
             const label = document.getElementById('opacity-val');
             if (label) label.innerText = next + '%';
             saveOverlayImmediate();
-            const t = translations[currentLang] || translations['en'];
-            showToast((t.overlay_opacity_toast || 'Overlay opacity: {percent}%').replace('{percent}', next));
+            // Sin toast a propósito: el feedback ES el overlay cambiando de
+            // opacidad delante del usuario, que es lo que estaba mirando
+            // cuando apretó el atajo. Un toast acá además se apila —
+            // showToast() no se auto-cierra (ver su doc comment), así que
+            // ciclar cuatro veces dejaba cuatro carteles que hay que cerrar
+            // a mano. Reportado por Lyca: "hace flood".
         }
 
         // ===== FONT FAMILY =====
