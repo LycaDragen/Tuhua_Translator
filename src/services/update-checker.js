@@ -130,13 +130,18 @@ class UpdateChecker extends EventEmitter {
       autoUpdater.autoInstallOnAppQuit = true;
       autoUpdater.allowPrerelease = false;
 
-      // Feed alternativo para probar el ciclo completo sin publicar nada al
-      // release público. Igual que TUHUA_FAKE_UPDATE, sólo fuera del build.
-      if (process.env.TUHUA_UPDATE_FEED && !app.isPackaged) {
-        autoUpdater.setFeedURL({ provider: 'generic', url: process.env.TUHUA_UPDATE_FEED });
-        autoUpdater.forceDevUpdateConfig = true;
-      }
-
+      // NO agregar acá un override de feed por variable de entorno para
+      // testear. Hubo uno (TUHUA_UPDATE_FEED) y era código muerto por
+      // construcción: se guardaba tras !app.isPackaged, pero esta función sólo
+      // corre en modo 'full', que exige app.isPackaged — las dos condiciones se
+      // excluyen, así que nunca podía dispararse.
+      //
+      // La forma de probar el ciclo completo, ya usada con éxito, es mejor de
+      // todos modos: compilar un instalador etiquetado con una versión MENOR
+      // que la publicada (rama temporal + workflow_dispatch, que no publica),
+      // instalarlo, y dejar que se actualice contra el release real. Eso
+      // ejercita latest.yml, el sha512, el instalador NSIS y SmartScreen —
+      // nada de lo cual un feed local llega a tocar.
       this._bindUpdaterListeners(autoUpdater);
       this._autoUpdater = autoUpdater;
       return autoUpdater;
