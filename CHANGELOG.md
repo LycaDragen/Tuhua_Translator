@@ -17,6 +17,16 @@
 - Se aclaró qué hace `Ctrl+Shift+R` frente a `Ctrl+Shift+S`: el primero vuelve a traducir el
   texto que ya está en pantalla, el segundo toma una captura de OCR nueva (y sólo aplica en modo
   OCR). Se veían iguales al probarlos si la pantalla no había cambiado.
+- El atajo de opacidad ya no muestra un aviso en pantalla: el overlay cambiando de opacidad es
+  el feedback, y los avisos se apilaban al ciclar varias veces.
+
+### Interno
+
+- Nuevo bench `test:shortcuts-consistency`. El defecto de `Ctrl+Shift+O` era el mismo que ya
+  había pasado con `Ctrl+Shift+R`: un atajo que se registra, emite su evento y no tiene quién lo
+  maneje falla en silencio, indistinguible de un conflicto de teclas. El bench ata las tres
+  listas que antes derivaban por separado — lo que el main emite, lo que el renderer maneja, y lo
+  que la app le muestra al usuario — y verifica además que las etiquetas sean traducibles.
 
 ## [1.0.1] — buscador de actualizaciones
 
