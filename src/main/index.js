@@ -29,11 +29,59 @@ const { runAutoDetectAndPersist } = require('../services/textractor-path-detect'
 const UpdateChecker = require('../services/update-checker');
 
 // Configure logging
-// v3.10.0: Log to %appdata%/tuhua-translator/tuhua.log (rotating, max 1MB).
-// Users can share this file for debugging. Keeps last 100 log entries.
+// v3.10.0: Log to %appdata%/Tuhua Translator/logs/main.log (rotating).
+// Users can share this file for debugging.
 log.transports.file.level = 'info';
 log.transports.console.level = 'debug';
-log.transports.file.maxSize = 1048576; // 1MB — rotate when exceeded
+
+// v1.0.3: 5MB en vez de 1MB. Con el puente de console.* de abajo el archivo
+// crece bastante más rápido, y 1MB se llenaba en unas pocas sesiones de OCR
+// (que loguea cada captura) — la rotación se llevaba justo el arranque, que
+// es donde está el contexto de qué motor/método estaba activo.
+log.transports.file.maxSize = 5 * 1024 * 1024;
+
+/**
+ * v1.0.3: manda console.log/warn/error TAMBIÉN al archivo de log.
+ *
+ * El motivo es concreto: cuando alguien reporta un problema y manda su
+ * main.log, más de la mitad del diagnóstico no estaba ahí. El código usa dos
+ * sistemas en paralelo —electron-log escribe a disco, console.* sólo a la
+ * terminal, que un usuario final no tiene— y estaban repartidos justo al
+ * revés de lo conveniente: textractor-launcher.js tenía 63 console.* contra 1
+ * log.*, pipeline.js 16 contra 0, xuat-server.js 13 contra 0. O sea que un
+ * reporte de "Textractor no engancha" llegaba sin una sola línea de
+ * Textractor. (ocr.js era la excepción: 57 log.* y ningún console.)
+ *
+ * Se hace como puente en vez de migrar las ~239 llamadas a mano: es un cambio
+ * de diez líneas en un solo lugar contra tocar veinte archivos, no puede
+ * "olvidarse" de ninguna, y sigue funcionando para las que se escriban
+ * mañana sin que nadie tenga que acordarse de la convención.
+ *
+ * Se preserva la salida por consola (los originales se siguen llamando) para
+ * no perder el `pnpm dev` en vivo, que es como se depura acá.
+ */
+const _origConsole = { log: console.log, warn: console.warn, error: console.error };
+
+// Logger aparte con la consola APAGADA, apuntando al mismo archivo que el
+// logger principal. Tiene que ser una instancia separada: si el wrapper de
+// abajo llamara log.info(), el transporte de consola de electron-log llamaría
+// a console.log() — que para entonces ya es el wrapper — y se colgaría en
+// recursión infinita.
+const _fileBridge = log.create({ logId: 'console-bridge' });
+_fileBridge.transports.console.level = false;
+_fileBridge.transports.file.level = 'info';
+_fileBridge.transports.file.maxSize = 5 * 1024 * 1024;
+_fileBridge.transports.file.resolvePathFn = () => log.transports.file.getFile().path;
+
+for (const [method, level] of [['log', 'info'], ['warn', 'warn'], ['error', 'error']]) {
+  console[method] = (...args) => {
+    _origConsole[method](...args);
+    // Nunca dejar que un fallo de logging tumbe la app: es diagnóstico, no
+    // funcionalidad.
+    try { _fileBridge[level](...args); } catch { /* ignorado a propósito */ }
+  };
+}
+
 log.info('Tuhua Translator starting...');
 
 // Prevent multiple instances

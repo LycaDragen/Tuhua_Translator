@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.3] — logs útiles para reportar problemas
+
+### Arreglado
+
+- **Más de la mitad del diagnóstico no llegaba al archivo de log.** El código usa dos sistemas en
+  paralelo: uno escribe a disco y el otro sólo a la terminal — que un usuario final no tiene. Y
+  estaban repartidos justo al revés de lo conveniente: el módulo de Textractor tenía 63 líneas
+  invisibles contra 1 guardada. Un reporte de "Textractor no engancha" llegaba, literalmente, sin
+  una sola línea sobre Textractor. Ahora todo queda en el archivo.
+
+### Nuevo
+
+- **Botón "Carpeta"** junto al de Logs: abre el explorador con el archivo de log ya seleccionado,
+  para adjuntarlo a un reporte. El botón Logs sigue copiando las últimas 100 líneas al
+  portapapeles, que sirve para un vistazo rápido pero se queda corto en un problema real.
+- La [documentación](https://tuhua.lyca.dev/referencia/reportar-bug/) ahora incluye la ruta del
+  archivo en cada sistema operativo.
+
+### Cambiado
+
+- El log rota a los 5 MB en vez de 1 MB. Con todo el diagnóstico yendo al archivo, 1 MB se llenaba
+  en pocas sesiones y la rotación se llevaba justo el arranque, que es donde está el contexto de
+  qué motor y qué método estaban activos.
+
 ## [1.0.2] — arreglos de atajos
 
 ### Arreglado

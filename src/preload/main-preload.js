@@ -70,7 +70,9 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'set-ocr-engine', 'get-ocr-engine-status',
   // v1.0.1: auto-updater
   'update-check', 'update-download', 'update-install',
-  'update-open-release', 'update-skip-version'
+  'update-open-release', 'update-skip-version',
+  // v1.0.3: abrir la carpeta del log para adjuntarlo a un reporte
+  'open-logs-folder'
 ]);
 
 const ALLOWED_SEND_CHANNELS = new Set([
@@ -417,6 +419,7 @@ const api = {
 
   // v1.0.1: auto-updater. Ninguno lleva argumentos a propósito — la versión,
   // la URL del release y si se puede auto-instalar los decide el main.
+  openLogsFolder: () => secureInvoke('open-logs-folder'),
   checkForUpdate: () => secureInvoke('update-check'),
   downloadUpdate: () => secureInvoke('update-download'),
   installUpdate: () => secureInvoke('update-install'),

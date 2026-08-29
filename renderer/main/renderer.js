@@ -697,6 +697,14 @@
                 const key = el.getAttribute('data-i18n-placeholder');
                 if (t[key]) el.placeholder = t[key];
             });
+            // v1.0.3: idem para tooltips. Sin esto, un data-i18n-title se
+            // ignora en silencio y el tooltip queda clavado en el idioma en
+            // que se escribió el HTML — que es exactamente cómo la lista de
+            // atajos terminó fija en inglés.
+            root.querySelectorAll('[data-i18n-title]').forEach(el => {
+                const key = el.getAttribute('data-i18n-title');
+                if (t[key]) el.title = t[key];
+            });
         }
 
         function changeLanguage(lang) {
@@ -1805,6 +1813,16 @@
         }
 
         // ===== DEBUG LOGS (v3.10.0) =====
+        // v1.0.3: complementa copyDebugLogs() — ese copia 100 líneas al
+        // portapapeles, éste abre la carpeta para adjuntar el archivo entero.
+        async function openLogsFolder() {
+            const t = translations[currentLang] || translations['en'];
+            const res = await api.openLogsFolder();
+            if (!res || !res.success) {
+                showToast(t.logs_open_folder_error || 'No se pudo abrir la carpeta de logs');
+            }
+        }
+
         async function copyDebugLogs() {
             try {
                 const result = await api.getDebugLogs();

@@ -1957,6 +1957,26 @@ class IpcHandlers {
       }
     });
 
+    // v1.0.3: abre el explorador con el archivo de log ya seleccionado.
+    // get-debug-logs copia las últimas 100 líneas al portapapeles, que sirve
+    // para un vistazo rápido pero no para adjuntar un reporte: un problema de
+    // Textractor o de arranque suele necesitar bastante más contexto que eso,
+    // y el archivo vive en una carpeta que el usuario no encuentra solo
+    // (%APPDATA% está oculta por defecto en Windows). No recibe ninguna ruta
+    // del renderer — la resuelve electron-log — por el mismo motivo que
+    // open-docs-link no acepta URLs arbitrarias.
+    ipcMain.handle('open-logs-folder', async () => {
+      try {
+        const elog = require('electron-log');
+        const logPath = elog.transports.file.getFile()?.path || '';
+        if (!logPath) return { success: false, error: 'log-path-unavailable' };
+        shell.showItemInFolder(logPath);
+        return { success: true, logPath };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    });
+
     // ===== Updates (v1.0.1) =====
     // El servicio decide TODO: qué versión hay, si se puede auto-instalar, y
     // a qué URL apunta "Ver cambios". El renderer nunca manda una versión ni
@@ -2687,7 +2707,8 @@ class IpcHandlers {
       'set-ocr-engine', 'get-ocr-engine-status',
       // v1.0.1: auto-updater
       'update-check', 'update-download', 'update-install',
-      'update-open-release', 'update-skip-version'
+      'update-open-release', 'update-skip-version',
+      'open-logs-folder'
     ];
     channels.forEach(ch => ipcMain.removeHandler(ch));
     ipcMain.removeAllListeners('get-app-version');
