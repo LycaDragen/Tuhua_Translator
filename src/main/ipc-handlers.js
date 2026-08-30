@@ -1519,9 +1519,16 @@ class IpcHandlers {
             if (!base) {
               return { valid: false, code: 'endpoint_not_configured', params: {} };
             }
+            // v1.0.5: getExtraHeaders cubre el 400 de Anthropic — /models
+            // es endpoint nativo y exige 'anthropic-version'. Se le pasa
+            // `base` además del id para que 'custom' apuntado a Anthropic
+            // también funcione.
             const resp = await axios.get(`${base}/models`, {
               timeout: 8000,
-              headers: { 'Authorization': `Bearer ${apiKey}` }
+              headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                ...llmProviders.getExtraHeaders(provider, base)
+              }
             });
             if (resp.data && resp.data.data) {
               return { valid: true, code: 'openai_key_valid', params: { count: resp.data.data.length } };

@@ -1853,14 +1853,19 @@
         async function copyDebugLogs() {
             try {
                 const result = await api.getDebugLogs();
+                const t = translations[currentLang] || translations['en'];
                 if (result.success && result.logContent) {
                     await navigator.clipboard.writeText(result.logContent);
-                    showToast('Logs copiados al portapapeles');
+                    showToast(t.logs_copied || 'Logs copiados al portapapeles');
                 } else {
-                    showToast('No se pudieron obtener los logs');
+                    showToast(t.logs_copy_failed || 'No se pudieron obtener los logs');
                 }
             } catch (err) {
-                showToast('Error: ' + err.message);
+                // v1.0.5: estos tres avisos estaban hardcodeados en español y
+                // no seguían el idioma de la interfaz — mismo defecto que
+                // tenía la lista de atajos.
+                const t = translations[currentLang] || translations['en'];
+                showToast((t.logs_copy_error || 'Error: {error}').replace('{error}', err.message));
             }
         }
 

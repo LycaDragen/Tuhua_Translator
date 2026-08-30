@@ -260,7 +260,10 @@ Si encuentras un bug, por favor abre un [Issue](https://github.com/LycaDragen/Tu
 - Descripción del problema
 - Pasos para reproducirlo
 - Tu sistema operativo y versión de Tuhua Translator
-- Logs (últimas 100 líneas, copiables al portapapeles con el botón **Logs** de la interfaz)
+- Logs. La interfaz tiene dos botones abajo a la derecha: **Logs** copia las últimas 100
+  líneas al portapapeles, y **Carpeta** abre el explorador con `main.log` ya seleccionado
+  para adjuntarlo entero — este último es el que conviene para un reporte. Detalle completo
+  (rutas por sistema y rotación) en [tuhua.lyca.dev](https://tuhua.lyca.dev/referencia/reportar-bug/)
 
 ---
 

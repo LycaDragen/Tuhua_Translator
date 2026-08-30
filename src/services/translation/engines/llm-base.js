@@ -16,7 +16,7 @@
  */
 const axios = require('axios');
 const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
-const { getRequestParamOverrides } = require('../llm-providers');
+const { getRequestParamOverrides, getExtraHeaders } = require('../llm-providers');
 const { renderPromptTemplate } = require('../prompt-template');
 const { DEFAULT_TEMPLATE } = require('../prompt-presets');
 const { getFewshotExamples } = require('../fewshot-examples');
@@ -185,6 +185,12 @@ class OpenAICompatEngine {
     if (this.apiKey) {
       headers['Authorization'] = `Bearer ${this.apiKey}`;
     }
+
+    // v1.0.5: /chat/completions de Anthropic (capa de compatibilidad) NO
+    // exige 'anthropic-version' —el 404/401 de los logs son prueba de que
+    // llegaba bien—, pero mandarlo es inocuo y evita que este camino se
+    // desincronice del de validación si mañana la capa se endurece.
+    Object.assign(headers, getExtraHeaders(this.providerId, this.baseUrl));
 
     // v3.13.58 (Fase 3): some models (OpenAI's o-series, DeepSeek's
     // deepseek-reasoner) reject a custom temperature/top_p outright, and

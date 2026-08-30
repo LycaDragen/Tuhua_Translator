@@ -108,8 +108,24 @@ const CLOUD_PROVIDERS = [
     baseUrl: 'https://api.anthropic.com/v1',
     authScheme: 'bearer',
     requiresKey: true,
-    defaultModel: 'claude-3-5-haiku-latest',
-    models: ['claude-3-5-haiku-latest', 'claude-3-5-sonnet-latest'],
+    // v1.0.5: la lista anterior (claude-3-5-haiku-latest /
+    // claude-3-5-sonnet-latest) quedó dos generaciones atrás. Un usuario
+    // intentó corregirlo escribiendo 'claude-5-haiku-latest' a mano —un ID
+    // que no existe— y recibió un 404 que el pipeline se tragó cayendo a
+    // Google Translate. Los IDs actuales NO llevan sufijo de fecha ni
+    // '-latest': son completos tal cual.
+    // Haiku 4.5 va de default por precio y latencia ($1/$5 por millón de
+    // tokens), que es lo que importa para traducir línea por línea en vivo;
+    // sus 200K de contexto sobran para diálogo de VN.
+    defaultModel: 'claude-haiku-4-5',
+    models: ['claude-haiku-4-5', 'claude-sonnet-5', 'claude-opus-5'],
+    // v1.0.5: la capa de compatibilidad OpenAI de Anthropic sólo cubre
+    // /chat/completions. GET /v1/models —que es lo que consulta el botón
+    // "Validar"— es un endpoint NATIVO, y los nativos exigen el header
+    // 'anthropic-version'; sin él la API devuelve 400 quejándose del
+    // header. Bearer sí lo acepta (lo traduce a x-api-key internamente),
+    // así que esto era lo único que faltaba.
+    extraHeaders: { 'anthropic-version': '2023-06-01' },
     maxTokensField: 'max_tokens',
     supportsTopP: true,
     // v3.13.58: Anthropic's own docs mark their OpenAI SDK compatibility
@@ -221,6 +237,37 @@ function getRequestParamOverrides(providerId, model) {
 }
 
 /**
+ * Headers extra que un proveedor necesita además de Content-Type y el
+ * Bearer. Hermano de getRequestParamOverrides(): la tabla de rarezas por
+ * proveedor vive como dato en CLOUD_PROVIDERS, no como un `if` desperdigado
+ * en cada punto de llamada.
+ *
+ * `baseUrl` es opcional y sirve para un caso real: el proveedor
+ * "Personalizado" pega la URL a mano, así que su providerId es 'custom' y
+ * no tiene extraHeaders propios. Si esa URL apunta al host de Anthropic
+ * igual necesita 'anthropic-version', o el usuario se come el mismo 400
+ * que motivó esta función.
+ */
+function getExtraHeaders(providerId, baseUrl) {
+  const provider = getProvider(providerId);
+  if (provider && provider.extraHeaders) {
+    return { ...provider.extraHeaders };
+  }
+  if (baseUrl) {
+    let host = '';
+    try {
+      host = new URL(baseUrl).hostname.toLowerCase();
+    } catch {
+      return {}; // URL basura: que falle el request, no acá
+    }
+    if (host === 'api.anthropic.com') {
+      return { ...getProvider('anthropic').extraHeaders };
+    }
+  }
+  return {};
+}
+
+/**
  * One-time, idempotent seed: promote the legacy global `openaiKey` setting
  * into the new `llmProviderKeys.openai` map. Returns the object to
  * `store.set('llmProviderKeys', ...)`, or null if there's nothing to do —
@@ -252,6 +299,7 @@ module.exports = {
   getProvider,
   getLocalPreset,
   getRequestParamOverrides,
+  getExtraHeaders,
   resolveLocalEndpoint,
   seedProviderKeysFromLegacyOpenAIKey
 };

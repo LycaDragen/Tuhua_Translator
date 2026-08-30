@@ -23,6 +23,7 @@ const {
   getProvider,
   getLocalPreset,
   getRequestParamOverrides,
+  getExtraHeaders,
   resolveLocalEndpoint,
   seedProviderKeysFromLegacyOpenAIKey
 } = require(path.join('..', 'src', 'services', 'translation', 'llm-providers.js'));
@@ -171,5 +172,48 @@ check('migration-does-not-touch-a-configured-provider-keys-map', () => {
   });
   return { pass: result === null, actual: result };
 }, 'A user who has already set up a different provider (and never had an openaiKey used) must not have it silently reintroduced.');
+
+// ─── getExtraHeaders (headers exigidos por proveedor) ────────────────────
+// v1.0.5. Un usuario reportó "error 400" con Anthropic: el botón Validar
+// consulta GET {baseUrl}/models, que en Anthropic es un endpoint NATIVO (la
+// capa de compatibilidad OpenAI sólo cubre /chat/completions) y exige el
+// header 'anthropic-version'. Sin él, 400 quejándose del header.
+check('anthropic-declares-the-anthropic-version-header', () => {
+  const h = getExtraHeaders('anthropic');
+  return { pass: h['anthropic-version'] === '2023-06-01', actual: h };
+}, 'Sin este header GET /v1/models devuelve 400. Es lo unico que le faltaba: Bearer si lo acepta.');
+
+check('custom-provider-pointed-at-anthropic-still-gets-the-header', () => {
+  // El caso que se escapa de la tabla: "Personalizado" con la URL a mano.
+  // providerId es 'custom', no tiene extraHeaders propios, y sin el
+  // fallback por host se come el mismo 400.
+  const h = getExtraHeaders('custom', 'https://API.Anthropic.com/v1/');
+  return { pass: h['anthropic-version'] === '2023-06-01', actual: h };
+});
+
+check('other-providers-get-no-extra-headers', () => {
+  const cases = [
+    getExtraHeaders('openai', 'https://api.openai.com/v1'),
+    getExtraHeaders('custom', 'http://127.0.0.1:11434/v1'),
+    getExtraHeaders('custom', 'no-es-una-url'),
+    getExtraHeaders('inexistente')
+  ];
+  const bad = cases.filter((h) => Object.keys(h).length !== 0);
+  return { pass: bad.length === 0, actual: bad };
+}, 'Mandarle anthropic-version a Ollama o a OpenAI no rompe nada hoy, pero la tabla tiene que ser precisa o deja de significar algo.');
+
+check('every-declared-extraHeaders-reaches-the-validate-handler', () => {
+  // El defecto real no era la tabla: era que el punto de llamada no la
+  // leia. Este check ata las dos mitades — si alguien agrega extraHeaders
+  // a un proveedor pero Validar sigue mandando solo el Bearer, falla.
+  const fs = require('fs');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'ipc-handlers.js'), 'utf-8');
+  const declaring = CLOUD_PROVIDERS.filter((p) => p.extraHeaders).map((p) => p.id);
+  const wired = /axios\.get\(`\$\{base\}\/models`[\s\S]{0,320}?getExtraHeaders\(/.test(src);
+  return {
+    pass: declaring.length === 0 || wired,
+    actual: { declaring, validateHandlerCallsGetExtraHeaders: wired }
+  };
+}, 'Este es el check que habria atrapado el bug original.');
 
 run("llm-providers.js bench", CHECKS);

@@ -174,7 +174,7 @@ una fila de datos, no una clase nueva.
 | OpenRouter | Sí | Una sola key llega a modelos de OpenAI/Anthropic/Google/DeepSeek/Meta y más |
 | DeepSeek | Sí | `deepseek-reasoner` no acepta temperatura/top_p, pero sí `max_tokens` (a diferencia de los modelos de razonamiento de OpenAI) |
 | Google Gemini | Sí | Vía su capa de compatibilidad OpenAI |
-| Anthropic | Sí | Marcado como beta en la UI — su capa de compatibilidad OpenAI es beta según la propia documentación de Anthropic |
+| Anthropic | Sí | Marcado como beta en la UI — su capa de compatibilidad OpenAI es beta según la propia documentación de Anthropic. **Esa capa sólo cubre `/chat/completions`**: `GET /v1/models` (lo que consulta «Validar») es endpoint nativo y exige el header `anthropic-version`, que llega vía `extraHeaders` |
 | Groq | Sí | Enfocado en velocidad de inferencia |
 | Custom | Opcional | Escape hatch para cualquier endpoint OpenAI-compatible no listado |
 
@@ -183,6 +183,12 @@ Studio (`:1234`), Ollama (`:11434`), llama.cpp (`:8080`) y KoboldCpp
 (`:5001`), o una URL custom.
 
 ### Cómo agregar un proveedor cloud nuevo
+
+**Header extra:** si el proveedor exige algún header más allá de `Content-Type` y el
+`Authorization: Bearer`, va declarado como `extraHeaders` en su fila —`getExtraHeaders()`
+lo resuelve para el request y para «Validar». Es el mismo criterio que
+`getRequestParamOverrides()`: una rareza de proveedor es un dato en la tabla, no un `if`
+en el punto de llamada.
 
 1. Agregar una entrada al array `CLOUD_PROVIDERS` en
    `src/services/translation/llm-providers.js`: `id`, `labelKey` (clave de
