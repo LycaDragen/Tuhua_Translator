@@ -23,6 +23,7 @@ const {
   getProvider,
   getLocalPreset,
   getRequestParamOverrides,
+  normalizeBaseUrl,
   resolveLocalEndpoint,
   seedProviderKeysFromLegacyOpenAIKey
 } = require(path.join('..', 'src', 'services', 'translation', 'llm-providers.js'));
@@ -48,11 +49,62 @@ check('no-baseurl-ends-with-a-trailing-slash', () => {
   // (not smart URL joining) — a trailing slash here would produce a
   // double slash on the wire. Empty string (the 'custom' entries, filled
   // in by the user) is fine; anything else must not end in '/'.
+  //
+  // v1.0.5: "filled in by the user is fine" era el hueco por el que se coló
+  // el bug del 307 — esta tabla cumplía la invariante y el endpoint escrito
+  // a mano no. Lo que el usuario escribe lo cubren ahora los checks
+  // normalize-* de más abajo; este sigue cubriendo sólo la tabla.
   const offenders = [...CLOUD_PROVIDERS, ...LOCAL_ENDPOINT_PRESETS]
     .filter((p) => p.baseUrl && p.baseUrl.endsWith('/'))
     .map((p) => p.id);
   return { pass: offenders.length === 0, actual: offenders };
 }, "Regression guard for the exact bug caught while writing this table: Google's and Anthropic's own docs show a trailing slash, which is a different SDK's URL-joining convention, not what this file's raw concatenation needs.");
+
+// ─── v1.0.5: normalización de baseUrl (bug del 307) ───────────────────────
+// Un endpoint escrito a mano terminado en '/' producía
+// `/v1//chat/completions`, que Ollama contesta con un 307. El GET de
+// validación seguía el redirect (así que "Validar" daba OK) y el POST de
+// traducción moría sin error legible. Ver normalizeBaseUrl() en
+// llm-providers.js.
+
+check('normalize-strips-a-trailing-slash', () => {
+  const actual = normalizeBaseUrl('http://127.0.0.1:11434/v1/');
+  return { pass: actual === 'http://127.0.0.1:11434/v1', actual };
+});
+
+check('normalize-strips-repeated-trailing-slashes', () => {
+  const actual = normalizeBaseUrl('http://127.0.0.1:11434/v1///');
+  return { pass: actual === 'http://127.0.0.1:11434/v1', actual };
+}, 'Copiar y pegar una URL suele traer más de una barra; una sola pasada de strip no basta.');
+
+check('normalize-leaves-a-correct-url-untouched', () => {
+  const url = 'http://127.0.0.1:11434/v1';
+  const actual = normalizeBaseUrl(url);
+  return { pass: actual === url, actual };
+}, 'El arreglo no puede cambiar el comportamiento de quien ya lo tenía bien.');
+
+check('normalize-is-idempotent', () => {
+  const once = normalizeBaseUrl('http://x/v1/');
+  const twice = normalizeBaseUrl(once);
+  return { pass: once === twice, actual: { once, twice } };
+});
+
+check('normalize-survives-empty-and-undefined', () => {
+  const actual = [normalizeBaseUrl(''), normalizeBaseUrl(undefined), normalizeBaseUrl(null)];
+  return { pass: actual.every((v) => v === ''), actual };
+}, "El preset 'custom' arranca con baseUrl vacío: normalizar no puede convertirlo en 'undefined' ni reventar.");
+
+check('resolve-local-endpoint-normalizes-a-user-typed-slash', () => {
+  // El guard de regresión de verdad: es la ruta exacta que recorrió el bug
+  // real — preset 'custom' + una URL escrita a mano con barra final.
+  const actual = resolveLocalEndpoint('custom', 'http://127.0.0.1:11434/v1/');
+  return { pass: actual === 'http://127.0.0.1:11434/v1', actual };
+}, 'Revertir normalizeBaseUrl() en resolveLocalEndpoint() tiene que hacer fallar ESTE check.');
+
+check('resolve-local-endpoint-normalizes-a-preset-too', () => {
+  const actual = resolveLocalEndpoint('ollama', '');
+  return { pass: actual === 'http://127.0.0.1:11434/v1', actual };
+});
 
 check('every-cloud-provider-has-a-display-name', () => {
   const offenders = CLOUD_PROVIDERS.filter((p) => !p.displayName).map((p) => p.id);

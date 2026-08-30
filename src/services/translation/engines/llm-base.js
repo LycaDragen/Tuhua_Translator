@@ -16,7 +16,7 @@
  */
 const axios = require('axios');
 const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
-const { getRequestParamOverrides } = require('../llm-providers');
+const { getRequestParamOverrides, normalizeBaseUrl } = require('../llm-providers');
 const { renderPromptTemplate } = require('../prompt-template');
 const { DEFAULT_TEMPLATE } = require('../prompt-presets');
 const { getFewshotExamples } = require('../fewshot-examples');
@@ -68,7 +68,10 @@ class OpenAICompatEngine {
     this.requiresKey = requiresKey;
     this.apiKey = apiKey;
     this.model = model;
-    this.baseUrl = baseUrl;
+    // v1.0.5: normalizado, no crudo — ver setBaseUrl() abajo y
+    // normalizeBaseUrl() en llm-providers.js. Aquí también, porque un
+    // endpoint puede llegar por el constructor sin pasar nunca por el setter.
+    this.baseUrl = normalizeBaseUrl(baseUrl);
     this.promptTemplate = promptTemplate;
     this.timeout = timeout;
     this.supportedLanguages = supportedLanguages;
@@ -265,7 +268,11 @@ class OpenAICompatEngine {
   }
 
   setBaseUrl(url) {
-    this.baseUrl = url;
+    // v1.0.5: la barra final se quita AQUÍ y no en el call site porque el
+    // `${this.baseUrl}/chat/completions` de translate() es una concatenación
+    // cruda: un `/v1/` guardado produce `/v1//chat/completions`, que Ollama
+    // contesta con un 307 y deja morir el POST. Ver normalizeBaseUrl().
+    this.baseUrl = normalizeBaseUrl(url);
   }
 }
 
