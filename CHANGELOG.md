@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.0.9] — el OCR descartaba la línea que terminaba de aparecer
+
+### Arreglado
+
+- **Con OCR, el texto que se revela de a poco no se traducía una vez completo.** Reportado como
+  "a veces no detecta el cambio de texto", con Tesseract y con PaddleOCR. No es que no lo leyera:
+  lo leía y lo descartaba por parecido al anterior. El filtro que evita retraducir la misma línea
+  medía, entre otras cosas, cuánto del texto más corto coincide con el principio del más largo —
+  y esa medida es ciega a la dirección: daba 100% tanto si el OCR había vuelto a leer la misma
+  línea peor y más corta (descartarla está bien) como si la línea había **terminado** de aparecer
+  y ahora traía más texto. En un log real la misma frase se descartó tres veces seguidas hasta
+  que el usuario forzó la captura a mano. Ahora, si el texto nuevo conserva entero el anterior y
+  creció al menos un 20%, se traduce. Por debajo de eso sigue tratándose como la misma línea, que
+  es para lo que el filtro existía: una relectura con un caracter de ruido pegado al final no
+  dispara una traducción nueva.
+
 ## [1.0.8] — dos cosas que salieron de probar la 1.0.7 en Windows
 
 ### Arreglado

@@ -1663,6 +1663,53 @@ class OcrService extends EventEmitter {
   }
 
   /**
+   * v1.0.9: ¿el texto nuevo es el anterior YA COMPLETADO?
+   *
+   * Éste es el bug que reportó un usuario como "el OCR a veces no detecta el
+   * cambio de texto", con los dos motores. No es que no lo lea: lo lee y lo
+   * descarta. Log real del 2026-08-30:
+   *
+   *   15:54:31  Recognized: "* You tend to avoid doing things that"
+   *   15:54:48  Similar text skipped (100% similar to last):
+   *             "* You tend to avoid doing things that make you unc…"
+   *   15:54:53  Similar text skipped (100% similar to last): …
+   *   15:55:06  Similar text skipped (100% similar to last): …
+   *   15:55:06  [Shortcuts] OCR capture hotkey triggered   ← forzado a mano
+   *
+   * `_computeSimilarity` mide, entre otras cosas, cuánto del texto MÁS CORTO
+   * coincide con el principio del más largo. Esa regla es ciega a la
+   * dirección: da 1.0 tanto si volvimos a leer la misma línea peor (más
+   * corta — descartar está bien) como si la línea TERMINÓ de aparecer y ahora
+   * trae más texto (traducir es obligatorio). Con diálogo que se revela de a
+   * poco, el parcial gana y lo completo no se traduce nunca.
+   *
+   * Se pide crecimiento SUSTANCIAL (+20% de caracteres) y no cualquiera: una
+   * relectura de la misma línea con un caracter de ruido pegado al final
+   * ("…uncomfortable." → "…uncomfortable. 3") sigue siendo la misma línea y
+   * tiene que seguir descartándose, que es para lo que la regla de prefijo
+   * existía.
+   *
+   * @param {string} newText
+   * @param {string} lastText
+   * @returns {boolean}
+   */
+  _isContinuationOf(newText, lastText) {
+    if (!newText || !lastText) return false;
+
+    const newWords = newText.toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+    const lastWords = lastText.toLowerCase().split(/\s+/).filter((w) => w.length > 0);
+    if (newWords.length <= lastWords.length) return false;
+
+    // Todas las palabras del anterior tienen que estar, en orden, al principio
+    // del nuevo: si no, no es la misma línea completándose sino otra distinta.
+    for (let i = 0; i < lastWords.length; i++) {
+      if (newWords[i] !== lastWords[i]) return false;
+    }
+
+    return newText.length >= lastText.length * 1.2;
+  }
+
+  /**
    * v3.9.8: Check if two OCR texts are similar enough to be considered
    * the same game dialogue. Uses _computeSimilarity with the threshold.
    * @param {string} newText
@@ -1670,6 +1717,14 @@ class OcrService extends EventEmitter {
    * @returns {boolean} true if texts are similar (should skip translation)
    */
   _isSimilarText(newText, lastText) {
+    // v1.0.9: la continuación gana sobre CUALQUIER medida de similitud, no
+    // sólo sobre la de prefijo. En una línea larga, completarla puede sumar
+    // pocas palabras sobre muchas y dar un Jaccard alto igual: el mismo bug
+    // aparecería de nuevo por la otra puerta.
+    if (this._isContinuationOf(newText, lastText)) {
+      log.info(`[OCR] Continuation of the previous line (${lastText.length} → ${newText.length} chars) — translating: "${newText.substring(0, 50)}"`);
+      return false;
+    }
     const similarity = this._computeSimilarity(newText, lastText);
     return similarity >= this._similarityThreshold;
   }
