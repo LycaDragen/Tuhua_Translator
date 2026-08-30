@@ -162,10 +162,17 @@ const CLOUD_PROVIDERS = [
 // LM Studio's :1234 and Ollama's :11434 as a real, repeated mistake (see
 // scripts/test-context-memory.js's header) — this is what removes it.
 const LOCAL_ENDPOINT_PRESETS = [
-  { id: 'lmstudio', labelKey: 'llm_local_preset_lmstudio', baseUrl: 'http://localhost:1234/v1' },
-  { id: 'ollama', labelKey: 'llm_local_preset_ollama', baseUrl: 'http://localhost:11434/v1' },
-  { id: 'llamacpp', labelKey: 'llm_local_preset_llamacpp', baseUrl: 'http://localhost:8080/v1' },
-  { id: 'koboldcpp', labelKey: 'llm_local_preset_koboldcpp', baseUrl: 'http://localhost:5001/v1' },
+  // v1.0.4: 127.0.0.1 y NO 'localhost'. Node 18+ resuelve 'localhost' a ::1
+  // (IPv6) antes que a IPv4, pero Ollama y compañía escuchan sólo en IPv4 por
+  // defecto: el resultado era `connect ECONNREFUSED ::1:11434` con el servidor
+  // perfectamente levantado. Salió del log de un usuario real, que lo resolvió
+  // escribiendo 127.0.0.1 a mano en Personalizado. El síntoma no da ninguna
+  // pista de que el problema sea la familia de direcciones — de ahí que haya
+  // un test que lo fija (test:llm-providers).
+  { id: 'lmstudio', labelKey: 'llm_local_preset_lmstudio', baseUrl: 'http://127.0.0.1:1234/v1' },
+  { id: 'ollama', labelKey: 'llm_local_preset_ollama', baseUrl: 'http://127.0.0.1:11434/v1' },
+  { id: 'llamacpp', labelKey: 'llm_local_preset_llamacpp', baseUrl: 'http://127.0.0.1:8080/v1' },
+  { id: 'koboldcpp', labelKey: 'llm_local_preset_koboldcpp', baseUrl: 'http://127.0.0.1:5001/v1' },
   { id: 'custom', labelKey: 'llm_local_preset_custom', baseUrl: '' }
 ];
 

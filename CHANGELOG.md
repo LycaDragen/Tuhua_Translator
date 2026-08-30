@@ -11,6 +11,17 @@
   La traducción en sí seguía funcionando —la dirección real se resolvía por otro camino, del lado
   del proceso principal— pero no había forma de comprobarlo desde la interfaz.
 
+- **Los servidores locales fallaban con `ECONNREFUSED` estando levantados.** Los preajustes usaban
+  `localhost`, que en versiones recientes de Node se resuelve primero a IPv6 (`::1`) — pero Ollama
+  y compañía escuchan sólo en IPv4 por defecto. El error no daba ninguna pista de que el problema
+  fuera ése; ahora los preajustes usan `127.0.0.1` directamente.
+- **El modelo colaba frases suyas antes de la traducción.** Salidas como *"Aquí tienes la
+  traducción al español:"* llegaban al overlay junto con el texto. El limpiador sólo reconocía
+  esas frases en inglés y japonés, pero el modelo las escribe en el idioma **destino** — el mismo
+  agujero que ya había tenido la detección de respuestas rechazadas. Ahora se detectan por su
+  forma, sin depender del idioma, y sin tocar los diálogos que empiezan con el nombre de un
+  personaje.
+
 ### Cambiado
 
 - El campo de dirección ahora aclara debajo **"Dirección de Ollama (:11434), configurada

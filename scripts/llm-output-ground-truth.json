@@ -23,7 +23,9 @@
       "targetLangCode": "es",
       "finishReason": "length",
       "expectedVerdict": "truncated",
-      "expectedActions": ["finish-reason-length"]
+      "expectedActions": [
+        "finish-reason-length"
+      ]
     },
     {
       "id": "markdown-fence-wrapping-whole-output-is-stripped",
@@ -34,7 +36,9 @@
       "finishReason": "stop",
       "expectedText": "Hola, ¿cómo estás?",
       "expectedVerdict": "ok",
-      "expectedActions": ["stripped-code-fence"]
+      "expectedActions": [
+        "stripped-code-fence"
+      ]
     },
     {
       "id": "well-formed-reasoning-block-is-stripped-leaving-the-answer",
@@ -45,7 +49,9 @@
       "finishReason": "stop",
       "expectedText": "Hola, ¿qué tal?",
       "expectedVerdict": "ok",
-      "expectedActions": ["stripped-reasoning-block"]
+      "expectedActions": [
+        "stripped-reasoning-block"
+      ]
     },
     {
       "id": "unclosed-reasoning-block-marks-truncated",
@@ -55,7 +61,9 @@
       "targetLangCode": "es",
       "finishReason": null,
       "expectedVerdict": "truncated",
-      "expectedActions": ["unclosed-reasoning-block"]
+      "expectedActions": [
+        "unclosed-reasoning-block"
+      ]
     },
     {
       "id": "labeled-preamble-english-is-stripped",
@@ -66,7 +74,9 @@
       "finishReason": "stop",
       "expectedText": "Hola, ¿cómo estás?",
       "expectedVerdict": "ok",
-      "expectedActions": ["stripped-preamble"]
+      "expectedActions": [
+        "stripped-preamble"
+      ]
     },
     {
       "id": "labeled-preamble-japanese-is-stripped",
@@ -77,7 +87,9 @@
       "finishReason": "stop",
       "expectedText": "こんにちは、元気？",
       "expectedVerdict": "ok",
-      "expectedActions": ["stripped-preamble"]
+      "expectedActions": [
+        "stripped-preamble"
+      ]
     },
     {
       "id": "wrapping-quotes-stripped-when-source-was-not-quoted",
@@ -88,7 +100,9 @@
       "finishReason": "stop",
       "expectedText": "Hola, ¿cómo estás?",
       "expectedVerdict": "ok",
-      "expectedActions": ["stripped-wrapping-quotes"]
+      "expectedActions": [
+        "stripped-wrapping-quotes"
+      ]
     },
     {
       "id": "refusal-boilerplate-english-is-detected",
@@ -98,7 +112,9 @@
       "targetLangCode": "es",
       "finishReason": "stop",
       "expectedVerdict": "refusal",
-      "expectedActions": ["detected-refusal"]
+      "expectedActions": [
+        "detected-refusal"
+      ]
     },
     {
       "id": "refusal-in-english-when-target-is-japanese-caught-by-script-mismatch",
@@ -108,7 +124,9 @@
       "targetLangCode": "ja",
       "finishReason": "stop",
       "expectedVerdict": "refusal",
-      "expectedActions": ["detected-refusal"]
+      "expectedActions": [
+        "detected-refusal"
+      ]
     },
     {
       "id": "refusal-in-spanish-responding-to-garbled-source-caught-unconditionally",
@@ -118,7 +136,9 @@
       "targetLangCode": "es",
       "finishReason": "stop",
       "expectedVerdict": "refusal",
-      "expectedActions": ["detected-refusal"],
+      "expectedActions": [
+        "detected-refusal"
+      ],
       "note": "The real bug found by Lyca (Nekopara Vol.1 session): a terse Spanish refusal answering long garbled Textractor hook noise — neither corroboration signal could fire (output is SHORTER than source, and Spanish shares the Latin script with the target), so this needed the unconditional full-clause pattern, not just broader language coverage."
     },
     {
@@ -129,7 +149,9 @@
       "targetLangCode": "fr",
       "finishReason": "stop",
       "expectedVerdict": "refusal",
-      "expectedActions": ["detected-refusal"]
+      "expectedActions": [
+        "detected-refusal"
+      ]
     },
     {
       "id": "refusal-in-spanish-answering-long-unrelated-source-caught-by-topic-signal",
@@ -139,7 +161,9 @@
       "targetLangCode": "es",
       "finishReason": "stop",
       "expectedVerdict": "refusal",
-      "expectedActions": ["detected-refusal"],
+      "expectedActions": [
+        "detected-refusal"
+      ],
       "note": "The real bug found by Lyca (Nekopara Vol.1 session, ronda 4): a Clipboard hook briefly grabbed an unrelated pasted paragraph as 'game text'; GPT refused in Spanish and it sailed to the overlay uncaught. Neither prior signal could fire — the refusal is SHORTER than the (unusually long) source, so 2a's disproportion check fails; Spanish shares the Latin script with the target, so 2b never applies. This needs the topic-vocabulary signal (2c), independent of either side's length."
     },
     {
@@ -150,7 +174,9 @@
       "targetLangCode": "es",
       "finishReason": "stop",
       "expectedVerdict": "passthrough",
-      "expectedActions": ["detected-passthrough"]
+      "expectedActions": [
+        "detected-passthrough"
+      ]
     },
     {
       "id": "trailing-translator-note-stripped",
@@ -161,7 +187,9 @@
       "finishReason": "stop",
       "expectedText": "Hola.",
       "expectedVerdict": "ok",
-      "expectedActions": ["stripped-trailing-note"]
+      "expectedActions": [
+        "stripped-trailing-note"
+      ]
     },
     {
       "id": "excess-blank-lines-collapsed",
@@ -172,6 +200,34 @@
       "finishReason": "stop",
       "expectedText": "Hola.\n\n¿Cómo estás?",
       "expectedVerdict": "ok"
+    },
+    {
+      "id": "spanish-preamble-is-stripped",
+      "input": "Aquí tienes la traducción al español:\n\nNo puedo creer que hayas hecho eso.",
+      "sourceText": "I can't believe you did that.",
+      "sourceLangCode": "en",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "No puedo creer que hayas hecho eso.",
+      "expectedVerdict": "ok",
+      "expectedActions": [
+        "stripped-preamble"
+      ],
+      "note": "Caso real de un log de usuario (v1.0.4). El preambulo viene en el idioma DESTINO, que la lista de ingles/japones no cubria."
+    },
+    {
+      "id": "conversational-preamble-any-language-is-stripped",
+      "input": "Entendido. Continuando con la secuencia:\n\nUn firme agarre se coloca en mi hombro.",
+      "sourceText": "A firm grip lands on my shoulder.",
+      "sourceLangCode": "en",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Un firme agarre se coloca en mi hombro.",
+      "expectedVerdict": "ok",
+      "expectedActions": [
+        "stripped-preamble"
+      ],
+      "note": "Del mismo log: modelos chicos se ponen conversacionales. La regla es por forma (linea corta + dos puntos + linea en blanco), no por palabras."
     }
   ],
   "mustNotChange": [
@@ -271,6 +327,28 @@
       "finishReason": "stop",
       "expectedText": "El profesor entró en el aula en silencio.",
       "expectedVerdict": "ok"
+    },
+    {
+      "id": "vn-speaker-label-is-not-a-preamble",
+      "input": "???: Es bueno saber que estamos de acuerdo.",
+      "sourceText": "???: Good to know we're on the same page.",
+      "sourceLangCode": "en",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "???: Es bueno saber que estamos de acuerdo.",
+      "expectedVerdict": "ok",
+      "note": "El falso positivo que la regla de forma tiene que evitar: en una VN los dos puntos van a MITAD de linea y no hay linea en blanco despues, a diferencia de un preambulo."
+    },
+    {
+      "id": "multiline-dialogue-with-speaker-label-survives",
+      "input": "Yuki: Te estaba esperando.\n\n¿Dónde estabas?",
+      "sourceText": "Yuki: I was waiting for you.\n\nWhere were you?",
+      "sourceLangCode": "en",
+      "targetLangCode": "es",
+      "finishReason": "stop",
+      "expectedText": "Yuki: Te estaba esperando.\n\n¿Dónde estabas?",
+      "expectedVerdict": "ok",
+      "note": "El caso limite mas peligroso: etiqueta de hablante Y linea en blanco. NO debe recortarse, porque los dos puntos no cierran la linea."
     }
   ]
 }

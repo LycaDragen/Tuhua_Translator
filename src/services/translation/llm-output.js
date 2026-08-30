@@ -286,6 +286,27 @@ function sanitizeLLMOutput(raw, { sourceText = '', sourceLangCode = '', targetLa
   if (preambleMatch && preambleMatch[1].trim()) {
     text = preambleMatch[1].trim();
     actions.push('stripped-preamble');
+  } else {
+    // v1.0.4: la lista de arriba sólo cubre inglés y japonés, pero el modelo
+    // escribe su preámbulo en el idioma DESTINO — un usuario con destino
+    // español recibía "Aquí tienes la traducción al español:\n\nNo puedo
+    // creer que hayas hecho eso." Es el mismo agujero que ya había tenido la
+    // detección de rechazos (ver REFUSAL_PATTERNS, v3.13.6x): una tabla de
+    // frases en inglés no cubre a un modelo que responde en el idioma al que
+    // se le pidió traducir. Enumerar los 20 destinos no escala ni envejece
+    // bien, así que esta regla se apoya en la FORMA, no en las palabras.
+    //
+    // Las tres condiciones juntas son lo que la hace segura frente al
+    // diálogo de visual novel, donde "???: Good to know we're on the same
+    // page." es contenido legítimo:
+    //   1. los dos puntos CIERRAN la línea (en el diálogo van a mitad);
+    //   2. sigue una línea EN BLANCO;
+    //   3. la línea es corta — un preámbulo, no un párrafo.
+    const shapedPreamble = text.match(/^([^\n]{1,80}[:：])\r?\n\s*\r?\n([\s\S]+)$/);
+    if (shapedPreamble && shapedPreamble[2].trim()) {
+      text = shapedPreamble[2].trim();
+      actions.push('stripped-preamble');
+    }
   }
 
   // 6. wrapping quotes the model added around its own output.

@@ -117,9 +117,22 @@ check('unknown-provider-falls-back-to-safe-defaults', () => {
 
 // ─── resolveLocalEndpoint ─────────────────────────────────────────────────
 check('preset-wins-over-custom-endpoint', () => {
-  const result = resolveLocalEndpoint('ollama', 'http://localhost:1234/v1');
-  return { pass: result === 'http://localhost:11434/v1', actual: result };
+  const result = resolveLocalEndpoint('ollama', 'http://127.0.0.1:1234/v1');
+  return { pass: result === 'http://127.0.0.1:11434/v1', actual: result };
 });
+
+// v1.0.4: guard de regresión, no un detalle de estilo. Node 18+ resuelve
+// 'localhost' a ::1 (IPv6) antes que a 127.0.0.1, pero Ollama y compañía
+// escuchan sólo en IPv4 por defecto: el resultado era
+// `connect ECONNREFUSED ::1:11434` con el servidor perfectamente levantado.
+// Salió del log de un usuario real, y el síntoma no da ninguna pista de que
+// el problema sea la familia de direcciones — de ahí que valga un test.
+check('local-presets-use-ipv4-not-localhost', () => {
+  const offenders = LOCAL_ENDPOINT_PRESETS
+    .filter((p) => p.baseUrl && p.baseUrl.includes('localhost'))
+    .map((p) => p.id);
+  return { pass: offenders.length === 0, actual: offenders };
+}, 'localhost puede resolverse a ::1 y estos servidores suelen escuchar sólo IPv4.');
 
 check('custom-preset-falls-back-to-the-legacy-customEndpoint-setting', () => {
   const result = resolveLocalEndpoint('custom', 'http://my-server:9000/v1');
