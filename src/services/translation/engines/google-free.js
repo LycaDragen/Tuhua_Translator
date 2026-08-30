@@ -35,6 +35,27 @@ const GOOGLE_LANG_NORMALIZE = {
   'zh-hant': 'zh',
 };
 
+// v1.0.6: Google hands back HTML-escaped text on BOTH paths — the
+// translate_a/single endpoint escapes quotes and ampersands inside the
+// segment strings, and _translateViaWeb scrapes raw page HTML, so it can
+// carry anything the page encoded. Nothing decoded it, so a line as plain
+// as `"I don't know what's going on right now."` reached the overlay as
+// `&quot;No sé qué está pasando ahora&quot;.` (real 2026-08-30 log). This
+// hits every user, not just google-free users: google-free is the default
+// fallback of every engine's chain (see FALLBACK_CHAIN in pipeline.js).
+const HTML_ENTITIES = {
+  'quot': '"',
+  'apos': "'",
+  'lt': '<',
+  'gt': '>',
+  'nbsp': ' ',
+  'amp': '&'
+};
+// One single pass, deliberately: decoding `&amp;` in a second pass would
+// turn the literal `&amp;quot;` (a text that really contains `&quot;`)
+// into `"`. With one pass it correctly becomes `&quot;`.
+const HTML_ENTITY_RE = /&(#\d+|#x[0-9a-fA-F]+|quot|apos|lt|gt|nbsp|amp);/g;
+
 class GoogleFreeEngine {
   constructor() {
     this.name = 'google-free';
@@ -56,6 +77,77 @@ class GoogleFreeEngine {
     if (!code) return code;
     const lower = code.toLowerCase();
     return GOOGLE_LANG_NORMALIZE[lower] || code;
+  }
+
+  /**
+   * v1.0.6: Decode the HTML entities Google returns — see HTML_ENTITIES above.
+   * @param {string} str
+   * @returns {string}
+   */
+  _decodeEntities(str) {
+    if (!str || typeof str !== 'string' || str.indexOf('&') === -1) return str;
+    return str.replace(HTML_ENTITY_RE, (match, name) => {
+      if (name[0] === '#') {
+        const code = name[1] === 'x' || name[1] === 'X'
+          ? parseInt(name.slice(2), 16)
+          : parseInt(name.slice(1), 10);
+        // Not a usable code point (NaN, out of range, or a surrogate half) —
+        // leave the entity exactly as it came rather than throwing.
+        if (!Number.isFinite(code) || code < 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) return match;
+        try {
+          return String.fromCodePoint(code);
+        } catch (e) {
+          return match;
+        }
+      }
+      return HTML_ENTITIES[name];
+    });
+  }
+
+  /**
+   * v1.0.6: Parse a translate_a/single response body. Extracted from
+   * _translateViaApi so the decoding can be pinned by a bench against real
+   * captured payloads — a decode call is easy to drop, and without a test
+   * that reads the parse path end-to-end nothing would notice.
+   * @param {*} data - Parsed response body (Google returns a nested array)
+   * @param {string} sl - The source language we asked for
+   * @returns {{text: string, detectedLang: string|null}|null} null if unparseable
+   * @private
+   */
+  _parseApiResponse(data, sl) {
+    if (!data || !Array.isArray(data) || !Array.isArray(data[0])) return null;
+
+    let translatedText = '';
+    let detectedLang = null;
+
+    for (const segment of data[0]) {
+      if (segment && segment[0]) {
+        translatedText += segment[0];
+      }
+    }
+
+    // Detected language is in data[2]
+    if (data[2] && data[2] !== sl) {
+      detectedLang = data[2];
+    }
+
+    if (!translatedText) return null;
+    return { text: this._decodeEntities(translatedText), detectedLang };
+  }
+
+  /**
+   * v1.0.6: Parse the translate.google.com/m page. The `([^<]*)` capture
+   * below takes raw HTML, so entity decoding isn't optional here — it's the
+   * only thing standing between the page source and the overlay.
+   * @param {string} html
+   * @returns {string|null} null if the page shape didn't match
+   * @private
+   */
+  _parseWebHtml(html) {
+    if (typeof html !== 'string') return null;
+    const resultMatch = html.match(/class="result-container">([^<]*)</);
+    if (!resultMatch || !resultMatch[1]) return null;
+    return this._decodeEntities(resultMatch[1]);
   }
 
   async translate(text, options = {}) {
@@ -128,31 +220,14 @@ class GoogleFreeEngine {
       }
     });
 
-    const data = response.data;
-
     // Google returns an array where the first element contains translation segments
-    if (data && Array.isArray(data) && Array.isArray(data[0])) {
-      let translatedText = '';
-      let detectedLang = null;
-
-      for (const segment of data[0]) {
-        if (segment && segment[0]) {
-          translatedText += segment[0];
-        }
-      }
-
-      // Detected language is in data[2]
-      if (data[2] && data[2] !== sl) {
-        detectedLang = data[2];
-      }
-
-      if (translatedText) {
-        return {
-          text: translatedText,
-          detectedLang: detectedLang,
-          engine: this.name
-        };
-      }
+    const parsed = this._parseApiResponse(response.data, sl);
+    if (parsed) {
+      return {
+        text: parsed.text,
+        detectedLang: parsed.detectedLang,
+        engine: this.name
+      };
     }
 
     throw new Error('Could not parse Google response');
@@ -175,10 +250,10 @@ class GoogleFreeEngine {
     });
 
     // Parse the mobile page HTML
-    const resultMatch = response.data.match(/class="result-container">([^<]*)</);
-    if (resultMatch && resultMatch[1]) {
+    const translated = this._parseWebHtml(response.data);
+    if (translated) {
       return {
-        text: resultMatch[1],
+        text: translated,
         detectedLang: null,
         engine: this.name
       };

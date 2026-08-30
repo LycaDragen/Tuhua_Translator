@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.0.6] — cinco cosas que un archivo de log dejó a la vista
+
+Ronda nacida de leer una sesión real de traducción de punta a punta. Ninguno de estos cinco
+problemas había sido reportado por separado: todos estaban en el mismo log.
+
+### Arreglado
+
+- **Activar el Portapapeles traducía lo que ya estaba copiado.** El vigilante reseteaba su
+  memoria al arrancar, así que la primera lectura —medio segundo después— siempre daba por
+  "nuevo" lo que hubiera en el portapapeles desde antes. Se disparaba de tres formas: al tocar
+  ▶/⏸, al cambiar el intervalo de revisión en configuración (que reinicia el vigilante por
+  dentro) y al abrir Tuhua en modo Portapapeles, que traducía lo último que el usuario hubiera
+  copiado antes de abrir la app. En el log se ve la misma línea vieja traducida tres veces en
+  tres minutos. Ahora sólo cuenta lo que se copia **después** de activar.
+- **El botón "Logs" hacía que Tuhua se tradujera a sí misma.** Copiar los logs para reportar un
+  problema, con el Portapapeles activo, metía el archivo de log entero en el traductor — y de
+  paso en la memoria de contexto, en la memoria de traducción y en el historial. El proceso
+  principal ahora avisa al vigilante que ese texto lo escribió Tuhua.
+- **Google Translate devolvía comillas rotas.** `"I don't know what's going on right now."`
+  llegaba al overlay como `&quot;No sé qué está pasando ahora&quot;.`: la respuesta viene
+  escapada como HTML y nadie la desescapaba. Afectaba a todos los usuarios, no sólo a quienes
+  eligen Google — es el motor de respaldo de todos los demás.
+- **Un aviso repetido tapaba la ventana.** Los avisos se quedan en pantalla hasta que uno los
+  cierra (a propósito, desde v3.13.41), y el de "falló el motor principal" salta una vez por
+  línea traducida: con una clave de API inválida eso son ocho avisos idénticos en cinco
+  minutos. Ahora el repetido se agrupa en uno solo con un contador (×2, ×3…).
+
+### Cambiado
+
+- **El aviso de motor caído ahora dice por qué.** Antes decía sólo "falló el motor principal,
+  usando alternativo"; el motivo real (`HTTP 401: Invalid Anthropic API Key`) existía únicamente
+  dentro del archivo de log. Por eso una clave mal puesta se sentía como "Tuhua traduce mal": la
+  traducción seguía llegando, en silencio, degradada a Google Translate.
+- **El log contaba mal los filtros de texto.** `Regex filter: 7 applied` era en realidad "hay 7
+  filtros activos" — el mismo número en todas las líneas, incluyendo aquellas cuyo texto salía
+  idéntico a como entró. Ahora es `3/7 changed the text`, que es la pregunta que uno le hace al
+  log: *¿algún filtro se comió mi texto?*
+
+## [1.0.5] — el error 400 de Anthropic era un header
+
+### Arreglado
+
+- **Usar Anthropic con el motor GPT daba error 400 al validar.** La capa de compatibilidad con
+  OpenAI de Anthropic cubre `/chat/completions`, pero **no** `/v1/models`, que es el endpoint que
+  usa el botón **Validar** — y los endpoints nativos exigen el header `anthropic-version`. Ahora
+  cada proveedor puede declarar sus headers propios, con reconocimiento por dirección para quien
+  llegue a Anthropic por la opción "Personalizado".
+- **La lista de modelos de Anthropic estaba dos generaciones atrasada.** Elegir uno de esos
+  modelos daba 404, el pipeline se lo tragaba y caía a Google Translate sin decir nada.
+- Los tres avisos del botón **Logs** estaban escritos a mano en español; ahora están traducidos
+  en los 8 idiomas.
+
 ## [1.0.4] — los servidores LLM locales preconfigurados no funcionaban
 
 ### Arreglado

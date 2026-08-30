@@ -87,6 +87,8 @@ Conecta con [Textractor](https://github.com/Artikash/Textractor) para extraer te
 ### 📋 Portapapeles
 Monitorea el portapapeles del sistema y traduce automáticamente cualquier texto copiado. Ideal para juegos que permiten copiar texto.
 
+- Sólo se traduce lo que se copia **después** de activar el método: lo que ya estaba en el portapapeles al activarlo (o al volver de una pausa) se ignora a propósito. Para traducir esa línea hay que copiar una nueva
+
 ### 📸 OCR
 Captura una región de la pantalla y detecta el texto directamente de la imagen. Perfecto para juegos que no son compatibles con Textractor.
 

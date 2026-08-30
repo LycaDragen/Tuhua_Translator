@@ -453,10 +453,18 @@ class RegexFilterService {
    *
    * @param {string} text — The input text to filter
    * @param {string} [srcLang] — Source language code (e.g. 'ja', 'zh', 'en') for language-aware filters
-   * @returns {{ text: string, appliedCount: number, skipped: string[] }}
+   * v1.0.6: `appliedCount` counts the filters that ACTUALLY CHANGED the
+   * text, not the ones that were run. It used to be `appliedCount++` per
+   * loop iteration, which made it a restatement of `enabledCount` — every
+   * line in a real log said "7 applied" whether the text came out modified
+   * or byte-for-byte identical, so the one number meant to answer "did a
+   * filter eat my text?" couldn't answer it. `enabledCount` is returned
+   * alongside so the log can still show both halves (`3/7`).
+   *
+   * @returns {{ text: string, appliedCount: number, enabledCount: number, skipped: string[] }}
    */
   apply(text, srcLang) {
-    if (!text || typeof text !== 'string') return { text: text || '', appliedCount: 0, skipped: [] };
+    if (!text || typeof text !== 'string') return { text: text || '', appliedCount: 0, enabledCount: 0, skipped: [] };
 
     const isNoSpaceLang = NO_SPACE_LANGS.has((srcLang || '').toLowerCase());
 
@@ -467,15 +475,16 @@ class RegexFilterService {
 
     for (const filter of enabledFilters) {
       try {
+        const before = result;
         result = this._applyFilter(result, filter, isNoSpaceLang);
-        appliedCount++;
+        if (result !== before) appliedCount++;
       } catch (err) {
         // Invalid filter — skip silently
         skipped.push(filter.id);
       }
     }
 
-    return { text: result, appliedCount, skipped };
+    return { text: result, appliedCount, enabledCount: enabledFilters.length, skipped };
   }
 
   /**

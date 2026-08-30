@@ -1969,6 +1969,20 @@ class IpcHandlers {
             logContent = `[Error reading log file: ${e.message}]`;
           }
         }
+        // v1.0.6: the renderer's only use of this content is to write it
+        // straight to the clipboard (copyDebugLogs()) — so in clipboard
+        // mode the watcher would pick the log dump up as if it were game
+        // dialogue and translate it, which is precisely what happened in
+        // the 2026-08-30 session: `_handleText: ... text="] [info]
+        // [WindowManager] Hiding output overlay [ ] [info] [P..."`. Beyond
+        // the useless translation it also poisons the context window, the
+        // Translation Memory and the history. Told here rather than over a
+        // new IPC channel from the renderer: this is the process that
+        // knows the exact string, and it knows it BEFORE the clipboard is
+        // written, so there's no window for the watcher to poll in first.
+        if (this.clipboardWatcher && logContent) {
+          this.clipboardWatcher.ignoreNext(logContent);
+        }
         return { success: true, logPath, logContent };
       } catch (err) {
         return { success: false, error: err.message, logPath: '', logContent: '' };
@@ -2065,11 +2079,9 @@ class IpcHandlers {
       if (this.regexFilter) {
         if (enableRegexFilter !== false) {
           const filterResult = this.regexFilter.apply(text, srcLangForFilter);
-          if (filterResult.appliedCount > 0) {
-            console.log(`[Tuhua] Regex filter: ${filterResult.appliedCount} applied, ${filterResult.skipped.length} skipped — "${text.substring(0, 40)}" → "${filterResult.text.substring(0, 40)}"`);
-          } else {
-            console.log(`[Tuhua] Regex filter: 0 filters matched (0 applied)`);
-          }
+          // v1.0.6: `N/M changed` — see regexFilter.apply()'s doc comment for
+          // why the old "N applied" was the same number every single line.
+          console.log(`[Tuhua] Regex filter: ${filterResult.appliedCount}/${filterResult.enabledCount} changed the text, ${filterResult.skipped.length} skipped — "${text.substring(0, 40)}" → "${filterResult.text.substring(0, 40)}"`);
           text = filterResult.text;
         } else {
           console.log(`[Tuhua] Regex filter: DISABLED (enableRegexFilter=${enableRegexFilter})`);

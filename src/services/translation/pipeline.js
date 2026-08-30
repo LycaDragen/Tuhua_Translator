@@ -299,6 +299,8 @@ class TranslationPipeline extends EventEmitter {
 
     // Last error tracking
     this._lastError = null;
+    // v1.0.6: human-readable form of the same error — see _tryEngine's catch.
+    this._lastErrorSummary = null;
 
     // Stats
     this.stats = {
@@ -772,6 +774,7 @@ class TranslationPipeline extends EventEmitter {
 
     // 4. Translate with retry and fallback
     this._lastError = null;
+    this._lastErrorSummary = null;
 
     // v3.13.6x (Fase 9): one controller for this whole _doTranslate() call —
     // covers the primary engine's retries AND any fallback attempt below,
@@ -843,6 +846,12 @@ class TranslationPipeline extends EventEmitter {
     // before this — a fallback engine that doesn't support tgtLang was still
     // tried and, unsurprisingly, failed. Skip fallbacks we already know can't
     // work; still permissive (keep the candidate) if the list is missing/empty.
+    // v1.0.6: captured HERE, before any fallback runs — `_lastErrorSummary`
+    // is overwritten by each failing attempt, so reading it after the loop
+    // would report a fallback's error as if it were the primary's. What the
+    // user needs to see is why THEIR chosen engine failed.
+    const primaryFailureReason = this._lastErrorSummary || this._lastError?.message || '';
+
     const fallbacks = (FALLBACK_CHAIN[engineName] || ['google-free']).filter((name) => {
       const fallbackEngine = this.getEngine(name);
       if (!fallbackEngine || !Array.isArray(fallbackEngine.supportedLanguages) || fallbackEngine.supportedLanguages.length === 0) {
@@ -877,6 +886,7 @@ class TranslationPipeline extends EventEmitter {
           engine: `${engineName}→${fallback}`,
           cached: false,
           isFallback: true,
+          fallbackReason: primaryFailureReason,
           truncated: !!fallbackResult.truncated,
           sourceLang: srcLang,
           targetLang: tgtLang,
@@ -897,7 +907,10 @@ class TranslationPipeline extends EventEmitter {
     this.stats.errors++;
     this.emit('error', {
       original: text,
-      error: this._lastError?.message || 'All translation engines failed',
+      // v1.0.6: the same richer summary the fallback toast now gets — an
+      // axios `.message` ("Request failed with status code 401") says
+      // nothing the user can act on.
+      error: this._lastErrorSummary || this._lastError?.message || 'All translation engines failed',
       engine: engineName,
       timestamp: Date.now()
     });
@@ -1068,6 +1081,15 @@ class TranslationPipeline extends EventEmitter {
         const errMsg = err.response?.data?.error?.message || err.message || 'Unknown error';
         const statusInfo = status ? ` (HTTP ${status})` : '';
         console.error(`[Pipeline] ${engineName} failed${statusInfo}: ${errMsg}`);
+        // v1.0.6: keep that same diagnostic string for the UI. `_lastError`
+        // alone isn't enough — for an HTTP failure its `.message` is axios's
+        // generic "Request failed with status code 401", while the sentence
+        // that actually tells the user what to do ("Invalid Anthropic API
+        // Key") only lives in the response body, and until now only ever
+        // reached the log file. That's the whole reason a wrong API key
+        // looked like "it just translates badly": the fallback toast said
+        // the primary engine had failed, but never why.
+        this._lastErrorSummary = status ? `HTTP ${status}: ${errMsg}` : errMsg;
         if (attempt < retries && this._isRetryable(err)) {
           // v3.13.55: honor Retry-After when the server sends one (429/503 commonly
           // do) instead of always using the exponential backoff guess. The header

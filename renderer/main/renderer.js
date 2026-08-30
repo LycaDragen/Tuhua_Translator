@@ -1824,7 +1824,14 @@
             if (data.isFallback) {
                 const t = translations[currentLang] || translations['en'];
                 const template = t.translation_fallback_toast || 'Primary translation engine failed, using fallback ({engine})';
-                showToast(template.replace('{engine}', data.engine || ''));
+                // v1.0.6: the toast said WHAT happened but never WHY, so an
+                // invalid API key was indistinguishable from a rate limit or
+                // a network drop — the actual sentence ("HTTP 401: Invalid
+                // Anthropic API Key") only ever reached the log file. It's
+                // appended raw, not translated: it's the engine's own
+                // server-side message, so there's nothing of ours to i18n.
+                const reason = data.fallbackReason ? ` — ${data.fallbackReason}` : '';
+                showToast(template.replace('{engine}', data.engine || '') + reason);
             }
             loadHistory();
         }
@@ -1883,6 +1890,15 @@
         // single toast used to occupy), older ones pushed upward. Closing
         // one lets flexbox reflow the rest down to fill the gap on its
         // own — no manual positioning math needed.
+        // v1.0.6: identical messages COLLAPSE into one toast with a counter
+        // (×2, ×3, …) instead of stacking copies. Since v3.13.41 a toast
+        // stays until the user closes it, and the fallback notification
+        // fires once per translated line — so a single wrong API key buried
+        // the window under one persistent, identical toast per line (a real
+        // 2026-08-30 log would have produced ~8 in five minutes). Same
+        // flood 35e1616 removed from the opacity notice, arriving by a
+        // different door. The counter is deliberate: silently dropping the
+        // repeat would hide that the problem is still happening.
         function showToast(message) {
             let container = document.getElementById('tuhua-toast-container');
             if (!container) {
@@ -1892,11 +1908,24 @@
                 document.body.appendChild(container);
             }
 
+            const showing = Array.from(container.children)
+                .find((el) => el.dataset && el.dataset.toastMessage === message);
+            if (showing) {
+                const count = (parseInt(showing.dataset.toastCount, 10) || 1) + 1;
+                showing.dataset.toastCount = String(count);
+                const label = showing.querySelector('.tuhua-toast-text');
+                if (label) label.textContent = `${message} (×${count})`;
+                return;
+            }
+
             const toast = document.createElement('div');
             toast.className = 'tuhua-toast';
+            toast.dataset.toastMessage = message;
+            toast.dataset.toastCount = '1';
             toast.style.cssText = 'display:flex;align-items:flex-start;gap:10px;width:100%;box-sizing:border-box;padding:10px 10px 10px 16px;border-radius:10px;font-size:13px;font-weight:500;background:#1e293b;color:#10b981;border:1px solid rgba(16,185,129,0.3);transition:opacity 0.15s ease;';
 
             const text = document.createElement('span');
+            text.className = 'tuhua-toast-text';
             text.style.cssText = 'flex:1;word-break:break-word;';
             text.textContent = message;
 
