@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.10] — el OCR ahora sí ve cuando cambia el texto
+
+Continuación de la v1.0.9, que arregló la compuerta equivocada. Esto es lo que faltaba.
+
+### Arreglado
+
+- **La detección de cambios entre capturas se perdía la mitad de los cambios de texto.** Antes de
+  correr el OCR, Tuhua compara la captura nueva con la anterior para no reconocer mil veces lo
+  mismo. Esa comparación miraba **200 bytes sueltos** repartidos por la imagen y exigía que 10
+  difirieran: en un área de captura normal eso es mirar 200 píxeles de unos 90.000 —el 0,2% de la
+  imagen, y siempre los mismos—. Como el texto son trazos finos sobre un fondo casi uniforme, la
+  cantidad esperada de muestras alteradas caía justo en el umbral: **cara o cruz**. De ahí el "a
+  veces escanea solo, otras hay que forzarlo con Ctrl+Shift+S" (el atajo va por otro camino y ni
+  consulta esa comparación). Ahora se muestrean unos 4.000 píxeles comparando luminancia, con
+  tolerancia para no confundir el antialiasing con texto nuevo.
+
+- **Descartar una captura no dejaba ningún rastro.** Era la decisión más silenciosa de todo el
+  proceso: el bucle recibía "no cambió nada" y seguía de largo sin escribir una línea. Por eso
+  este problema tardó tres rondas en encontrarse. Ahora el log dice cuántas capturas seguidas se
+  descartaron.
+
+### Nuevo
+
+- **Válvula de escape en el OCR automático.** Si se descartan ocho capturas seguidas (unos 28
+  segundos), la novena corre igual. Si alguna vez la comparación vuelve a quedar ciega a un juego
+  que dibuja el texto de una forma que no previmos, el peor caso pasa a ser "tarda hasta medio
+  minuto" en vez de "no lo detecta nunca".
+
 ## [1.0.9] — el OCR descartaba la línea que terminaba de aparecer
 
 ### Arreglado
