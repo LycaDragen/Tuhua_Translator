@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.8] — dos cosas que salieron de probar la 1.0.7 en Windows
+
+### Arreglado
+
+- **Estando en pausa, cambiar un ajuste igual mandaba la última línea al motor de traducción.**
+  La v1.0.7 arregló que no se *recordara* el texto que llegaba en pausa; faltaba la otra mitad:
+  el texto recordado de antes seguía retraduciéndose al cambiar motor, idioma o plantilla. Y el
+  resultado no lo veía nadie — la pausa oculta y vacía el overlay —, así que era una llamada a la
+  red y nada más. Ahora en pausa no se retraduce.
+
+- **Los botones de abajo a la derecha (Logs, Carpeta, Reportar) se salían de su recuadro** al
+  angostar esa columna con el divisor arrastrable: el indicador de estado se encimaba con el
+  primer botón en vez de reacomodarse. Ahora la fila baja los botones a un segundo renglón. El
+  defecto existía desde que eran dos botones; con el tercero apareció antes.
+
 ## [1.0.7] — el log ya no puede filtrar tu API key
 
 Un usuario mandó su log para diagnosticar otra cosa y adentro venía su clave de API, copiada al

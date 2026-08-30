@@ -22,6 +22,7 @@ const textCleaning = require('../services/text-cleaning');
 const llmProviders = require('../services/translation/llm-providers');
 const { deleteGlossary: deleteDeeplGlossary } = require('../services/translation/deepl-glossary-sync');
 const speakerExtract = require('../services/speaker-extract');
+const { shouldAutoRetranslate } = require('../services/retranslate-decision');
 const promptPresets = require('../services/translation/prompt-presets');
 // v3.13.29: renderer/main/i18n.js exports its `translations` object via
 // module.exports whenever it's available (see its own bottom-of-file
@@ -508,7 +509,30 @@ class IpcHandlers {
         this.pipeline.clearContext();
       }
 
-      if ((engineChanged || sourceLangChanged || targetLangChanged || promptTemplateChanged) && this._lastHandledText) {
+      // v1.0.8: `_translationActive` es parte de la condición. Antes, con la
+      // traducción en PAUSA, cambiar motor/idioma/plantilla igual mandaba la
+      // última línea a la red — y el mensaje de abajo decía "while text is
+      // on-screen" cuando la pausa ya había ocultado Y VACIADO el overlay
+      // (ver el bloque de la pausa en _handleText). O sea: una llamada al
+      // motor de traducción, estando pausado, cuyo resultado nadie puede
+      // ver. Encontrado por Lyca probando el arreglo de v1.0.7 en Windows:
+      // ese arreglo evitó que se RECORDARA texto llegado en pausa, pero no
+      // que se retradujera el ya recordado. Misma regla, otra puerta:
+      // pausado no habla con la red.
+      //
+      // Se mira el estado FINAL, no `this._translationActive` a secas: el
+      // bloque que actualiza esa bandera corre más abajo en este mismo
+      // handler (ver "Update _translationActive if it changed"), así que
+      // apretar ▶ y cambiar el idioma en el mismo guardado dejaría la
+      // bandera todavía en false acá y se saltearía una retraducción que sí
+      // corresponde. Es la misma técnica que ya usa la visibilidad del
+      // overlay unos renglones abajo.
+      const willBeActive = data.translationActive !== undefined ? data.translationActive : this._translationActive;
+      if (shouldAutoRetranslate({
+        engineChanged, sourceLangChanged, targetLangChanged, promptTemplateChanged,
+        lastHandledText: this._lastHandledText,
+        willBeActive
+      })) {
         const newEngine = data.engine || currentSettings.engine || 'google-free';
         const newSourceLang = data.sourceLang || currentSettings.sourceLang || 'auto';
         const newTargetLang = data.targetLang || currentSettings.targetLang || 'es';
