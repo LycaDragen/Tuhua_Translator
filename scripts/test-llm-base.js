@@ -163,6 +163,55 @@ check('sentence-embedded-template-omits-fewshot-even-when-enabled', async () => 
   return { pass, actual: messages };
 }, 'A completion-style template ({sentence} embedded in system) must never end up with few-shot turns and no trailing user turn — that combination reliably produced an empty response against a real local server.');
 
+// ─── v1.0.7: {sentence} + un proveedor que exige un turno `user` ─────────
+// El defecto real (log 2026-08-30 04:14:22): con una plantilla propia que
+// usa {sentence}, el pedido salía con UN SOLO mensaje `system` — legal en
+// OpenAI y en servidores locales (la comprobación de arriba lo fija), pero
+// Anthropic responde 400 "At least one non-system, non-developer message is
+// required". Como el pipeline se come el fallo y cae a Google Translate, el
+// usuario no ve un error: ve que su plantilla no hace nada.
+check('the-reported-400-anthropic-never-gets-a-system-only-request', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, providerId: 'anthropic', promptTemplate: 'Translate this: {sentence}' });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const { messages } = http.calls[0].body;
+  const pass = messages.length === 1
+    && messages[0].role === 'user'
+    && messages[0].content === 'Translate this: こんにちは';
+  return { pass, actual: messages };
+}, 'Se MUEVE el prompt ya renderizado al turno `user`: mismo contenido, sin duplicar la línea (que ya viaja adentro vía {sentence}) ni inventar texto que el usuario no escribió.');
+
+check('the-same-template-on-openai-keeps-the-system-only-shape', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, promptTemplate: 'Translate this: {sentence}' });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const { messages } = http.calls[0].body;
+  return { pass: messages.length === 1 && messages[0].role === 'system', actual: messages };
+}, 'El arreglo es por proveedor, no global: para todos los demás el pedido tiene que salir byte por byte igual que antes de v1.0.7.');
+
+check('anthropic-with-a-normal-template-is-untouched', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', { httpClient: http, providerId: 'anthropic', fewShotEnabled: false });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const { messages } = http.calls[0].body;
+  const pass = messages.length === 2 && messages[0].role === 'system' && messages[1].role === 'user' && messages[1].content === 'こんにちは';
+  return { pass, actual: messages };
+}, 'Los 4 presets que vienen con Tuhua no usan {sentence}, así que el camino normal de Anthropic —el de todo el mundo— no puede cambiar.');
+
+check('a-custom-gateway-pointed-at-anthropic-also-gets-a-user-turn', async () => {
+  const http = fakeHttpClient(OK_RESPONSE);
+  const engine = new OpenAIEngine('key', {
+    httpClient: http,
+    providerId: 'custom',
+    baseUrl: 'https://api.anthropic.com/v1',
+    model: 'claude-haiku-4-5',
+    promptTemplate: 'Translate this: {sentence}'
+  });
+  await engine.translate('こんにちは', { sourceLang: 'ja', targetLang: 'es', sourceLangName: 'Japanese', targetLangName: 'Spanish' });
+  const { messages } = http.calls[0].body;
+  return { pass: messages.length === 1 && messages[0].role === 'user', actual: messages };
+}, 'Mismo fallback por host que getExtraHeaders: quien llega a Anthropic por "Personalizado" tiene providerId custom y se comería el mismo 400.');
+
 check('fewShotEnabled-false-disables-fewshot-independently-of-the-template', async () => {
   const http = fakeHttpClient(OK_RESPONSE);
   const engine = new OpenAIEngine('key', { httpClient: http, fewShotEnabled: false });

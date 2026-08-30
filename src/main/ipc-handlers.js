@@ -1531,7 +1531,17 @@ class IpcHandlers {
               }
             });
             if (resp.data && resp.data.data) {
-              return { valid: true, code: 'openai_key_valid', params: { count: resp.data.data.length } };
+              // v1.0.7: se devuelven también los IDs, no sólo cuántos son.
+              // Antes la respuesta se usaba para contar y se tiraba, así que
+              // el campo Modelo seguía ofreciendo las 3 sugerencias curadas
+              // de llm-providers.js después de validar — el aviso decía "12
+              // modelos" y la lista mostraba 3, que es exactamente la
+              // confusión que reportó un usuario ("¿es normal que sigan
+              // apareciendo sólo 3?"). Los datos ya estaban acá.
+              const models = resp.data.data
+                .map((m) => (m && typeof m.id === 'string' ? m.id : null))
+                .filter(Boolean);
+              return { valid: true, code: 'openai_key_valid', params: { count: resp.data.data.length }, models };
             }
             return { valid: true, code: 'key_valid', params: {} };
           }
@@ -2149,10 +2159,6 @@ class IpcHandlers {
       this._lastHandledTime = now;
     }
 
-    // v3.13.12: Store last handled text for auto-retranslation when settings change
-    this._lastHandledText = text;
-    this._lastSpeakerName = speakerName;
-
     console.log(`[Tuhua] _handleText: srcLang=${srcLang}, tgtLang=${tgtLang}, engine=${engineName}, active=${this._translationActive}, inputMethod=${settings.inputMethod}, text="${text.substring(0, 60)}..."`);
 
     // If translation is paused, skip everything — no text to overlays, no translation
@@ -2164,6 +2170,20 @@ class IpcHandlers {
       this.windowManager.clearOverlayContent();
       return;
     }
+
+    // v3.13.12: Store last handled text for auto-retranslation when settings change
+    // v1.0.7: se guarda DESPUÉS del corte por pausa, no antes. Estando en
+    // pausa el texto igual quedaba acá, y el auto-retraducir de
+    // save-settings (:500) lo mandaba a traducir en cuanto el usuario
+    // tocaba cualquier ajuste. Caso real (log 2026-08-30): con Tuhua en
+    // pausa el usuario copió su API key de Anthropic al portapapeles; el
+    // log dijo "Translation paused — skipping text", pero un cambio de
+    // ajustes 50 segundos después la mandó al motor LLM y, tras el 400, al
+    // fallback — o sea a Google Translate. Pausado tiene que significar
+    // pausado también para lo que Tuhua RECUERDA, no sólo para lo que
+    // traduce en el momento.
+    this._lastHandledText = text;
+    this._lastSpeakerName = speakerName;
 
     // v3.12.02: Skip translation for text that contains no translatable content.
     // After filtering, text may consist solely of numbers, punctuation, or symbols

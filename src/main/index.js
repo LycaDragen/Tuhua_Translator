@@ -8,6 +8,7 @@ const { app, BrowserWindow, Menu } = require('electron');
 const Store = require('electron-store');
 const log = require('electron-log');
 const path = require('path');
+const { redactFileTransform } = require('../services/log-redact');
 
 const WindowManager = require('./window-manager');
 const IpcHandlers = require('./ipc-handlers');
@@ -39,6 +40,14 @@ log.transports.console.level = 'debug';
 // (que loguea cada captura) — la rotación se llevaba justo el arranque, que
 // es donde está el contexto de qué motor/método estaba activo.
 log.transports.file.maxSize = 5 * 1024 * 1024;
+
+// v1.0.7: tapa credenciales antes de que lleguen al ARCHIVO (la consola
+// queda intacta: no se comparte con nadie y es la que se usa en `pnpm dev`).
+// Va al final del arreglo de transforms, después de los de la librería, que
+// son los que convierten todo a texto. Ver src/services/log-redact.js para
+// el caso real que lo motivó: una API key de Anthropic copiada al
+// portapapeles terminó escrita en el main.log que el usuario después mandó.
+log.transports.file.transforms.push(redactFileTransform);
 
 /**
  * v1.0.3: manda console.log/warn/error TAMBIÉN al archivo de log.
@@ -72,6 +81,10 @@ _fileBridge.transports.console.level = false;
 _fileBridge.transports.file.level = 'info';
 _fileBridge.transports.file.maxSize = 5 * 1024 * 1024;
 _fileBridge.transports.file.resolvePathFn = () => log.transports.file.getFile().path;
+// v1.0.7: el puente escribe al MISMO archivo con su propia instancia, así que
+// necesita su propia redacción — sin esto, los ~239 console.* (que es por
+// donde pasa el texto del portapapeles) quedarían sin tapar.
+_fileBridge.transports.file.transforms.push(redactFileTransform);
 
 for (const [method, level] of [['log', 'info'], ['warn', 'warn'], ['error', 'error']]) {
   console[method] = (...args) => {

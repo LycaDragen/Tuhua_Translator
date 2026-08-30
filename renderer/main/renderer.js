@@ -2249,6 +2249,36 @@
             const customBaseUrl = providerId === 'custom' ? document.getElementById('llm-custom-baseurl').value.trim() : '';
             const result = await api.validateApiKey(engine, apiKey, customBaseUrl, providerId);
             setValidationStatus(statusEl, inputEl, containerEl, result);
+            mergeValidatedModels(result);
+        }
+
+        // v1.0.7: una validación exitosa trae la lista REAL de modelos del
+        // proveedor (ipc-handlers.js's validate-api-key) — hasta ahora se
+        // usaba sólo para contarlos en el aviso, y el campo Modelo seguía
+        // ofreciendo nada más que las sugerencias curadas de
+        // llm-providers.js. Un usuario lo reportó como "validé la key y
+        // siguen apareciendo sólo 3 modelos".
+        //
+        // Se UNEN, no se reemplazan, y las curadas quedan primero: son las
+        // recomendadas para traducir línea por línea (precio/latencia, ver
+        // el comentario de Anthropic en llm-providers.js), mientras que la
+        // lista de la API trae de todo, incluidos modelos que no sirven para
+        // esto. Lo que cambia es que ahora el resto también es visible.
+        function mergeValidatedModels(result) {
+            if (!result || !result.valid || !Array.isArray(result.models) || !result.models.length) return;
+            const modelInput = document.getElementById('llm-model');
+            if (!modelInput) return;
+            let curated = [];
+            try {
+                curated = JSON.parse(modelInput.dataset.models || '[]');
+            } catch (e) {
+                curated = [];
+            }
+            const merged = [...curated];
+            for (const id of result.models) {
+                if (!merged.includes(id)) merged.push(id);
+            }
+            modelInput.dataset.models = JSON.stringify(merged);
         }
 
         // v3.13.105: extracted from validateLocalEndpoint/validateLibreTranslate/

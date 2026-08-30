@@ -267,6 +267,10 @@ Si encuentras un bug, por favor abre un [Issue](https://github.com/LycaDragen/Tu
   para adjuntarlo entero — este último es el que conviene para un reporte. Detalle completo
   (rutas por sistema y rotación) en [tuhua.lyca.dev](https://tuhua.lyca.dev/referencia/reportar-bug/)
 
+> En modo Portapapeles el log incluye el texto que copiás. Desde la v1.0.7 las credenciales que
+> Tuhua reconoce (claves de API de OpenAI, Anthropic, DeepL, Google…) se tapan antes de escribirse
+> al archivo, pero conviene ojearlo igual antes de mandarlo: es texto plano.
+
 ---
 
 ## 📜 Licencia

@@ -16,7 +16,7 @@
  */
 const axios = require('axios');
 const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
-const { getRequestParamOverrides, getExtraHeaders } = require('../llm-providers');
+const { getRequestParamOverrides, getExtraHeaders, requiresUserMessage } = require('../llm-providers');
 const { renderPromptTemplate } = require('../prompt-template');
 const { DEFAULT_TEMPLATE } = require('../prompt-presets');
 const { getFewshotExamples } = require('../fewshot-examples');
@@ -173,6 +173,22 @@ class OpenAICompatEngine {
     // fix pointed at doing properly.
     if (!rendered.containsSentence) {
       messages.push({ role: 'user', content: text });
+    } else if (requiresUserMessage(this.providerId, this.baseUrl)) {
+      // v1.0.7: una plantilla estilo completion ({sentence} adentro) deja
+      // el pedido con UN SOLO mensaje `system` — legal en OpenAI y en los
+      // servidores locales, pero Anthropic lo rechaza con "At least one
+      // non-system, non-developer message is required" (HTTP 400 real, log
+      // del 2026-08-30 04:14:22). Como el pipeline se come el fallo y cae a
+      // Google Translate, el síntoma que ve el usuario no es un error sino
+      // "mi plantilla no hace nada".
+      //
+      // Se MUEVE el prompt ya renderizado al turno `user` en vez de
+      // agregar uno nuevo: el contenido es idéntico —lo mismo que se iba a
+      // mandar— y así no se duplica la línea (que ya viaja dentro del
+      // prompt vía {sentence}) ni se inventa texto que el usuario no
+      // escribió. Un único mensaje `user` es un pedido válido en todos los
+      // proveedores.
+      messages[0] = { role: 'user', content: rendered.text };
     }
 
     const headers = { 'Content-Type': 'application/json' };

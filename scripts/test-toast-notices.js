@@ -29,70 +29,13 @@ const { check, CHECKS } = makeCheckRegistry();
 
 const rendererSrc = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'main', 'renderer.js'), 'utf8');
 
-/**
- * Slice one top-level `function name(...) { … }` out of the source by
- * brace matching. Every brace inside these two functions is balanced
- * (template literals and the '{engine}' string included), so a plain depth
- * counter is exact here.
- */
-function extractFunction(src, name) {
-  const start = src.indexOf(`function ${name}(`);
-  if (start === -1) throw new Error(`function ${name}() not found in renderer.js`);
-  let depth = 0;
-  for (let i = src.indexOf('{', start); i < src.length; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
-  }
-  throw new Error(`unbalanced braces reading ${name}()`);
-}
+const { extractFunction, makeDocument } = require('./lib/renderer-harness.js');
 
-// ─── Minimal DOM: only what these two functions actually touch ───────────
-class FakeEl {
-  constructor(tag) {
-    this.tagName = tag;
-    this.style = {};
-    this.dataset = {};
-    this.className = '';
-    this.textContent = '';
-    this.id = '';
-    this.children = [];
-    this.parentNode = null;
-  }
-  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
-  prepend(c) { c.parentNode = this; this.children.unshift(c); return c; }
-  setAttribute() {}
-  hasChildNodes() { return this.children.length > 0; }
-  remove() {
-    if (!this.parentNode) return;
-    this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
-    this.parentNode = null;
-  }
-  querySelector(sel) {
-    const cls = sel.replace(/^\./, '');
-    for (const c of this.children) {
-      if (String(c.className).split(/\s+/).includes(cls)) return c;
-      const deep = c.querySelector(sel);
-      if (deep) return deep;
-    }
-    return null;
-  }
-  findById(id) {
-    for (const c of this.children) {
-      if (c.id === id) return c;
-      const deep = c.findById(id);
-      if (deep) return deep;
-    }
-    return null;
-  }
-}
+// v1.0.7: el extractor de funciones y el DOM falso viven ahora en
+// lib/renderer-harness.js — los comparte test-model-suggestions.js.
 
 function makeHarness() {
-  const body = new FakeEl('body');
-  const document = {
-    body,
-    createElement: (tag) => new FakeEl(tag),
-    getElementById: (id) => body.findById(id)
-  };
+  const document = makeDocument();
   const showToast = new Function('document', 'setTimeout',
     `${extractFunction(rendererSrc, 'showToast')}; return showToast;`)(document, setTimeout);
 

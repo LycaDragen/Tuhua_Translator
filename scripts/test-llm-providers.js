@@ -24,6 +24,7 @@ const {
   getLocalPreset,
   getRequestParamOverrides,
   getExtraHeaders,
+  requiresUserMessage,
   resolveLocalEndpoint,
   seedProviderKeysFromLegacyOpenAIKey
 } = require(path.join('..', 'src', 'services', 'translation', 'llm-providers.js'));
@@ -215,5 +216,41 @@ check('every-declared-extraHeaders-reaches-the-validate-handler', () => {
     actual: { declaring, validateHandlerCallsGetExtraHeaders: wired }
   };
 }, 'Este es el check que habria atrapado el bug original.');
+
+// ─── v1.0.7: requiresUserMessage ────────────────────────────────────────
+check('anthropic-declares-that-it-needs-a-non-system-message', () => {
+  return { pass: requiresUserMessage('anthropic') === true, actual: getProvider('anthropic').requiresUserMessage };
+}, 'HTTP 400 real: "At least one non-system, non-developer message is required" — pasa con una plantilla propia que use {sentence}, porque ahi la linea viaja dentro del system y no queda ningun turno user.');
+
+check('a-custom-provider-pointed-at-anthropic-also-needs-it', () => {
+  const cases = [
+    requiresUserMessage('custom', 'https://api.anthropic.com/v1'),
+    requiresUserMessage('custom', 'https://API.Anthropic.com/v1/')
+  ];
+  return { pass: cases.every((c) => c === true), actual: cases };
+}, 'Mismo fallback por host que getExtraHeaders, y por el mismo motivo: quien llega a Anthropic por "Personalizado" tiene providerId custom.');
+
+check('no-other-provider-claims-to-need-a-user-message', () => {
+  const cases = [
+    ['openai', requiresUserMessage('openai')],
+    ['deepseek', requiresUserMessage('deepseek')],
+    ['groq', requiresUserMessage('groq')],
+    ['custom-a-ollama', requiresUserMessage('custom', 'http://127.0.0.1:11434/v1')],
+    ['custom-url-basura', requiresUserMessage('custom', 'no-es-una-url')],
+    ['inexistente', requiresUserMessage('inexistente')]
+  ];
+  const bad = cases.filter(([, v]) => v !== false);
+  return { pass: bad.length === 0, actual: bad };
+}, 'Un system-only es legal en OpenAI y en los servidores locales — y test-llm-base.js fija que ahi el pedido sigue saliendo igual que antes.');
+
+check('every-declared-requiresUserMessage-reaches-llm-base', () => {
+  // Hermano del check de extraHeaders de arriba, y por el mismo motivo: el
+  // dato en la tabla no sirve de nada si el punto de llamada no lo lee.
+  const fs = require('fs');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'services', 'translation', 'engines', 'llm-base.js'), 'utf-8');
+  const declaring = CLOUD_PROVIDERS.filter((p) => p.requiresUserMessage).map((p) => p.id);
+  const wired = /containsSentence[\s\S]{0,400}?requiresUserMessage\(/.test(src);
+  return { pass: declaring.length === 0 || wired, actual: { declaring, llmBaseCallsRequiresUserMessage: wired } };
+});
 
 run("llm-providers.js bench", CHECKS);

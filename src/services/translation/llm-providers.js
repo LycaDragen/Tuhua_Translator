@@ -126,6 +126,15 @@ const CLOUD_PROVIDERS = [
     // header. Bearer sí lo acepta (lo traduce a x-api-key internamente),
     // así que esto era lo único que faltaba.
     extraHeaders: { 'anthropic-version': '2023-06-01' },
+    // v1.0.7: Anthropic rechaza un pedido que sólo lleve `system` — "At
+    // least one non-system, non-developer message is required" (HTTP 400,
+    // visto en un log real). OpenAI y los servidores locales lo aceptan sin
+    // chistar, así que el defecto sólo aparece acá. Pasa con una plantilla
+    // de prompt personalizada que use {sentence}: en ese caso la línea a
+    // traducir viaja DENTRO del system y llm-base.js no agrega ningún turno
+    // `user` (ni los few-shot). Ninguno de los 4 presets que vienen con
+    // Tuhua usa {sentence}, por eso sólo muerde a plantillas propias.
+    requiresUserMessage: true,
     maxTokensField: 'max_tokens',
     supportsTopP: true,
     // v3.13.58: Anthropic's own docs mark their OpenAI SDK compatibility
@@ -268,6 +277,33 @@ function getExtraHeaders(providerId, baseUrl) {
 }
 
 /**
+ * v1.0.7: ¿este proveedor rechaza un pedido que sólo lleve `system`?
+ * Hermano de getExtraHeaders() —misma tabla, mismo fallback por host para
+ * el proveedor "Personalizado" apuntado al mismo sitio— porque es la misma
+ * clase de cosa: una rareza del proveedor que vive como dato en
+ * CLOUD_PROVIDERS, no como un `if (providerId === 'anthropic')` dentro de
+ * llm-base.js.
+ */
+function requiresUserMessage(providerId, baseUrl) {
+  const provider = getProvider(providerId);
+  if (provider && provider.requiresUserMessage) {
+    return true;
+  }
+  if (baseUrl) {
+    let host = '';
+    try {
+      host = new URL(baseUrl).hostname.toLowerCase();
+    } catch {
+      return false; // URL basura: que falle el request, no acá
+    }
+    if (host === 'api.anthropic.com') {
+      return getProvider('anthropic').requiresUserMessage === true;
+    }
+  }
+  return false;
+}
+
+/**
  * One-time, idempotent seed: promote the legacy global `openaiKey` setting
  * into the new `llmProviderKeys.openai` map. Returns the object to
  * `store.set('llmProviderKeys', ...)`, or null if there's nothing to do —
@@ -300,6 +336,7 @@ module.exports = {
   getLocalPreset,
   getRequestParamOverrides,
   getExtraHeaders,
+  requiresUserMessage,
   resolveLocalEndpoint,
   seedProviderKeysFromLegacyOpenAIKey
 };

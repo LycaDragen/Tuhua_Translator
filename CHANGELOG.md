@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.0.7] — el log ya no puede filtrar tu API key
+
+Un usuario mandó su log para diagnosticar otra cosa y adentro venía su clave de API, copiada al
+portapapeles un rato antes. No hizo nada mal: el flujo que Tuhua recomienda para reportar un
+problema era, tal como estaba, un flujo que filtraba credenciales.
+
+### Arreglado
+
+- **El archivo de log podía contener tus credenciales.** En modo Portapapeles, todo lo que
+  copiás pasa por el log — y ese archivo es justamente el que los botones **Logs** y **Carpeta**
+  existen para compartir. Ahora las credenciales que Tuhua reconoce (claves de OpenAI, Anthropic,
+  DeepL, Google, Groq, GitHub y compañía, más cualquier cadena opaca larga) se tapan antes de
+  escribirse: quedan como `sk-ant-api03-[REDACTADO]`. La consola de desarrollo no cambia, y lo
+  que se manda a los motores de traducción tampoco: sólo se toca lo que se escribe al archivo.
+
+- **Pausar no pausaba del todo.** Con la traducción en pausa, el texto entrante igual quedaba
+  guardado como "lo último recibido", y el retraducir-automático que se dispara al cambiar de
+  motor/idioma/plantilla lo mandaba a traducir. En el caso real, eso llevó la clave de API del
+  usuario a Google Translate estando la app en pausa. Ahora, en pausa, no se guarda nada.
+
+- **Anthropic devolvía error 400 con una plantilla de prompt personalizada.** Si la plantilla usa
+  `{sentence}`, la línea a traducir viaja dentro de las instrucciones y el pedido sale sin ningún
+  mensaje de usuario. OpenAI y los servidores locales lo aceptan; Anthropic lo rechaza con *"At
+  least one non-system, non-developer message is required"*. Como el fallo caía al motor de
+  respaldo sin decir nada, el síntoma no era un error sino "mi plantilla no hace nada". Ninguno de
+  los 4 presets que vienen con Tuhua usa `{sentence}`, así que sólo afectaba a plantillas propias.
+
+### Cambiado
+
+- **Validar una API key ahora completa la lista de modelos.** El botón ya consultaba los modelos
+  del proveedor para decirte cuántos encontró, pero después tiraba la lista: el campo **Modelo**
+  seguía sugiriendo sólo los 3 recomendados. Ahora se suman todos los que devuelve la API, con los
+  recomendados arriba. (El campo siempre aceptó cualquier ID escrito a mano; lo que faltaba era
+  poder verlos.)
+
 ## [1.0.6] — cinco cosas que un archivo de log dejó a la vista
 
 Ronda nacida de leer una sesión real de traducción de punta a punta. Ninguno de estos cinco
