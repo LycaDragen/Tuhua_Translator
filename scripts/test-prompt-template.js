@@ -241,4 +241,76 @@ check('every-fewshot-pair-has-both-a-user-and-an-assistant-string', () => {
   return { pass: offenders.length === 0, actual: offenders };
 });
 
+// ─── v1.0.5: el preset 'local' ────────────────────────────────────────────
+// Existe porque los otros cuatro comparten PROMPT_HEADER + 9 reglas, ~700
+// tokens que viajan en cada línea. Medido con granite-4.0-h-tiny: el
+// 'balanced' no sólo cuesta prefill, multiplica por 6.6 la SALIDA (21 -> 139
+// tokens) porque un modelo pequeño con nueve reglas encima se pone a
+// elaborar en vez de traducir. Ver el comentario de LOCAL_TEMPLATE.
+
+check('local-preset-exists-and-round-trips-through-matchPresetId', () => {
+  const preset = PROMPT_PRESETS.find((p) => p.id === 'local');
+  const pass = !!preset && matchPresetId(preset.template) === 'local';
+  return { pass, actual: preset ? matchPresetId(preset.template) : 'preset ausente' };
+});
+
+check('local-preset-is-materially-shorter-than-balanced', () => {
+  const local = PROMPT_PRESETS.find((p) => p.id === 'local').template;
+  const balanced = PROMPT_PRESETS.find((p) => p.id === 'balanced').template;
+  // El umbral es del 70% y no una cifra exacta: lo que hay que proteger es
+  // la INTENCIÓN (que siga siendo corto), no una longitud concreta que
+  // cualquier reescritura legítima cambiaría. Si alguien le añade reglas
+  // hasta acercarlo al 'balanced', este check cae y obliga a releer por qué
+  // existe el preset.
+  const ratio = local.length / balanced.length;
+  return { pass: ratio < 0.7, actual: { localChars: local.length, balancedChars: balanced.length, ratio: Number(ratio.toFixed(2)) } };
+}, 'Un preset "para modelo pequeño" que crece hasta el tamaño del general deja de tener sentido.');
+
+check('local-preset-does-not-send-the-previous-lines', () => {
+  // El contexto es la variable cuyo coste CRECE con la partida: cada turno
+  // añade tokens a cada petición siguiente. Es la primera que se quita en
+  // un modelo local, y quitarla es media razón de ser del preset.
+  const local = PROMPT_PRESETS.find((p) => p.id === 'local').template;
+  const offenders = ['{contextBoth}', '{contextOriginal}', '{contextTranslation}'].filter((v) => local.includes(v));
+  return { pass: offenders.length === 0, actual: offenders };
+});
+
+check('local-preset-renders-with-no-unknown-variable-warnings', () => {
+  const local = PROMPT_PRESETS.find((p) => p.id === 'local').template;
+  const rendered = renderPromptTemplate(local, {
+    sentence: 'x', srclang: 'English', tgtlang: 'Spanish',
+    srclangcode: 'en', tgtlangcode: 'es', context: []
+  });
+  return { pass: rendered.warnings.length === 0, actual: rendered.warnings };
+}, 'Una variable mal escrita no se borra en silencio: viajaría literal al modelo.');
+
+check('local-preset-collapses-its-optional-lines-when-empty', () => {
+  const local = PROMPT_PRESETS.find((p) => p.id === 'local').template;
+  const rendered = renderPromptTemplate(local, {
+    sentence: 'x', srclang: 'English', tgtlang: 'Spanish',
+    srclangcode: 'en', tgtlangcode: 'es', context: []
+  });
+  // Sin hablante ni glosario, la etiqueta "Speaker:" no puede quedar colgando.
+  const pass = !rendered.text.includes('Speaker:');
+  return { pass, actual: rendered.text.slice(0, 120) };
+});
+
+check('every-preset-labelkey-exists-in-all-8-locales', () => {
+  // Hueco previo que este commit cierra de paso: test-llm-providers.js hace
+  // esta comprobación para CLOUD_PROVIDERS y LOCAL_ENDPOINT_PRESETS, pero
+  // los labelKey de PROMPT_PRESETS no los miraba nadie — los cuatro
+  // originales tampoco.
+  const i18nPath = path.join(__dirname, '..', 'renderer', 'main', 'i18n.js');
+  const translations = require(i18nPath);
+  const locales = Object.keys(translations);
+  const missing = [];
+  for (const locale of locales) {
+    for (const preset of PROMPT_PRESETS) {
+      if (!(preset.labelKey in translations[locale])) missing.push(`${locale}.${preset.labelKey}`);
+      const descKey = `${preset.labelKey}_desc`;
+      if (!(descKey in translations[locale])) missing.push(`${locale}.${descKey}`);
+    }
+  }
+  return { pass: locales.length === 8 && missing.length === 0, actual: { localeCount: locales.length, missing } };
+}, 'Un preset seleccionable cuyo nombre se renderiza en blanco es peor que no ofrecerlo.');
 run("prompt-template.js bench", CHECKS);

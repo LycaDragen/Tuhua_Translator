@@ -185,6 +185,27 @@ function getLocalPreset(id) {
 }
 
 /**
+ * v1.0.5: quita las barras finales de una baseUrl antes de que llm-base.js
+ * haga su `${baseUrl}/chat/completions`. La tabla de proveedores ya se
+ * autoimpone esta invariante (ver el check no-baseurl-ends-with-a-trailing-slash
+ * en test-llm-providers.js), pero ese check exime explícitamente las entradas
+ * 'custom' — "filled in by the user is fine" — y nadie normalizaba lo que el
+ * usuario escribe. Un `http://127.0.0.1:11434/v1/` producía
+ * `/v1//chat/completions`, que Ollama contesta con un 307 Temporary Redirect.
+ *
+ * Lo que hacía el síntoma tan opaco: el GET de validación SÍ sigue el
+ * redirect, así que "Validar" daba OK y el usuario concluía que la conexión
+ * estaba bien — mientras cada POST de traducción moría en el 307 sin dejar
+ * ningún error que lo explicara. Mismo patrón que el `ECONNREFUSED ::1` de
+ * v1.0.4: el síntoma no apunta a la causa.
+ *
+ * Pura, sin I/O — misma familia que getProvider/resolveLocalEndpoint.
+ */
+function normalizeBaseUrl(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+/**
  * What pipeline.js actually passes as the local-llm engine's endpoint.
  * `customEndpoint` is the pre-existing setting (still the source of truth
  * for the 'custom' preset, and for anyone who never touches the new
@@ -193,10 +214,10 @@ function getLocalPreset(id) {
  */
 function resolveLocalEndpoint(presetId, customEndpoint) {
   if (!presetId || presetId === 'custom') {
-    return customEndpoint || '';
+    return normalizeBaseUrl(customEndpoint);
   }
   const preset = getLocalPreset(presetId);
-  return preset ? preset.baseUrl : (customEndpoint || '');
+  return normalizeBaseUrl(preset ? preset.baseUrl : customEndpoint);
 }
 
 /**
@@ -252,6 +273,7 @@ module.exports = {
   getProvider,
   getLocalPreset,
   getRequestParamOverrides,
+  normalizeBaseUrl,
   resolveLocalEndpoint,
   seedProviderKeysFromLegacyOpenAIKey
 };

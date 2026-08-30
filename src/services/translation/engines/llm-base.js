@@ -16,7 +16,7 @@
  */
 const axios = require('axios');
 const { sanitizeLLMOutput, LLMRefusalError, LLMPassthroughError } = require('../llm-output');
-const { getRequestParamOverrides } = require('../llm-providers');
+const { getRequestParamOverrides, normalizeBaseUrl } = require('../llm-providers');
 const { renderPromptTemplate } = require('../prompt-template');
 const { DEFAULT_TEMPLATE } = require('../prompt-presets');
 const { getFewshotExamples } = require('../fewshot-examples');
@@ -68,7 +68,10 @@ class OpenAICompatEngine {
     this.requiresKey = requiresKey;
     this.apiKey = apiKey;
     this.model = model;
-    this.baseUrl = baseUrl;
+    // v1.0.5: normalizado, no crudo — ver setBaseUrl() abajo y
+    // normalizeBaseUrl() en llm-providers.js. Aquí también, porque un
+    // endpoint puede llegar por el constructor sin pasar nunca por el setter.
+    this.baseUrl = normalizeBaseUrl(baseUrl);
     this.promptTemplate = promptTemplate;
     this.timeout = timeout;
     this.supportedLanguages = supportedLanguages;
@@ -218,6 +221,28 @@ class OpenAICompatEngine {
 
     const rawContent = response.data?.choices?.[0]?.message?.content;
     if (!rawContent || !rawContent.trim()) {
+      // v1.0.5: un modelo de razonamiento servido por Ollama gasta su
+      // presupuesto de tokens en un bloque de pensamiento que NO viaja en
+      // `content` — la respuesta llega con finish_reason 'length',
+      // usage.completion_tokens al tope y el texto vacío. Medido contra
+      // Ollama 0.32.15 con LFM2.5-8B-A1B: 300 tokens gastados, content ''.
+      //
+      // Sin esta rama el usuario ve "Empty ... response", que no dice ni qué
+      // pasó ni qué hacer — y el modelo SÍ trabajó, sólo que hacia dentro.
+      // Misma disciplina que el ECONNREFUSED ::1 de v1.0.4: el error tiene
+      // que apuntar a la causa, porque el síntoma no lo hace.
+      //
+      // Para quien venga buscando el arreglo fácil: el `"think": false` de la
+      // API nativa de Ollama NO lo desactiva (probado en 0.32.15). La salida
+      // real es subir el límite de tokens o cambiar de modelo.
+      const spentTokens = response.data?.usage?.completion_tokens || 0;
+      const emptyFinishReason = response.data?.choices?.[0]?.finish_reason || null;
+      if (emptyFinishReason === 'length' && spentTokens > 0) {
+        throw new Error(
+          `${this.displayName} spent ${spentTokens} tokens without returning any text — `
+          + 'this looks like a reasoning/thinking model. Raise the token limit or pick a model without reasoning.'
+        );
+      }
       throw new Error(`Empty ${this.displayName} response`);
     }
 
@@ -265,7 +290,11 @@ class OpenAICompatEngine {
   }
 
   setBaseUrl(url) {
-    this.baseUrl = url;
+    // v1.0.5: la barra final se quita AQUÍ y no en el call site porque el
+    // `${this.baseUrl}/chat/completions` de translate() es una concatenación
+    // cruda: un `/v1/` guardado produce `/v1//chat/completions`, que Ollama
+    // contesta con un 307 y deja morir el POST. Ver normalizeBaseUrl().
+    this.baseUrl = normalizeBaseUrl(url);
   }
 }
 

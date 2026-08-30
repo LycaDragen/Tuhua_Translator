@@ -70,6 +70,14 @@ function responseWith(content, finishReason = 'stop') {
 }
 
 
+// v1.0.5: una respuesta con `usage`, que es lo que separa un modelo de
+// razonamiento agotando su presupuesto (finish_reason 'length' +
+// completion_tokens > 0 + content vacío) de un vacío cualquiera.
+function responseSpending(tokens, content = '', finishReason = 'length') {
+  return { data: { choices: [{ message: { content }, finish_reason: finishReason }], usage: { completion_tokens: tokens } } };
+}
+
+
 // ─── auth header: sent only when there's a key to send ─────────────────
 check('openai-sends-bearer-header-when-key-present', async () => {
   const http = fakeHttpClient(OK_RESPONSE);
@@ -350,6 +358,64 @@ check('empty-response-throws-a-named-error', async () => {
     threw = e.message;
   }
   return { pass: threw === 'Empty Local LLM (Ollama/LM Studio) response', actual: threw };
+});
+
+// ─── v1.0.5: modelo de razonamiento que devuelve vacío ────────────────────
+// Ollama no manda el bloque de pensamiento en `content`: la respuesta llega
+// con el texto vacío y todo el presupuesto gastado. Antes eso era
+// "Empty ... response", que no dice ni qué pasó ni qué hacer.
+
+check('a-reasoning-model-that-returns-nothing-says-so-with-its-token-count', async () => {
+  const http = fakeHttpClient(responseSpending(300));
+  const engine = new LocalLLMEngine({ httpClient: http });
+  let threw = null;
+  try {
+    await engine.translate('x', {});
+  } catch (e) {
+    threw = e.message;
+  }
+  const pass = threw !== null
+    && threw.includes('300 tokens')
+    && /reasoning/i.test(threw)
+    && threw !== 'Empty Local LLM (Ollama/LM Studio) response';
+  return { pass, actual: threw };
+}, 'Revertir la rama nueva de llm-base.js tiene que hacer fallar ESTE check: el mensaje volvería a ser el genérico.');
+
+check('an-empty-response-with-no-usage-keeps-the-old-generic-error', async () => {
+  // Sin `usage` no hay prueba de que el modelo gastara nada: puede ser un
+  // servidor caído, una plantilla rota o cualquier otra cosa. Afirmar
+  // "es un modelo de razonamiento" ahí sería peor que el mensaje genérico.
+  const http = fakeHttpClient(EMPTY_RESPONSE);
+  const engine = new LocalLLMEngine({ httpClient: http });
+  let threw = null;
+  try {
+    await engine.translate('x', {});
+  } catch (e) {
+    threw = e.message;
+  }
+  return { pass: threw === 'Empty Local LLM (Ollama/LM Studio) response', actual: threw };
+}, 'La rama nueva no puede tragarse el caso genérico — es la mitad del arreglo que se rompe sin querer.');
+
+check('an-empty-response-that-stopped-normally-is-not-blamed-on-reasoning', async () => {
+  const http = fakeHttpClient(responseSpending(120, '', 'stop'));
+  const engine = new LocalLLMEngine({ httpClient: http });
+  let threw = null;
+  try {
+    await engine.translate('x', {});
+  } catch (e) {
+    threw = e.message;
+  }
+  return { pass: threw === 'Empty Local LLM (Ollama/LM Studio) response', actual: threw };
+}, "finish_reason 'stop' con texto vacío es otro problema; sólo 'length' indica presupuesto agotado.");
+
+check('a-truncated-response-that-does-have-text-still-reaches-the-sanitizer', async () => {
+  // Guard de no-regresión de la Fase 2: la rama nueva sólo mira respuestas
+  // VACÍAS, así que un truncado con texto tiene que seguir devolviendo
+  // truncated:true en vez de lanzar.
+  const http = fakeHttpClient(responseSpending(120, 'Hola, ¿cómo est', 'length'));
+  const engine = new LocalLLMEngine({ httpClient: http });
+  const result = await engine.translate('x', {});
+  return { pass: result.truncated === true, actual: result };
 });
 
 // ─── Fase 2 wiring: sanitizer verdicts become the right outcome ─────────

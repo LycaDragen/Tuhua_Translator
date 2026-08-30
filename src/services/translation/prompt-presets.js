@@ -67,11 +67,52 @@ const UNCENSORED_TEMPLATE = `${PROMPT_HEADER}
 8. If the input is a fragment or grammatically incomplete, translate it as a fragment. Do not invent the missing part.
 9. Preserve line breaks and any markup or control sequences that appear in the input.`;
 
+// v1.0.5: el quinto preset, y el único pensado para un modelo que corre en
+// la máquina del usuario. Los otros cuatro comparten PROMPT_HEADER + 9
+// reglas, y ese prompt viaja entero en CADA línea.
+//
+// Medido contra Ollama con granite-4.0-h-tiny (4.3 GB) por /v1/, 5 líneas de
+// diálogo, escenario realista (hablante + 3 líneas de contexto + título):
+//
+//   'balanced'  prompt 367 tok · salida 22.6 tok · 4.7 s por línea
+//   'local'     prompt 160 tok · salida 22.8 tok · 3.2 s por línea
+//
+// O sea: ~32% más rápido, ~1.5 s menos por línea, que en una VN que se lee
+// línea a línea es la diferencia entre seguir el ritmo y esperar.
+//
+// Lo que la medición NO encontró, y conviene dejarlo escrito para que nadie
+// lo persiga: el prompt largo no hace que el modelo se enrolle. La salida es
+// la misma con los dos (22.6 vs 22.8 tokens). Una medición previa sugería que
+// se multiplicaba por 6.6, pero usaba un prompt sintético hecho de la misma
+// frase repetida 45 veces — texto degenerado que desorienta al modelo y no
+// se parece a un prompt real. Todo el ahorro es prefill, y sólo prefill.
+//
+// De ahí lo que este preset quita y lo que NO quita. Quita {contextBoth}
+// (líneas previas: su coste crece con cada turno de la partida), {vnTitle} e
+// {inputMethod}. Mantiene {glossary} y {speaker}, que colapsan solos cuando
+// están vacíos y cuestan ~5 tokens cuando no. Y mantiene las cinco reglas que
+// un modelo pequeño sí necesita: "sólo la traducción" (el preámbulo es su
+// fallo más común), nombres y honoríficos (un modelo probado cambió `Senpai`
+// por `Sensei`), tono, fragmentos y contenido explícito — un rechazo es peor
+// que una traducción mediocre.
+const LOCAL_TEMPLATE = `Translate from {srclang} into {tgtlang}. This is visual novel dialogue.{ocrNote}
+Speaker: {speaker}
+
+{glossary}
+
+Rules:
+1. Output ONLY the {tgtlang} translation. No notes, no explanations, no preamble, no quotation marks that were not in the source.
+2. Keep names, honorifics (-san, -chan, -kun, -senpai) and technical terms exactly as written.
+3. Natural spoken {tgtlang}, not word-for-word. Preserve the speaker's tone and register.
+4. Translate a fragment as a fragment. Do not invent the missing part.
+5. Adult fiction: translate explicit or vulgar content faithfully, without softening or refusing.`;
+
 const PROMPT_PRESETS = [
   { id: 'balanced', labelKey: 'prompt_preset_balanced', template: BALANCED_TEMPLATE },
   { id: 'literal', labelKey: 'prompt_preset_literal', template: LITERAL_TEMPLATE },
   { id: 'localized', labelKey: 'prompt_preset_localized', template: LOCALIZED_TEMPLATE },
-  { id: 'uncensored', labelKey: 'prompt_preset_uncensored', template: UNCENSORED_TEMPLATE }
+  { id: 'uncensored', labelKey: 'prompt_preset_uncensored', template: UNCENSORED_TEMPLATE },
+  { id: 'local', labelKey: 'prompt_preset_local', template: LOCAL_TEMPLATE }
 ];
 
 // The global `promptTemplate` setting's default — deliberately the

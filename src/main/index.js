@@ -209,7 +209,22 @@ app.whenReady().then(() => {
       // deterministic should translations be", a user preference, not a
       // per-game setting the way the provider/model themselves are.
       llmTemperature: 0.3,
-      llmMaxTokens: 1500,
+      // v1.0.5: 300, no 1500. Una línea de diálogo de VN son 20-60 tokens de
+      // salida, así que 1500 nunca llegaba a actuar de tope: no acotaba nada
+      // y sí alargaba el peor caso. Con un modelo de razonamiento local
+      // (Ollama no manda el bloque de pensamiento en `content` — ver
+      // llm-base.js) el modelo quemaba los 1500 antes de fallar: ~90 s de
+      // espera contra los ~18 s que cuesta ahora, y con el error explicativo
+      // que da esa misma rama.
+      //
+      // 300 y no 150 porque una línea larga o un párrafo por OCR tienen que
+      // seguir cabiendo enteros: un truncado degrada bien (pipeline.js salta
+      // caché/TM con truncated:true) pero degrada. Antes de bajarlo más,
+      // medir con el motor real, no estimarlo.
+      //
+      // Sólo afecta a instalaciones nuevas: electron-store no pisa un valor
+      // ya guardado.
+      llmMaxTokens: 300,
       // null, not 0 — unset. See llm-base.js's constructor comment for why
       // "not sent" and "sent as 0" must stay distinguishable for top_p.
       llmTopP: null,
