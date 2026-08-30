@@ -46,6 +46,7 @@ const ALLOWED_INVOKE_CHANNELS = new Set([
   'scan-known-games',
   'get-textractor-auto-detect-result',
   'open-docs-link',
+  'open-mail-link',
   'textractor-launch',
   'textractor-kill',
   'textractor-cli-status',
@@ -292,6 +293,8 @@ const api = {
   // default browser — needs shell.openExternal, unreachable from a
   // sandboxed renderer directly.
   openDocsLink: () => secureInvoke('open-docs-link'),
+  // v1.0.7: destino fijo (mailto:help@tuhua.lyca.dev), igual que openDocsLink
+  openMailLink: () => secureInvoke('open-mail-link'),
   // v3.13.8x: gameExePath (4th arg) is an optional hint — the "🎮 Elegir…"
   // picker already resolves it for free (list-game-processes returns
   // exePath per process), so the renderer forwards it here instead of the

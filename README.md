@@ -257,7 +257,9 @@ tuhua-translator/
 
 ### Reportar bugs
 
-Si encuentras un bug, por favor abre un [Issue](https://github.com/LycaDragen/Tuhua_Translator/issues) con:
+Si encuentras un bug, abre un [Issue](https://github.com/LycaDragen/Tuhua_Translator/issues) o
+escribe a **help@tuhua.lyca.dev** — lo segundo si no tienes cuenta de GitHub o prefieres no
+abrir el reporte en público. En cualquiera de los dos casos, incluye:
 
 - Descripción del problema
 - Pasos para reproducirlo

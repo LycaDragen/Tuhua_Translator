@@ -204,6 +204,17 @@ class IpcHandlers {
       return { success: true };
     });
 
+    // v1.0.7: mismo patrón que open-docs-link — destino fijo, ninguna URL
+    // arbitraria desde el renderer. Un `mailto:` no hace nada si la máquina
+    // no tiene cliente de correo configurado, y no hay forma de saberlo
+    // desde acá: por eso el botón de la UI muestra la dirección como
+    // etiqueta, así sigue siendo legible (y copiable) aunque el click no
+    // abra nada.
+    ipcMain.handle('open-mail-link', () => {
+      shell.openExternal('mailto:help@tuhua.lyca.dev');
+      return { success: true };
+    });
+
     // v3.13.58 (LLM engine overhaul, Fase 3): read-only — llm-providers.js
     // lives in the main process (src/services/) and isn't reachable from
     // the sandboxed renderer via require(), so this is what feeds the
@@ -2737,7 +2748,7 @@ class IpcHandlers {
       'ocr-toggle-scan',
       'textractor-browse-cli', 'textractor-clear-cli-path', 'textractor-launch',
       'list-game-processes', 'inspect-game', 'set-profile-game', 'find-profile-by-title', 'scan-known-games', 'get-textractor-auto-detect-result',
-      'open-docs-link',
+      'open-docs-link', 'open-mail-link',
       'textractor-kill', 'textractor-cli-status',
       'textractor-select-hook', 'textractor-test-cli', 'resize-overlay', 'get-debug-logs',
       'xuat-start-server', 'xuat-stop-server', 'xuat-get-status',

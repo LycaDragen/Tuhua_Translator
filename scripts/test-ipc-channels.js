@@ -368,6 +368,40 @@ function runBadgeStatusValuesCheck() {
 }
 
 /**
+ * 6. UNA SOLA DIRECCIÓN DE CONTACTO (v1.0.7): toda dirección de correo
+ *    @tuhua.lyca.dev que aparezca en la app tiene que ser exactamente
+ *    `help@tuhua.lyca.dev`. La dirección está escrita en 24 strings de
+ *    i18n (3 claves × 8 idiomas), en el `mailto:` del proceso principal y
+ *    en el HTML — y un usuario que le escribe a una dirección con un typo
+ *    no recibe ningún rebote útil: el reporte simplemente no llega, y del
+ *    lado de acá no se ve nada. Es el mismo problema de listas paralelas
+ *    que ya tuvieron los atajos de teclado, con peor final.
+ */
+function runContactAddressCheck() {
+  const RE = /[A-Za-z0-9._%+-]+@tuhua\.lyca\.dev/g;
+  const files = [
+    path.join(ROOT, 'renderer', 'main', 'i18n.js'),
+    path.join(ROOT, 'renderer', 'main', 'index.html'),
+    path.join(ROOT, 'src', 'main', 'ipc-handlers.js'),
+    path.join(ROOT, 'src', 'preload', 'main-preload.js')
+  ];
+  const found = [];
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const m of text.match(RE) || []) {
+      found.push({ file: path.relative(ROOT, file), address: m });
+    }
+  }
+  const wrong = found.filter((f) => f.address !== 'help@tuhua.lyca.dev');
+  return {
+    id: 'contact-address-is-identical-everywhere',
+    pass: wrong.length === 0 && found.length > 0,
+    total: found.length,
+    wrong
+  };
+}
+
+/**
  * v3.13.39: every REPLAYABLE_CHANNELS entry (window-manager.js) must be in
  * ALLOWED_RECEIVE_CHANNELS (main-preload.js) — a replay on a channel
  * secureOn drops is silently swallowed, same failure mode as case 1 above.
@@ -455,6 +489,7 @@ function run() {
   if (!args.only || 'badge'.includes(args.only)) all.push(runBadgeStatusValuesCheck());
   if (!args.only || 'replay'.includes(args.only)) all.push(runReplayableChannelsCheck());
   if (!args.only || 'handlers'.includes(args.only) || 'unregister'.includes(args.only)) all.push(runHandlerParityCheck());
+  if (!args.only || 'contact'.includes(args.only)) all.push(runContactAddressCheck());
 
   console.log(`${C.bold}IPC-channel / i18n-parity bench${C.reset} — ${all.length} case(s)\n`);
   let passed = 0;

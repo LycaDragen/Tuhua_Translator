@@ -27,6 +27,15 @@ problema era, tal como estaba, un flujo que filtraba credenciales.
   respaldo sin decir nada, el síntoma no era un error sino "mi plantilla no hace nada". Ninguno de
   los 4 presets que vienen con Tuhua usa `{sentence}`, así que sólo afectaba a plantillas propias.
 
+### Nuevo
+
+- **Se pueden mandar reportes por correo a `help@tuhua.lyca.dev`.** Hasta ahora la única vía era
+  abrir un Issue en GitHub, que deja afuera a quien no tiene cuenta o prefiere no reportar en
+  público. La dirección está en la app en dos lugares: un botón **Reportar** al lado de Logs y
+  Carpeta — donde ya está parado quien junta material para un reporte — y en el pie de la Guía de
+  Inicio. Aparece escrita entera en los dos, no escondida detrás de un enlace: si la máquina no
+  tiene cliente de correo configurado, el click no hace nada y hay que poder leerla igual.
+
 ### Cambiado
 
 - **Validar una API key ahora completa la lista de modelos.** El botón ya consultaba los modelos

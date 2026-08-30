@@ -1049,6 +1049,19 @@
                                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h4l2 2h6a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
                                 <span data-i18n="logs_open_folder">Carpeta</span>
                             </button>
+                            <!-- v1.0.7: el tercer botón de la fila va acá y no
+                                 en cualquier otro lado a propósito — quien
+                                 acaba de apretar Logs o Carpeta está juntando
+                                 material para un reporte, y hasta ahora no
+                                 había ningún lugar en la app que dijera adónde
+                                 mandarlo. La dirección va también en el título
+                                 (y entera en la Guía) porque un `mailto:` no
+                                 hace nada si la máquina no tiene cliente de
+                                 correo configurado. -->
+                            <button onclick="openMailLink()" class="text-[10px] text-gray-400 hover:text-emerald-500 transition flex items-center gap-1" data-i18n-title="report_bug_title" title="Escribinos a help@tuhua.lyca.dev">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                                <span data-i18n="report_bug">Reportar</span>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1147,7 +1160,14 @@
                 </div>
             </div>
             <div class="p-4 bg-gray-50 dark:bg-dark-900 border-t border-gray-200 dark:border-dark-700 flex items-center justify-between gap-3">
-                <button onclick="openDocsLink()" class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline text-left" data-i18n="guide_docs_link">📖 Documentación completa (próximamente): tuhua.lyca.dev</button>
+                <div class="flex flex-col items-start gap-1 min-w-0">
+                    <button onclick="openDocsLink()" class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline text-left" data-i18n="guide_docs_link">📖 Documentación completa (próximamente): tuhua.lyca.dev</button>
+                    <!-- v1.0.7: la dirección va escrita entera, no detrás de un
+                         "escribinos": el click abre el cliente de correo, pero
+                         si la máquina no tiene ninguno configurado no pasa nada
+                         y el usuario tiene que poder leerla igual. -->
+                    <button onclick="openMailLink()" class="text-xs text-emerald-600 dark:text-emerald-400 hover:underline text-left" data-i18n="guide_contact_link">✉️ ¿Un problema? Escribinos a help@tuhua.lyca.dev</button>
+                </div>
                 <button onclick="toggleGuide(false)" class="bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2 rounded-lg font-bold text-sm transition flex-shrink-0" data-i18n="close">Cerrar</button>
             </div>
         </div>

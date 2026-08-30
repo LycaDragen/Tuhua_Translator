@@ -3495,6 +3495,14 @@
             api.openDocsLink();
         }
 
+        // v1.0.7: abre el cliente de correo en help@tuhua.lyca.dev. Si la
+        // máquina no tiene ninguno configurado no pasa nada — por eso la
+        // dirección está escrita en la etiqueta del botón y en su tooltip,
+        // no escondida detrás de un "escribinos".
+        function openMailLink() {
+            api.openMailLink();
+        }
+
         // ===== GATHER CONFIG =====
         // v3.13.8x (settings UX audit): no longer reads the "Overlay" or
         // "Traducción" categories' fields — those live physically in the
