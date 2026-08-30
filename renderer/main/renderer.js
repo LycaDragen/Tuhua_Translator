@@ -390,6 +390,7 @@
                 const savedPreset = llmProvidersCatalog.localPresets.find((p) => p.id === savedPresetId);
                 if (savedPreset) localEndpointInput.value = savedPreset.baseUrl;
             }
+            renderLocalEndpointHint();
             if (settings.customModel) document.getElementById('local-model').value = settings.customModel;
             if (settings.libretranslateEndpoint) document.getElementById('libretranslate-endpoint').value = settings.libretranslateEndpoint;
             if (settings.customMTEndpoint) document.getElementById('custom-mt-endpoint').value = settings.customMTEndpoint;
@@ -793,6 +794,9 @@
             // {version}/{current}/{percent}/{error}, así que sin esto queda
             // congelado en el idioma del primer pintado.
             renderUpdateBanner();
+            // v1.0.4: idem — la ayuda del endpoint local interpola el nombre
+            // del servidor, así que tampoco puede usar data-i18n.
+            renderLocalEndpointHint();
 
             // v3.13.40: same reason as recomputeBadge() above — the
             // profile cards' default-name label and "Default" badge are
@@ -1484,6 +1488,28 @@
         // v3.13.58: fills AND LOCKS the endpoint field for a real preset (Ollama/
         // LM Studio/llama.cpp/KoboldCpp) — 'custom' (the default) leaves it exactly
         // as free text, unchanged from how this field worked before this existed.
+        // v1.0.4: aclara que un campo bloqueado NO está deshabilitado, sino
+        // ya resuelto por el preset. El texto se arma acá (no con data-i18n)
+        // porque interpola el nombre del servidor, así que changeLanguage()
+        // tiene que volver a llamarla — mismo patrón que renderEngineAdvice().
+        function renderLocalEndpointHint() {
+            const hint = document.getElementById('local-endpoint-hint');
+            const select = document.getElementById('local-endpoint-preset');
+            if (!hint || !select) return;
+            const presetId = select.value;
+            if (!presetId || presetId === 'custom') {
+                hint.classList.add('hidden');
+                return;
+            }
+            const t = translations[currentLang] || translations['en'];
+            // La etiqueta del preset ya está traducida en el <option>; se
+            // reusa en vez de duplicar los nombres de los servidores.
+            const label = select.options[select.selectedIndex]?.text || presetId;
+            hint.textContent = (t.llm_local_endpoint_auto || 'Dirección de {server}, configurada automáticamente.')
+                .replace('{server}', label);
+            hint.classList.remove('hidden');
+        }
+
         function onLocalEndpointPresetChange() {
             const presetId = document.getElementById('local-endpoint-preset').value;
             const endpointInput = document.getElementById('local-endpoint');
@@ -1496,6 +1522,7 @@
                 endpointInput.disabled = true;
                 endpointInput.classList.add('opacity-60');
             }
+            renderLocalEndpointHint();
             markUnsaved('sidebar');
         }
 

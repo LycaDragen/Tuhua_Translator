@@ -218,7 +218,18 @@ class IpcHandlers {
           id: p.id, labelKey: p.labelKey, requiresKey: p.requiresKey,
           defaultModel: p.defaultModel, models: p.models, beta: !!p.beta, docsUrl: p.docsUrl || ''
         })),
-        localPresets: llmProviders.LOCAL_ENDPOINT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey }))
+        // v1.0.4: baseUrl se enviaba... no, no se enviaba, y ese era el bug.
+        // onLocalEndpointPresetChange() en el renderer hace
+        // `endpointInput.value = preset.baseUrl`, así que sin este campo el
+        // input quedaba con la CADENA "undefined" al elegir cualquier preset
+        // que no fuera 'custom'. Consecuencias: el botón Validar devolvía
+        // "Error 0: Invalid URL" (axios rechaza esa URL), el campo mostraba
+        // basura, y al pasar a 'custom' se heredaba ese valor.
+        // La traducción en sí seguía andando de casualidad: pipeline.js llama
+        // a resolveLocalEndpoint(), que resuelve el baseUrl del lado del main
+        // contra LOCAL_ENDPOINT_PRESETS y nunca miró el valor del input.
+        // Reportado por Lyca con Ollama; afectaba a los 4 presets por igual.
+        localPresets: llmProviders.LOCAL_ENDPOINT_PRESETS.map((p) => ({ id: p.id, labelKey: p.labelKey, baseUrl: p.baseUrl }))
       };
     });
 

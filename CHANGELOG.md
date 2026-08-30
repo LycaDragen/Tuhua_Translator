@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.4] — los servidores LLM locales preconfigurados no funcionaban
+
+### Arreglado
+
+- **Elegir Ollama (o LM Studio, llama.cpp o KoboldCpp) dejaba la dirección en `undefined`.** El
+  proceso principal enviaba la lista de servidores al panel de configuración **sin la dirección
+  de cada uno**, así que el campo se rellenaba con la palabra literal `undefined` y el botón
+  Validar respondía `Error 0: Invalid URL`. Afectaba a los cuatro servidores por igual.
+  La traducción en sí seguía funcionando —la dirección real se resolvía por otro camino, del lado
+  del proceso principal— pero no había forma de comprobarlo desde la interfaz.
+
+### Cambiado
+
+- El campo de dirección ahora aclara debajo **"Dirección de Ollama (:11434), configurada
+  automáticamente"** cuando hay un servidor elegido. Antes el campo quedaba bloqueado y en gris
+  sin explicación, y se leía como "no puedo escribir acá" en vez de "esto ya está resuelto".
+- El texto de ejemplo del campo, para el modo Personalizado, sugería el puerto de LM Studio sin
+  importar qué servidor tuvieras elegido.
+
 ## [1.0.3] — logs útiles para reportar problemas
 
 ### Arreglado

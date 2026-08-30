@@ -506,7 +506,12 @@
                         <label class="block text-[10px] font-bold text-gray-400 uppercase mb-1" data-i18n="llm_local_preset_label">Servidor Local</label>
                         <select id="local-endpoint-preset" onchange="onLocalEndpointPresetChange()" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs cursor-pointer"></select>
                     </div>
-                    <input type="text" id="local-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:1234/v1" oninput="markUnsaved('sidebar')">
+                    <input type="text" id="local-endpoint" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono transition-colors duration-200" placeholder="http://localhost:11434/v1" oninput="markUnsaved('sidebar')">
+                    <!-- v1.0.4: sin esto, el campo bloqueado y en gris se lee
+                         como "no puedo escribir acá" en vez de "esto ya está
+                         resuelto" — Lyca lo reportó exactamente así. El texto
+                         lo pinta renderLocalEndpointHint(). -->
+                    <p id="local-endpoint-hint" class="hidden text-[10px] text-gray-400 -mt-1"></p>
                     <input type="text" id="local-model" class="w-full p-2 rounded-md bg-gray-50 dark:bg-dark-900 border border-gray-300 dark:border-dark-600 text-xs font-mono" placeholder="Model name (e.g. llama3)" oninput="markUnsaved('sidebar')">
                     <div id="local-endpoint-status" class="hidden flex items-center gap-1.5 text-[11px] font-medium mt-1"></div>
                 </div>
