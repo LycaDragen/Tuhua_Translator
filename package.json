@@ -1,6 +1,6 @@
 {
   "name": "tuhua-translator",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "productName": "Tuhua Translator",
   "description": "Tuhua Translator - Open Source Visual Novel Translator",
   "main": "src/main/index.js",
@@ -60,7 +60,8 @@
     "test:layout-invariants": "node scripts/test-layout-invariants.js",
     "test:retranslate-decision": "node scripts/test-retranslate-decision.js",
     "test:ocr-dedup": "node scripts/test-ocr-dedup.js",
-    "test:frame-change": "node scripts/test-frame-change.js"
+    "test:frame-change": "node scripts/test-frame-change.js",
+    "test:language-detect": "node scripts/test-language-detect.js"
   },
   "author": {
     "name": "Lyca",

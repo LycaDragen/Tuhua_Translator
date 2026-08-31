@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.11] — un kanji de basura ya no vuelve japonés a un texto en inglés
+
+### Arreglado
+
+- **Con OCR, casi todas las traducciones de un juego en inglés empezaban con "Que".** La causa no
+  era el traductor: PaddleOCR leía el ícono de viñeta del juego como el kanji `其`, y **un solo
+  caracter japonés entre sesenta letras latinas** alcanzaba para que Tuhua declarara la línea
+  entera japonesa. Google traducía inglés *como si fuera japonés* y devolvía esas frases raras. En
+  el log del usuario está el A/B con la misma oración: con el `其` daba *"Que te desempeñas mal
+  cuando…"*, y doce minutos después, sin él, *"Tu desempeño es deficiente cuando…"*.
+
+  Ahora la detección distingue el ruido del texto real por cómo aparece: la basura del OCR son
+  caracteres **sueltos**, mientras que el texto bilingüe de verdad viene en rachas (`設定` son dos
+  kanji pegados formando una palabra). Una barra de menú japonesa con etiquetas en inglés sigue
+  detectándose como japonés, sin importar cuánto texto latino la rodee.
+
+  El mismo arreglo cubre un caso hermano que nadie había reportado: una letra cirílica suelta (el
+  OCR leyendo `В` donde va una `B`) también mandaba la línea a traducirse como japonés.
+
+### Cambiado
+
+- La función que decide el idioma origen de **toda** traducción con auto-detectar —en todos los
+  motores— pasa a tener pruebas propias. Llevaba ocho rondas de ajustes acumulados y ninguna.
+
 ## [1.0.10] — el OCR ahora sí ve cuando cambia el texto
 
 Continuación de la v1.0.9, que arregló la compuerta equivocada. Esto es lo que faltaba.
