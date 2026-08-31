@@ -42,14 +42,27 @@ const translations = require('../../renderer/main/i18n.js');
 //     antialiasing, no texto nuevo.
 //   - MIN_FRACTION: medio punto porcentual. Cambiar la cola de un renglón
 //     —el caso que se perdía— mueve alrededor del 1%.
-const FRAME_CHANGE_TARGET_SAMPLES = 4000;
+const FRAME_CHANGE_TARGET_SAMPLES = 6000;
 const FRAME_CHANGE_LUMA_TOLERANCE = 12;
 const FRAME_CHANGE_MIN_FRACTION = 0.005;
+// v1.0.12: además del total, se mide POR ZONAS. Un renglón de texto que
+// cambia concentra el cambio en una o dos celdas; medido contra el recorte
+// entero, ese mismo cambio se diluye hasta desaparecer si el área de captura
+// es más grande que el texto. La grilla hace la detección independiente de
+// cuánto espacio vacío rodea al diálogo.
+const FRAME_CHANGE_GRID_COLS = 8;
+const FRAME_CHANGE_GRID_ROWS = 8;
+const FRAME_CHANGE_BLOCK_MIN_FRACTION = 0.03;
+const FRAME_CHANGE_BLOCK_MIN_SAMPLES = 20;
 // v1.0.10: válvula de escape. Si la grilla de muestreo quedara
 // sistemáticamente ciega a lo que cambia (o el juego dibuja el texto de una
 // forma que no previmos), esto garantiza que el OCR corra igual cada tantos
 // ciclos en vez de no correr nunca. A 3,5s por ciclo son unos 28 segundos.
 const FRAME_CHANGE_FORCE_AFTER = 8;
+// v1.0.12: techo para una captura de pantalla colgada — ver
+// _captureScreenRegionForAutoCapture(). Generoso a propósito: 8 segundos son
+// más de dos ciclos, así que sólo se activa ante algo genuinamente trabado.
+const CAPTURE_TIMEOUT_MS = 8000;
 
 // v3.13.8x (settings UX audit, Fase 4, second pass): Lyca reported the
 // game process picker felt slow to open — real cost, not perception: a
@@ -2410,6 +2423,16 @@ class IpcHandlers {
   async _captureScreenRegion() {
     const cropped = await this._captureScreenRegionImage();
     if (!cropped) return null;
+    // v1.0.12: la captura MANUAL (botón "Capturar ahora" y Ctrl+Shift+S)
+    // también deja su cuadro como referencia del bucle automático. Antes no
+    // lo hacía: después de forzar una captura de texto nuevo, el bucle seguía
+    // comparando contra el cuadro VIEJO, veía un cambio enorme y volvía a
+    // pasar el OCR sobre la misma línea que el usuario acababa de traducir a
+    // mano. No rompía nada —el dedup de texto lo frenaba después— pero era
+    // trabajo repetido y, sobre todo, ensuciaba el log justo cuando uno
+    // intenta entender qué está viendo el bucle.
+    this._lastCaptureBitmap = cropped.toBitmap();
+    this._unchangedFrameStreak = 0;
     return Buffer.from(cropped.toPNG());
   }
 
@@ -2524,11 +2547,29 @@ class IpcHandlers {
    * @returns {Promise<Buffer|null>}
    */
   async _captureScreenRegionForAutoCapture() {
-    const cropped = await this._captureScreenRegionImage();
+    // v1.0.12: con timeout. El bucle de ocr.js encadena su próximo tick DESPUÉS
+    // de que esta promesa resuelve; si desktopCapturer.getSources() se cuelga
+    // —una llamada al sistema operativo, fuera de nuestro control— el bucle
+    // muere para siempre y sin escribir una línea. No es lo que pasó en el log
+    // que motivó esta versión (ahí el bucle estaba vivo, descartando cuadros),
+    // pero es el mismo tipo de falla silenciosa que costó dos rondas
+    // encontrar, y taparlo son cinco líneas.
+    const cropped = await Promise.race([
+      this._captureScreenRegionImage(),
+      new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), CAPTURE_TIMEOUT_MS))
+    ]);
+    if (cropped === 'TIMEOUT') {
+      console.warn(`[OCR] La captura de pantalla no respondió en ${CAPTURE_TIMEOUT_MS}ms — se saltea este ciclo`);
+      return null;
+    }
     if (!cropped) return null;
 
     const bitmap = cropped.toBitmap();
-    if (this._lastCaptureBitmap && !this._bitmapHasSignificantChange(this._lastCaptureBitmap, bitmap)) {
+    const size = cropped.getSize();
+    const veredicto = this._lastCaptureBitmap
+      ? this._bitmapHasSignificantChange(this._lastCaptureBitmap, bitmap, size)
+      : { changed: true, fraccionTotal: 1, mejorZona: 1 };
+    if (!veredicto.changed) {
       // v1.0.10: válvula de escape. Descartar un cuadro es la decisión más
       // silenciosa de todo el pipeline —el bucle de ocr.js recibe null y
       // sigue de largo sin loguear— y por eso "el OCR no ve el cambio"
@@ -2536,14 +2577,19 @@ class IpcHandlers {
       // seguidos, dejamos pasar uno igual: el dedup de texto lo frenará si
       // de verdad no cambió nada, y si cambió, se traduce.
       this._unchangedFrameStreak = (this._unchangedFrameStreak || 0) + 1;
+      // v1.0.12: se registra CADA descarte, con los números medidos. En
+      // v1.0.10 esto era un resumen por racha para no inundar el archivo, y
+      // salió mal: en una ventana de 13 segundos donde el usuario juraba que
+      // el texto había cambiado, el log no tenía una sola línea y no se podía
+      // distinguir "el bucle descartó" de "el bucle murió". Son ~17 renglones
+      // por minuto: ruido barato al lado de otra ronda de pruebas a ciegas.
+      // Y los números son accionables — si el cambio real queda apenas por
+      // debajo del umbral, se ve y se ajusta con evidencia.
+      console.log(`[OCR] Cuadro descartado, sin cambios (total ${(veredicto.fraccionTotal * 100).toFixed(2)}% < ${(FRAME_CHANGE_MIN_FRACTION * 100).toFixed(2)}%, mejor zona ${(veredicto.mejorZona * 100).toFixed(2)}% < ${(FRAME_CHANGE_BLOCK_MIN_FRACTION * 100).toFixed(2)}%) — racha ${this._unchangedFrameStreak}`);
       if (this._unchangedFrameStreak < FRAME_CHANGE_FORCE_AFTER) {
         return null;
       }
       console.log(`[OCR] ${this._unchangedFrameStreak} cuadros seguidos sin cambios detectados — forzando una pasada de OCR igual`);
-    } else if (this._unchangedFrameStreak) {
-      // Un solo renglón por racha, no uno por ciclo: alcanza para saber que
-      // el bucle está vivo y descartando, sin inundar el archivo.
-      console.log(`[OCR] ${this._unchangedFrameStreak} cuadro(s) sin cambios antes de éste`);
     }
 
     this._unchangedFrameStreak = 0;
@@ -2586,16 +2632,22 @@ class IpcHandlers {
    *
    * @private
    */
-  _bitmapHasSignificantChange(oldBitmap, newBitmap) {
+  _bitmapHasSignificantChange(oldBitmap, newBitmap, size) {
     const oldLen = oldBitmap.length;
     const newLen = newBitmap.length;
-    if (Math.abs(oldLen - newLen) > oldLen * 0.05) return true;
+    if (Math.abs(oldLen - newLen) > oldLen * 0.05) return { changed: true, fraccionTotal: 1, mejorZona: 1 };
 
     const len = Math.min(oldLen, newLen);
     const totalPixels = Math.floor(len / 4);
-    if (totalPixels === 0) return true;
+    if (totalPixels === 0) return { changed: true, fraccionTotal: 1, mejorZona: 1 };
 
     const pixelStep = Math.max(1, Math.floor(totalPixels / FRAME_CHANGE_TARGET_SAMPLES));
+    const ancho = size && size.width > 0 ? size.width : 0;
+    const alto = size && size.height > 0 ? size.height : 0;
+    const usarZonas = ancho > 0 && alto > 0;
+    const zonas = FRAME_CHANGE_GRID_COLS * FRAME_CHANGE_GRID_ROWS;
+    const muestrasZona = usarZonas ? new Array(zonas).fill(0) : null;
+    const cambiosZona = usarZonas ? new Array(zonas).fill(0) : null;
 
     let sampled = 0;
     let changed = 0;
@@ -2603,12 +2655,40 @@ class IpcHandlers {
       const i = p * 4; // BGRA
       const lumaOld = (oldBitmap[i] * 114 + oldBitmap[i + 1] * 587 + oldBitmap[i + 2] * 299) / 1000;
       const lumaNew = (newBitmap[i] * 114 + newBitmap[i + 1] * 587 + newBitmap[i + 2] * 299) / 1000;
-      if (Math.abs(lumaOld - lumaNew) > FRAME_CHANGE_LUMA_TOLERANCE) changed++;
+      const distinto = Math.abs(lumaOld - lumaNew) > FRAME_CHANGE_LUMA_TOLERANCE;
       sampled++;
+      if (distinto) changed++;
+
+      if (usarZonas) {
+        const x = p % ancho;
+        const y = (p / ancho) | 0;
+        if (y < alto) {
+          const cx = Math.min(FRAME_CHANGE_GRID_COLS - 1, ((x * FRAME_CHANGE_GRID_COLS) / ancho) | 0);
+          const cy = Math.min(FRAME_CHANGE_GRID_ROWS - 1, ((y * FRAME_CHANGE_GRID_ROWS) / alto) | 0);
+          const z = cy * FRAME_CHANGE_GRID_COLS + cx;
+          muestrasZona[z]++;
+          if (distinto) cambiosZona[z]++;
+        }
+      }
     }
 
-    if (sampled === 0) return true;
-    return (changed / sampled) >= FRAME_CHANGE_MIN_FRACTION;
+    if (sampled === 0) return { changed: true, fraccionTotal: 1, mejorZona: 1 };
+
+    const fraccionTotal = changed / sampled;
+    let mejorZona = 0;
+    if (usarZonas) {
+      for (let z = 0; z < zonas; z++) {
+        if (muestrasZona[z] < FRAME_CHANGE_BLOCK_MIN_SAMPLES) continue;
+        const f = cambiosZona[z] / muestrasZona[z];
+        if (f > mejorZona) mejorZona = f;
+      }
+    }
+
+    return {
+      changed: fraccionTotal >= FRAME_CHANGE_MIN_FRACTION || mejorZona >= FRAME_CHANGE_BLOCK_MIN_FRACTION,
+      fraccionTotal,
+      mejorZona
+    };
   }
 
   /**

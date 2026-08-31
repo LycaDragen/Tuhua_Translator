@@ -25,7 +25,9 @@ const { check, CHECKS } = makeCheckRegistry();
 const W = 600;
 const H = 150;
 const detector = Object.create(IpcHandlers.prototype);
-const cambio = (a, b) => detector._bitmapHasSignificantChange(a, b);
+/** v1.0.12: devuelve {changed, fraccionTotal, mejorZona}; acá sólo interesa el veredicto. */
+const cambio = (a, b, size = { width: W, height: H }) => detector._bitmapHasSignificantChange(a, b, size).changed;
+const medir = (a, b, size = { width: W, height: H }) => detector._bitmapHasSignificantChange(a, b, size);
 
 /** Fondo del cuadro de diálogo: gris oscuro casi uniforme. */
 function fondo() {
@@ -128,9 +130,14 @@ check('el-ruido-de-compresion-no-es-cambio', () => {
   return { pass: cambio(a, b) === false, actual: null };
 }, 'Sin tolerancia de luminancia, cada cuadro sería "nuevo" y el OCR correría siempre, que es el error opuesto.');
 
-check('un-cursor-parpadeando-no-es-cambio', () => {
-  // Un rectangulito de 8x20 px que aparece y desaparece: 0,18% de la imagen,
-  // por debajo del medio punto que se exige.
+check('un-cursor-parpadeando-SI-dispara-y-esta-bien', () => {
+  // Un rectangulito de 8x20 px que aparece y desaparece: 0,18% de la imagen
+  // entera, pero ~10% de SU zona. Con la medición por zonas de v1.0.12 esto
+  // dispara, y es la consecuencia deliberada de la decisión: no hay umbral
+  // que distinga "cursor de 8px" de "renglón de texto nuevo" sin volver a
+  // perder líneas, y ya se sabe cuál de los dos errores es el caro. Un cuadro
+  // de más cuesta una pasada de OCR y muere en el dedup de texto con un
+  // "Similar text skipped"; uno de menos es una línea perdida en silencio.
   const a = escribirRenglon(fondo(), 60, 20, 560);
   const b = Buffer.from(a);
   for (let y = 60; y < 80; y++) {
@@ -139,8 +146,8 @@ check('un-cursor-parpadeando-no-es-cambio', () => {
       b[i] = 230; b[i + 1] = 230; b[i + 2] = 230;
     }
   }
-  return { pass: cambio(a, b) === false, actual: null };
-});
+  return { pass: cambio(a, b) === true, actual: null };
+}, 'Está escrito como check para que sea una decisión registrada y no una sorpresa: si alguien ve OCR corriendo con un cursor parpadeando, esto explica por qué.');
 
 // ─── Bordes ──────────────────────────────────────────────────────────────
 check('un-recorte-de-otro-tamano-es-cambio', () => {
@@ -150,7 +157,7 @@ check('un-recorte-de-otro-tamano-es-cambio', () => {
 }, 'El usuario movió o redimensionó el área de captura: no hay nada que comparar, hay que leer.');
 
 check('un-buffer-vacio-no-tira-y-decide-leer', () => {
-  const casos = [cambio(Buffer.alloc(0), Buffer.alloc(0)), cambio(Buffer.alloc(4), Buffer.alloc(4))];
+  const casos = [cambio(Buffer.alloc(0), Buffer.alloc(0), null), cambio(Buffer.alloc(4), Buffer.alloc(4), null)];
   return { pass: casos[0] === true && typeof casos[1] === 'boolean', actual: casos };
 }, 'Ante la duda, leer: perder una línea es peor que gastar una pasada de OCR.');
 
@@ -160,7 +167,52 @@ check('una-imagen-mas-chica-que-el-muestreo-igual-se-compara', () => {
   const chicoA = Buffer.alloc(30 * 10 * 4, 24);
   const chicoB = Buffer.from(chicoA);
   for (let p = 0; p < 40; p++) { const i = p * 4; chicoB[i] = 230; chicoB[i + 1] = 230; chicoB[i + 2] = 230; }
-  return { pass: cambio(chicoA, Buffer.from(chicoA)) === false && cambio(chicoA, chicoB) === true, actual: null };
+  const size = { width: 30, height: 10 };
+  return { pass: cambio(chicoA, Buffer.from(chicoA), size) === false && cambio(chicoA, chicoB, size) === true, actual: null };
+});
+
+// ─── v1.0.12: el caso que se seguía perdiendo ────────────────────────────
+const GW = 1200, GH = 600; // área de captura grande, típica de quien encuadra de más
+
+function fondoGrande() {
+  const buf = Buffer.alloc(GW * GH * 4);
+  for (let p = 0; p < GW * GH; p++) { const i = p * 4; buf[i] = 24; buf[i + 1] = 24; buf[i + 2] = 24; buf[i + 3] = 255; }
+  return buf;
+}
+function renglonGrande(buf, fila, desdeX, hastaX, semilla = 1) {
+  let rnd = semilla;
+  for (let y = fila; y < fila + 24 && y < GH; y++) {
+    for (let x = desdeX; x < hastaX && x < GW; x++) {
+      rnd = (rnd * 1103515245 + 12345) & 0x7fffffff;
+      if ((rnd / 0x7fffffff) < 0.2) { const i = (y * GW + x) * 4; buf[i] = 230; buf[i + 1] = 230; buf[i + 2] = 230; buf[i + 3] = 255; }
+    }
+  }
+  return buf;
+}
+
+check('el-caso-de-la-segunda-ronda-un-renglon-chico-en-un-area-grande', () => {
+  // Log del 2026-08-30 23:06: el bucle estaba VIVO (la captura de 23:07:04 no
+  // tiene hotkey delante) y aun así pasó 13 segundos decidiendo "no cambió"
+  // sobre texto que sí había cambiado. Con el área de captura bastante más
+  // grande que el renglón, el cambio se diluye en el total.
+  const size = { width: GW, height: GH };
+  const a = renglonGrande(fondoGrande(), 300, 100, 400, 7);
+  const b = renglonGrande(fondoGrande(), 300, 100, 400, 9999);
+  const m = medir(a, b, size);
+  return { pass: m.changed === true, actual: { total: `${(m.fraccionTotal * 100).toFixed(2)}%`, mejorZona: `${(m.mejorZona * 100).toFixed(2)}%` } };
+});
+
+check('y-medido-sobre-el-recorte-entero-ese-cambio-no-alcanzaba', () => {
+  // La mitad que justifica la grilla: el mismo par, mirando sólo el total.
+  const a = renglonGrande(fondoGrande(), 300, 100, 400, 7);
+  const b = renglonGrande(fondoGrande(), 300, 100, 400, 9999);
+  const m = medir(a, b, { width: GW, height: GH });
+  return { pass: m.fraccionTotal < 0.005, actual: `${(m.fraccionTotal * 100).toFixed(3)}% del total` };
+}, 'Si algún día esto empieza a fallar, quiere decir que el caso dejó de ser difícil — no que el arreglo sobre.');
+
+check('un-area-grande-sin-cambios-sigue-sin-disparar', () => {
+  const a = renglonGrande(fondoGrande(), 300, 100, 400, 7);
+  return { pass: cambio(a, Buffer.from(a), { width: GW, height: GH }) === false, actual: null };
 });
 
 run('OCR frame-change bench', CHECKS);

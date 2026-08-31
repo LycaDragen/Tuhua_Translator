@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.0.12] — el OCR mide el cambio por zonas, no sobre todo el recuadro
+
+La v1.0.10 mejoró mucho la detección de texto nuevo, pero seguía perdiendo casos. Éste es el
+motivo, encontrado en un log donde el bucle **estaba vivo** y aun así pasó trece segundos
+decidiendo "no cambió nada" sobre texto que sí había cambiado.
+
+### Arreglado
+
+- **Un renglón que cambia dentro de un área de captura grande podía pasar desapercibido.** El
+  cambio se medía sobre **todo el recorte**: si el área que elegiste es bastante más grande que el
+  renglón de diálogo, cambiar una frase entera mueve un porcentaje minúsculo del total y quedaba
+  por debajo del umbral. Ahora la imagen se divide en zonas y alcanza con que **una** cambie, así
+  que la detección ya no depende de cuánto espacio vacío rodea al texto.
+
+  Efecto secundario aceptado a propósito: un cursor parpadeando o una animación chica ahora
+  disparan una pasada de OCR. Es barato —el texto repetido se descarta después— y es preferible a
+  perder líneas en silencio.
+
+### Cambiado
+
+- **El log registra cada captura descartada, con los números medidos.** Antes se resumía por
+  rachas para no llenar el archivo, y eso dejó una ventana de trece segundos sin una sola línea en
+  la que era imposible saber si el OCR estaba descartando o directamente se había colgado. Son
+  unas pocas líneas por minuto y ahora se ve exactamente qué midió y contra qué umbral.
+
+- **La captura manual (Ctrl+Shift+S) actualiza la referencia del escaneo automático.** Antes, tras
+  forzar una captura, el bucle seguía comparando contra la imagen vieja y repetía el OCR sobre la
+  línea que acababas de traducir a mano.
+
+- **La captura de pantalla tiene un límite de 8 segundos.** Si el sistema operativo no responde,
+  se saltea ese ciclo y queda registrado, en vez de dejar el escaneo automático colgado para
+  siempre y en silencio.
+
 ## [1.0.11] — un kanji de basura ya no vuelve japonés a un texto en inglés
 
 ### Arreglado
