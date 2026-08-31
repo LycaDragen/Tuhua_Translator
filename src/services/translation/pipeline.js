@@ -98,12 +98,90 @@ function getLanguageName(code) {
 //   misidentified and produce wrong translations via DeepL. Users who
 //   need Chinese should set sourceLang='zh' explicitly. Also expanded
 //   the Japan-specific kanji/compound set with game/VN vocabulary.
+/**
+ * v1.0.11: ¿es texto latino con basura no latina encima?
+ *
+ * El caso que lo motiva, de un log real: PaddleOCR lee el ícono de viñeta de
+ * un juego en inglés como el kanji 其, y una sola letra CJK entre sesenta
+ * latinas alcanzaba para que la línea entera se declarara japonesa. Google
+ * traducía inglés COMO SI fuera japonés y devolvía frases que arrancaban con
+ * "Que…". El mismo log tiene el A/B con la misma oración:
+ *
+ *   "其 You perform poorly when you can' tell…"  → ja → "Que te desempeñas mal…"
+ *   "You perform poorly when you can' tell…"     → en → "Tu desempeño es deficiente…"
+ *
+ * El umbral es deliberadamente conservador —hacen falta 12+ letras latinas Y
+ * que lo no latino no llegue al 15%— porque el error caro es el opuesto:
+ * mandar japonés de verdad a traducir como inglés rompería el uso principal
+ * de la app. Una línea japonesa real no tiene doce letras latinas con un
+ * kanji suelto; "SAVE 設定" (8 latinas, 2 kanji) queda muy por encima del
+ * corte y se sigue detectando como japonés.
+ *
+ * Cubre también el hermano del mismo defecto: una cirílica suelta (OCR
+ * leyendo 'В' por 'B') hacía que hasNonLatinScript() diera true y la línea
+ * cayera igual en japonés por el camino de respaldo.
+ */
+function isLatinWithNonLatinNoise(counts) {
+  const nonLatin = counts.hiragana + counts.katakana + counts.kanji + counts.hangul + counts.cyrillic;
+  if (nonLatin === 0) return false;
+  // Condición ESTRUCTURAL, y es la que hace el trabajo: la basura del OCR son
+  // caracteres SUELTOS, uno acá y otro allá. El texto bilingüe de verdad
+  // viene en rachas —設定 son dos kanji pegados formando una palabra— porque
+  // así se escribe. Una racha de 2 o más ya no es ruido.
+  //
+  // Esto reemplaza a un umbral de proporción a secas, que probando resultó
+  // ser un filo de cuchillo: "AUTO SKIP LOG 設定" (barra de UI de un juego
+  // japonés) daba 0,154 contra un corte de 0,15 — una letra más y se
+  // detectaba como inglés. La proporción quedó igual, pero de respaldo.
+  if (counts.maxNonLatinRun > 1) return false;
+  return nonLatin / (nonLatin + counts.latin) <= 0.15;
+}
+
+/** v1.0.11: un solo recorrido, compartido por las dos funciones de abajo. */
+function scriptCounts(text) {
+  const c = { hiragana: 0, katakana: 0, kanji: 0, cyrillic: 0, hangul: 0, latin: 0, jpPunctuation: 0, maxNonLatinRun: 0 };
+  let run = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0);
+    const esNoLatino = (code >= 0x3040 && code <= 0x30FF) ||
+                       (code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF) ||
+                       (code >= 0x0400 && code <= 0x052F) ||
+                       (code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF);
+    // Cualquier cosa en el medio corta la racha, ESPACIOS INCLUIDOS. Probé
+    // lo contrario —tolerar el espacio, por si el OCR parte "設定" en "設 定"—
+    // y rompía un caso real del log: "自 其 You adjust the way…", que son dos
+    // íconos mal leídos y separados, contaba como palabra de dos caracteres.
+    // Entre un caso real y uno que inventé yo, gana el real.
+    if (esNoLatino) {
+      run++;
+      if (run > c.maxNonLatinRun) c.maxNonLatinRun = run;
+    } else {
+      run = 0;
+    }
+    if (code >= 0x3040 && code <= 0x309F) c.hiragana++;
+    else if (code >= 0x30A0 && code <= 0x30FF) c.katakana++;
+    else if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF)) c.kanji++;
+    else if ((code >= 0x0400 && code <= 0x04FF) || (code >= 0x0500 && code <= 0x052F)) c.cyrillic++;
+    else if ((code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF)) c.hangul++;
+    else if ((code >= 0x41 && code <= 0x5A) || (code >= 0x61 && code <= 0x7A)) c.latin++;
+    // v3.13.04: 。(U+3002) 、(U+3001) 「」(U+300C-U+300F) ・(U+30FB) 〜(U+301C)
+    else if (code === 0x3002 || code === 0x3001 ||
+             (code >= 0x300C && code <= 0x300F) ||
+             code === 0x30FB || code === 0x301C) c.jpPunctuation++;
+  }
+  return c;
+}
+
 function detectLanguageSimple(text) {
   if (!text || text.length === 0) return null;
 
-  // Count character types
-  let hiragana = 0, katakana = 0, kanji = 0, cyrillic = 0, hangul = 0;
-  let jpPunctuation = 0; // v3.13.04: Japanese-specific punctuation count
+  const counts = scriptCounts(text);
+  // v1.0.11: texto latino con un caracter no latino de ruido encima no es
+  // CJK — ver isLatinWithNonLatinNoise(). Va ANTES de todo lo demás porque
+  // la primera regla ("tiene kana → japonés, definitivo") también se comía
+  // el caso: en el log real hay una línea inglesa con una イ suelta.
+  if (isLatinWithNonLatinNoise(counts)) return null;
+  const { hiragana, katakana, kanji, cyrillic, hangul, jpPunctuation } = counts;
 
   // v3.13.06: Expanded set of kanji/compounds that are much more common in
   // Japanese than Chinese. These are shinjitai (new character forms),
@@ -144,25 +222,6 @@ function detectLanguageSimple(text) {
     '断', '了', '申', '届', '替', '換', '据', '据',
     '演', '奏', '詠', '唱', '舞', '闘', '襲', '撃'
   ]);
-
-  for (const ch of text) {
-    const code = ch.codePointAt(0);
-    // Hiragana: 3040-309F
-    if (code >= 0x3040 && code <= 0x309F) hiragana++;
-    // Katakana: 30A0-30FF
-    else if (code >= 0x30A0 && code <= 0x30FF) katakana++;
-    // CJK Unified Ideographs (common to JA/ZH/KO)
-    else if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF)) kanji++;
-    // Cyrillic
-    else if ((code >= 0x0400 && code <= 0x04FF) || (code >= 0x0500 && code <= 0x052F)) cyrillic++;
-    // Hangul
-    else if ((code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF)) hangul++;
-    // v3.13.04: Japanese-specific punctuation
-    // 。(U+3002) 、(U+3001) 「」(U+300C-U+300F) ・(U+30FB) 〜(U+301C)
-    else if (code === 0x3002 || code === 0x3001 ||
-             (code >= 0x300C && code <= 0x300F) ||
-             code === 0x30FB || code === 0x301C) jpPunctuation++;
-  }
 
   // Japanese: has hiragana or katakana (definitive)
   if (hiragana > 0 || katakana > 0) return 'ja';
@@ -212,15 +271,14 @@ function detectLanguageSimple(text) {
 // appear anywhere in the text, it's pure Latin/ASCII and defaulting to 'ja'
 // (the historical fallback for VN/game text) is actively wrong.
 function hasNonLatinScript(text) {
-  for (const ch of text) {
-    const code = ch.codePointAt(0);
-    if (code >= 0x3040 && code <= 0x309F) return true; // Hiragana
-    if (code >= 0x30A0 && code <= 0x30FF) return true; // Katakana
-    if ((code >= 0x4E00 && code <= 0x9FFF) || (code >= 0x3400 && code <= 0x4DBF)) return true; // CJK
-    if ((code >= 0x0400 && code <= 0x04FF) || (code >= 0x0500 && code <= 0x052F)) return true; // Cyrillic
-    if ((code >= 0xAC00 && code <= 0xD7AF) || (code >= 0x1100 && code <= 0x11FF)) return true; // Hangul
-  }
-  return false;
+  if (!text) return false;
+  const counts = scriptCounts(text);
+  // v1.0.11: la MISMA guardia que detectLanguageSimple, y no es opcional.
+  // Esta función es la red del pipeline: cuando la detección dice "no sé",
+  // un true acá manda la línea a japonés igual. Sin esto, devolver null allá
+  // no cambiaría absolutamente nada para el caso del kanji de ruido.
+  if (isLatinWithNonLatinNoise(counts)) return false;
+  return (counts.hiragana + counts.katakana + counts.kanji + counts.cyrillic + counts.hangul) > 0;
 }
 
 // Fallback chain: if primary engine fails, try these in order
@@ -1323,4 +1381,11 @@ class TranslationPipeline extends EventEmitter {
   }
 }
 
+// v1.0.11: se cuelgan de la exportación (que sigue siendo la clase, así que
+// `new TranslationPipeline()` no cambia) para que scripts/test-language-detect.js
+// pueda ejercitarlas. Son privadas del módulo por diseño — nadie más las usa —
+// pero deciden el idioma origen de TODA traducción con auto-detect y hasta
+// v1.0.11 no tenían un solo test.
 module.exports = TranslationPipeline;
+module.exports.detectLanguageSimple = detectLanguageSimple;
+module.exports.hasNonLatinScript = hasNonLatinScript;

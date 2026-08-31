@@ -32,6 +32,38 @@ const promptPresets = require('../services/translation/prompt-presets');
 // those dialogs are drawn by Electron itself, not the DOM.
 const translations = require('../../renderer/main/i18n.js');
 
+// v1.0.10: detección de cambio entre cuadros del OCR automático. Ver
+// _bitmapHasSignificantChange() para el porqué de cada número.
+//   - SAMPLES: píxeles muestreados (no bytes). ~4.000 sobre un recorte
+//     típico es un píxel cada ~22, o sea unas 27 muestras por renglón de
+//     píxeles — suficiente para que ninguna línea de texto quede sin
+//     representación, y trabajo despreciable cada 3,5 segundos.
+//   - LUMA_TOLERANCE: por debajo de esto es ruido de compresión o
+//     antialiasing, no texto nuevo.
+//   - MIN_FRACTION: medio punto porcentual. Cambiar la cola de un renglón
+//     —el caso que se perdía— mueve alrededor del 1%.
+const FRAME_CHANGE_TARGET_SAMPLES = 6000;
+const FRAME_CHANGE_LUMA_TOLERANCE = 12;
+const FRAME_CHANGE_MIN_FRACTION = 0.005;
+// v1.0.12: además del total, se mide POR ZONAS. Un renglón de texto que
+// cambia concentra el cambio en una o dos celdas; medido contra el recorte
+// entero, ese mismo cambio se diluye hasta desaparecer si el área de captura
+// es más grande que el texto. La grilla hace la detección independiente de
+// cuánto espacio vacío rodea al diálogo.
+const FRAME_CHANGE_GRID_COLS = 8;
+const FRAME_CHANGE_GRID_ROWS = 8;
+const FRAME_CHANGE_BLOCK_MIN_FRACTION = 0.03;
+const FRAME_CHANGE_BLOCK_MIN_SAMPLES = 20;
+// v1.0.10: válvula de escape. Si la grilla de muestreo quedara
+// sistemáticamente ciega a lo que cambia (o el juego dibuja el texto de una
+// forma que no previmos), esto garantiza que el OCR corra igual cada tantos
+// ciclos en vez de no correr nunca. A 3,5s por ciclo son unos 28 segundos.
+const FRAME_CHANGE_FORCE_AFTER = 8;
+// v1.0.12: techo para una captura de pantalla colgada — ver
+// _captureScreenRegionForAutoCapture(). Generoso a propósito: 8 segundos son
+// más de dos ciclos, así que sólo se activa ante algo genuinamente trabado.
+const CAPTURE_TIMEOUT_MS = 8000;
+
 // v3.13.8x (settings UX audit, Fase 4, second pass): Lyca reported the
 // game process picker felt slow to open — real cost, not perception: a
 // PowerShell cold-start (~1-2s) plus a per-process app.getFileIcon() disk
@@ -131,6 +163,8 @@ class IpcHandlers {
     // OCR dedup: persistent hash that doesn't expire — same text from OCR
     // should NEVER be re-translated until the game screen changes
     this._lastOcrTextHash = '';
+    // v1.0.10: cuántos cuadros seguidos descartó la detección de cambios.
+    this._unchangedFrameStreak = 0;
     // OCR state
     this._ocrActive = false;
     this._ocrScanPaused = false; // v3.9.6: scan paused from capture area overlay
@@ -2389,6 +2423,16 @@ class IpcHandlers {
   async _captureScreenRegion() {
     const cropped = await this._captureScreenRegionImage();
     if (!cropped) return null;
+    // v1.0.12: la captura MANUAL (botón "Capturar ahora" y Ctrl+Shift+S)
+    // también deja su cuadro como referencia del bucle automático. Antes no
+    // lo hacía: después de forzar una captura de texto nuevo, el bucle seguía
+    // comparando contra el cuadro VIEJO, veía un cambio enorme y volvía a
+    // pasar el OCR sobre la misma línea que el usuario acababa de traducir a
+    // mano. No rompía nada —el dedup de texto lo frenaba después— pero era
+    // trabajo repetido y, sobre todo, ensuciaba el log justo cuando uno
+    // intenta entender qué está viendo el bucle.
+    this._lastCaptureBitmap = cropped.toBitmap();
+    this._unchangedFrameStreak = 0;
     return Buffer.from(cropped.toPNG());
   }
 
@@ -2503,13 +2547,52 @@ class IpcHandlers {
    * @returns {Promise<Buffer|null>}
    */
   async _captureScreenRegionForAutoCapture() {
-    const cropped = await this._captureScreenRegionImage();
+    // v1.0.12: con timeout. El bucle de ocr.js encadena su próximo tick DESPUÉS
+    // de que esta promesa resuelve; si desktopCapturer.getSources() se cuelga
+    // —una llamada al sistema operativo, fuera de nuestro control— el bucle
+    // muere para siempre y sin escribir una línea. No es lo que pasó en el log
+    // que motivó esta versión (ahí el bucle estaba vivo, descartando cuadros),
+    // pero es el mismo tipo de falla silenciosa que costó dos rondas
+    // encontrar, y taparlo son cinco líneas.
+    const cropped = await Promise.race([
+      this._captureScreenRegionImage(),
+      new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), CAPTURE_TIMEOUT_MS))
+    ]);
+    if (cropped === 'TIMEOUT') {
+      console.warn(`[OCR] La captura de pantalla no respondió en ${CAPTURE_TIMEOUT_MS}ms — se saltea este ciclo`);
+      return null;
+    }
     if (!cropped) return null;
 
     const bitmap = cropped.toBitmap();
-    if (this._lastCaptureBitmap && !this._bitmapHasSignificantChange(this._lastCaptureBitmap, bitmap)) {
-      return null;
+    const size = cropped.getSize();
+    const veredicto = this._lastCaptureBitmap
+      ? this._bitmapHasSignificantChange(this._lastCaptureBitmap, bitmap, size)
+      : { changed: true, fraccionTotal: 1, mejorZona: 1 };
+    if (!veredicto.changed) {
+      // v1.0.10: válvula de escape. Descartar un cuadro es la decisión más
+      // silenciosa de todo el pipeline —el bucle de ocr.js recibe null y
+      // sigue de largo sin loguear— y por eso "el OCR no ve el cambio"
+      // tardó tres rondas en encontrarse. Si se descartan demasiados
+      // seguidos, dejamos pasar uno igual: el dedup de texto lo frenará si
+      // de verdad no cambió nada, y si cambió, se traduce.
+      this._unchangedFrameStreak = (this._unchangedFrameStreak || 0) + 1;
+      // v1.0.12: se registra CADA descarte, con los números medidos. En
+      // v1.0.10 esto era un resumen por racha para no inundar el archivo, y
+      // salió mal: en una ventana de 13 segundos donde el usuario juraba que
+      // el texto había cambiado, el log no tenía una sola línea y no se podía
+      // distinguir "el bucle descartó" de "el bucle murió". Son ~17 renglones
+      // por minuto: ruido barato al lado de otra ronda de pruebas a ciegas.
+      // Y los números son accionables — si el cambio real queda apenas por
+      // debajo del umbral, se ve y se ajusta con evidencia.
+      console.log(`[OCR] Cuadro descartado, sin cambios (total ${(veredicto.fraccionTotal * 100).toFixed(2)}% < ${(FRAME_CHANGE_MIN_FRACTION * 100).toFixed(2)}%, mejor zona ${(veredicto.mejorZona * 100).toFixed(2)}% < ${(FRAME_CHANGE_BLOCK_MIN_FRACTION * 100).toFixed(2)}%) — racha ${this._unchangedFrameStreak}`);
+      if (this._unchangedFrameStreak < FRAME_CHANGE_FORCE_AFTER) {
+        return null;
+      }
+      console.log(`[OCR] ${this._unchangedFrameStreak} cuadros seguidos sin cambios detectados — forzando una pasada de OCR igual`);
     }
+
+    this._unchangedFrameStreak = 0;
     this._lastCaptureBitmap = bitmap;
     return Buffer.from(cropped.toPNG());
   }
@@ -2519,23 +2602,93 @@ class IpcHandlers {
    * _hasSignificantChange() used to do, just fed real pixel bytes (a
    * NativeImage bitmap — raw BGRA, no compression) instead of a PNG
    * buffer, so the offsets it samples actually correspond to pixel data.
+   *
+   * v1.0.10: REESCRITO. Ésta era la causa real de "el OCR a veces no
+   * detecta el cambio de texto" — el reporte que hizo un usuario y que en
+   * v1.0.9 arreglé una compuerta más abajo, sin efecto (en su sesión entera
+   * de prueba, la lógica de v1.0.9 no llegó a ejecutarse ni una vez).
+   *
+   * Lo que había: 200 BYTES sueltos, a paso fijo, exigiendo que 10 de ellos
+   * difirieran. En un área de captura típica eso es mirar 200 píxeles de
+   * ~90.000 —el 0,2% de la imagen, y siempre los mismos— para decidir si
+   * cambió el texto. Como el texto son trazos finos sobre fondo casi
+   * uniforme, la cantidad esperada de muestras alteradas caía JUSTO en el
+   * umbral: cara o cruz. En el log del usuario hay 22 segundos (≈6 ciclos)
+   * de silencio absoluto mientras la frase en pantalla ya había cambiado,
+   * hasta que la forzó con Ctrl+Shift+S — que va por otro camino y ni
+   * consulta esto.
+   *
+   * Lo que hay ahora: ~4.000 PÍXELES (no bytes) repartidos por todo el
+   * recorte, comparando luminancia con tolerancia para no confundir el
+   * ruido de compresión y el antialiasing con texto nuevo, y disparando con
+   * medio punto porcentual de píxeles cambiados.
+   *
+   * El umbral puede ser así de bajo por una razón concreta: **la segunda
+   * compuerta ya protege contra pasarse de sensible**. Un cuadro que entra
+   * de más cuesta una pasada de OCR y muere en el dedup de texto de ocr.js
+   * con un "Similar text skipped" — no cuesta una traducción ni una llamada
+   * a la API. Entre gastar OCR de vez en cuando y perder líneas en
+   * silencio, el error barato es el primero.
+   *
    * @private
    */
-  _bitmapHasSignificantChange(oldBitmap, newBitmap) {
+  _bitmapHasSignificantChange(oldBitmap, newBitmap, size) {
     const oldLen = oldBitmap.length;
     const newLen = newBitmap.length;
-    if (Math.abs(oldLen - newLen) > oldLen * 0.05) return true;
+    if (Math.abs(oldLen - newLen) > oldLen * 0.05) return { changed: true, fraccionTotal: 1, mejorZona: 1 };
 
-    const sampleCount = 200;
-    let changedPixels = 0;
-    const step = Math.max(1, Math.floor(Math.min(oldLen, newLen) / sampleCount));
+    const len = Math.min(oldLen, newLen);
+    const totalPixels = Math.floor(len / 4);
+    if (totalPixels === 0) return { changed: true, fraccionTotal: 1, mejorZona: 1 };
 
-    for (let i = 0; i < Math.min(oldLen, newLen); i += step) {
-      if (oldBitmap[i] !== newBitmap[i]) changedPixels++;
+    const pixelStep = Math.max(1, Math.floor(totalPixels / FRAME_CHANGE_TARGET_SAMPLES));
+    const ancho = size && size.width > 0 ? size.width : 0;
+    const alto = size && size.height > 0 ? size.height : 0;
+    const usarZonas = ancho > 0 && alto > 0;
+    const zonas = FRAME_CHANGE_GRID_COLS * FRAME_CHANGE_GRID_ROWS;
+    const muestrasZona = usarZonas ? new Array(zonas).fill(0) : null;
+    const cambiosZona = usarZonas ? new Array(zonas).fill(0) : null;
+
+    let sampled = 0;
+    let changed = 0;
+    for (let p = 0; p < totalPixels; p += pixelStep) {
+      const i = p * 4; // BGRA
+      const lumaOld = (oldBitmap[i] * 114 + oldBitmap[i + 1] * 587 + oldBitmap[i + 2] * 299) / 1000;
+      const lumaNew = (newBitmap[i] * 114 + newBitmap[i + 1] * 587 + newBitmap[i + 2] * 299) / 1000;
+      const distinto = Math.abs(lumaOld - lumaNew) > FRAME_CHANGE_LUMA_TOLERANCE;
+      sampled++;
+      if (distinto) changed++;
+
+      if (usarZonas) {
+        const x = p % ancho;
+        const y = (p / ancho) | 0;
+        if (y < alto) {
+          const cx = Math.min(FRAME_CHANGE_GRID_COLS - 1, ((x * FRAME_CHANGE_GRID_COLS) / ancho) | 0);
+          const cy = Math.min(FRAME_CHANGE_GRID_ROWS - 1, ((y * FRAME_CHANGE_GRID_ROWS) / alto) | 0);
+          const z = cy * FRAME_CHANGE_GRID_COLS + cx;
+          muestrasZona[z]++;
+          if (distinto) cambiosZona[z]++;
+        }
+      }
     }
 
-    const changePercent = (changedPixels / sampleCount) * 100;
-    return changePercent >= 5; // same 5% default ocr.js's _changeThreshold used
+    if (sampled === 0) return { changed: true, fraccionTotal: 1, mejorZona: 1 };
+
+    const fraccionTotal = changed / sampled;
+    let mejorZona = 0;
+    if (usarZonas) {
+      for (let z = 0; z < zonas; z++) {
+        if (muestrasZona[z] < FRAME_CHANGE_BLOCK_MIN_SAMPLES) continue;
+        const f = cambiosZona[z] / muestrasZona[z];
+        if (f > mejorZona) mejorZona = f;
+      }
+    }
+
+    return {
+      changed: fraccionTotal >= FRAME_CHANGE_MIN_FRACTION || mejorZona >= FRAME_CHANGE_BLOCK_MIN_FRACTION,
+      fraccionTotal,
+      mejorZona
+    };
   }
 
   /**
@@ -2750,6 +2903,7 @@ class IpcHandlers {
     // plain _captureScreenRegion() — see its own comment for why (skips
     // the PNG encode entirely on unchanged frames, compares real pixels).
     this._lastCaptureBitmap = null;
+    this._unchangedFrameStreak = 0;
     this.ocrService.startAutoCapture(async () => {
       return await this._captureScreenRegionForAutoCapture();
     }, intervalMs);

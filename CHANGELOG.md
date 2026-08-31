@@ -1,5 +1,106 @@
 # Changelog
 
+## [1.0.12] — el OCR mide el cambio por zonas, no sobre todo el recuadro
+
+La v1.0.10 mejoró mucho la detección de texto nuevo, pero seguía perdiendo casos. Éste es el
+motivo, encontrado en un log donde el bucle **estaba vivo** y aun así pasó trece segundos
+decidiendo "no cambió nada" sobre texto que sí había cambiado.
+
+### Arreglado
+
+- **Un renglón que cambia dentro de un área de captura grande podía pasar desapercibido.** El
+  cambio se medía sobre **todo el recorte**: si el área que elegiste es bastante más grande que el
+  renglón de diálogo, cambiar una frase entera mueve un porcentaje minúsculo del total y quedaba
+  por debajo del umbral. Ahora la imagen se divide en zonas y alcanza con que **una** cambie, así
+  que la detección ya no depende de cuánto espacio vacío rodea al texto.
+
+  Efecto secundario aceptado a propósito: un cursor parpadeando o una animación chica ahora
+  disparan una pasada de OCR. Es barato —el texto repetido se descarta después— y es preferible a
+  perder líneas en silencio.
+
+### Cambiado
+
+- **El log registra cada captura descartada, con los números medidos.** Antes se resumía por
+  rachas para no llenar el archivo, y eso dejó una ventana de trece segundos sin una sola línea en
+  la que era imposible saber si el OCR estaba descartando o directamente se había colgado. Son
+  unas pocas líneas por minuto y ahora se ve exactamente qué midió y contra qué umbral.
+
+- **La captura manual (Ctrl+Shift+S) actualiza la referencia del escaneo automático.** Antes, tras
+  forzar una captura, el bucle seguía comparando contra la imagen vieja y repetía el OCR sobre la
+  línea que acababas de traducir a mano.
+
+- **La captura de pantalla tiene un límite de 8 segundos.** Si el sistema operativo no responde,
+  se saltea ese ciclo y queda registrado, en vez de dejar el escaneo automático colgado para
+  siempre y en silencio.
+
+## [1.0.11] — un kanji de basura ya no vuelve japonés a un texto en inglés
+
+### Arreglado
+
+- **Con OCR, casi todas las traducciones de un juego en inglés empezaban con "Que".** La causa no
+  era el traductor: PaddleOCR leía el ícono de viñeta del juego como el kanji `其`, y **un solo
+  caracter japonés entre sesenta letras latinas** alcanzaba para que Tuhua declarara la línea
+  entera japonesa. Google traducía inglés *como si fuera japonés* y devolvía esas frases raras. En
+  el log del usuario está el A/B con la misma oración: con el `其` daba *"Que te desempeñas mal
+  cuando…"*, y doce minutos después, sin él, *"Tu desempeño es deficiente cuando…"*.
+
+  Ahora la detección distingue el ruido del texto real por cómo aparece: la basura del OCR son
+  caracteres **sueltos**, mientras que el texto bilingüe de verdad viene en rachas (`設定` son dos
+  kanji pegados formando una palabra). Una barra de menú japonesa con etiquetas en inglés sigue
+  detectándose como japonés, sin importar cuánto texto latino la rodee.
+
+  El mismo arreglo cubre un caso hermano que nadie había reportado: una letra cirílica suelta (el
+  OCR leyendo `В` donde va una `B`) también mandaba la línea a traducirse como japonés.
+
+### Cambiado
+
+- La función que decide el idioma origen de **toda** traducción con auto-detectar —en todos los
+  motores— pasa a tener pruebas propias. Llevaba ocho rondas de ajustes acumulados y ninguna.
+
+## [1.0.10] — el OCR ahora sí ve cuando cambia el texto
+
+Continuación de la v1.0.9, que arregló la compuerta equivocada. Esto es lo que faltaba.
+
+### Arreglado
+
+- **La detección de cambios entre capturas se perdía la mitad de los cambios de texto.** Antes de
+  correr el OCR, Tuhua compara la captura nueva con la anterior para no reconocer mil veces lo
+  mismo. Esa comparación miraba **200 bytes sueltos** repartidos por la imagen y exigía que 10
+  difirieran: en un área de captura normal eso es mirar 200 píxeles de unos 90.000 —el 0,2% de la
+  imagen, y siempre los mismos—. Como el texto son trazos finos sobre un fondo casi uniforme, la
+  cantidad esperada de muestras alteradas caía justo en el umbral: **cara o cruz**. De ahí el "a
+  veces escanea solo, otras hay que forzarlo con Ctrl+Shift+S" (el atajo va por otro camino y ni
+  consulta esa comparación). Ahora se muestrean unos 4.000 píxeles comparando luminancia, con
+  tolerancia para no confundir el antialiasing con texto nuevo.
+
+- **Descartar una captura no dejaba ningún rastro.** Era la decisión más silenciosa de todo el
+  proceso: el bucle recibía "no cambió nada" y seguía de largo sin escribir una línea. Por eso
+  este problema tardó tres rondas en encontrarse. Ahora el log dice cuántas capturas seguidas se
+  descartaron.
+
+### Nuevo
+
+- **Válvula de escape en el OCR automático.** Si se descartan ocho capturas seguidas (unos 28
+  segundos), la novena corre igual. Si alguna vez la comparación vuelve a quedar ciega a un juego
+  que dibuja el texto de una forma que no previmos, el peor caso pasa a ser "tarda hasta medio
+  minuto" en vez de "no lo detecta nunca".
+
+## [1.0.9] — el OCR descartaba la línea que terminaba de aparecer
+
+### Arreglado
+
+- **Con OCR, el texto que se revela de a poco no se traducía una vez completo.** Reportado como
+  "a veces no detecta el cambio de texto", con Tesseract y con PaddleOCR. No es que no lo leyera:
+  lo leía y lo descartaba por parecido al anterior. El filtro que evita retraducir la misma línea
+  medía, entre otras cosas, cuánto del texto más corto coincide con el principio del más largo —
+  y esa medida es ciega a la dirección: daba 100% tanto si el OCR había vuelto a leer la misma
+  línea peor y más corta (descartarla está bien) como si la línea había **terminado** de aparecer
+  y ahora traía más texto. En un log real la misma frase se descartó tres veces seguidas hasta
+  que el usuario forzó la captura a mano. Ahora, si el texto nuevo conserva entero el anterior y
+  creció al menos un 20%, se traduce. Por debajo de eso sigue tratándose como la misma línea, que
+  es para lo que el filtro existía: una relectura con un caracter de ruido pegado al final no
+  dispara una traducción nueva.
+
 ## [1.0.8] — dos cosas que salieron de probar la 1.0.7 en Windows
 
 ### Arreglado
